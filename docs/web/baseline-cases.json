@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "expected_exit_codes": [0],
+    "repetitions": 2,
+    "timeout_seconds": 300
+  },
+  "profiles": {
+    "filament": "{repo}/resources/profiles/Anycubic/filament/Anycubic Generic PLA.json",
+    "machine": "{repo}/resources/profiles/Anycubic/machine/Anycubic Kobra 0.4 nozzle.json",
+    "process": "{repo}/resources/profiles/Anycubic/process/0.20mm Standard @Anycubic Kobra.json"
+  },
+  "cases": [
+    {
+      "name": "cube-default",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{repo}/tests/data/20mm_cube.obj"
+      ],
+      "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "bridge",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{repo}/tests/data/bridge.obj"
+      ],
+      "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "concave-hole",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{repo}/tests/data/cube_with_concave_hole.obj"
+      ],
+      "expected_outputs": ["*.gcode", "result.json"]
+    }
+  ]
+}

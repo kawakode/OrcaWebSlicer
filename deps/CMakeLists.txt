@@ -424,8 +424,19 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+# Docker and other containerized builds may place CMAKE_BINARY_DIR on a named
+# volume. ExternalProject patch steps then run across a filesystem boundary and
+# cannot safely treat their extracted source directories as part of this Git
+# worktree. In that layout patches should apply relative to the extracted source
+# directory, without the worktree-relative --directory prefix.
+option(ORCA_DEPS_SEPARATE_BUILD_FILESYSTEM
+    "Treat ExternalProject sources as outside the parent Git worktree"
+    OFF)
+
 # Will output "true" and have a 0 return code if within a git repo
-if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
+if((REV_PARSE_RESULT EQUAL 0)
+    AND (REV_PARSE_OUTPUT STREQUAL "true")
+    AND NOT ORCA_DEPS_SEPARATE_BUILD_FILESYSTEM)
     set(IN_GIT_REPO TRUE)
     # Find relative path from root to source used for adjusting patch command
     file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})

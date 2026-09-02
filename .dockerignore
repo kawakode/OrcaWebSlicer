@@ -28,3 +28,4 @@ scripts/Dockerfile
 scripts/DockerBuild.sh
 scripts/DockerRun.sh
 scripts/.dockerignore
+/artifacts/

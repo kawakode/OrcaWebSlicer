@@ -1,0 +1,66 @@
+name: orca-web
+
+x-build-environment: &build-environment
+  build:
+    context: ../..
+    dockerfile: docker/web/Dockerfile
+    args:
+      BASE_IMAGE: ${ORCA_WEB_BASE_IMAGE:-ubuntu:24.04}
+      CMAKE_VERSION: ${ORCA_WEB_CMAKE_VERSION:-4.3.0}
+  working_dir: /workspace
+  environment:
+    CMAKE_BUILD_PARALLEL_LEVEL: ${ORCA_WEB_BUILD_JOBS:-2}
+    CMAKE_CCACHE: ccache
+    CCACHE_DIR: /cache/ccache
+    CI: "true"
+    DEPS_EXTRA_BUILD_ARGS: -DORCA_DEPS_SEPARATE_BUILD_FILESYSTEM=ON
+    GITHUB_ACTIONS: "true"
+    GITHUB_WORKSPACE: /workspace
+    ORCA_WEB_GIT_COMMIT: ${ORCA_WEB_GIT_COMMIT:-}
+    ORCA_WEB_GIT_DIRTY: ${ORCA_WEB_GIT_DIRTY:-}
+    RUNNER_OS: Linux
+    RUNNER_TEMP: /tmp
+  volumes:
+    - ../..:/workspace
+    - orca-deps-build:/workspace/deps/build
+    - orca-app-build:/workspace/build
+    - orca-ccache:/cache/ccache
+
+services:
+  build:
+    <<: *build-environment
+    command:
+      - bash
+      - -lc
+      - >-
+        sed 's/\r$$//' docker/web/run-build-linux.sh > /tmp/run-build-linux
+        && bash /tmp/run-build-linux ./build_linux.sh
+        -j "$${CMAKE_BUILD_PARALLEL_LEVEL}"
+        -dstrlL
+
+  tests:
+    <<: *build-environment
+    command:
+      - bash
+      - -lc
+      - >-
+        ctest
+        --test-dir build/tests
+        -C Release
+        --output-on-failure
+
+  baseline:
+    <<: *build-environment
+    command:
+      - bash
+      - -lc
+      - >-
+        python3 scripts/web_baseline.py
+        --manifest docs/web/baseline-cases.json
+        --slicer build/package/bin/orca-slicer
+        --output build/web-baseline
+
+volumes:
+  orca-deps-build:
+  orca-app-build:
+  orca-ccache:
