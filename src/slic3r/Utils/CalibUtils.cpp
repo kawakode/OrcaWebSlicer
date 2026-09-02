@@ -14,12 +14,12 @@
 #include "slic3r/GUI/Jobs/PlaterWorker.hpp"
 #include "../GUI/MsgDialog.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MinimumFlushVolume.hpp"
 
 #include "../GUI/DeviceCore/DevConfig.h"
 #include "../GUI/DeviceCore/DevExtruderSystem.h"
 #include "../GUI/DeviceCore/DevManager.h"
 #include "../GUI/DeviceCore/DevStorage.h"
-#include "libslic3r/FlushVolCalc.hpp"
 #include "../GUI/Plater.hpp"
 
 namespace Slic3r {

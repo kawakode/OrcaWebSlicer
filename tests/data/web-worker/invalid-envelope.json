@@ -1,0 +1,5 @@
+{
+  "schema_version": 2,
+  "job_id": "../unsafe-path",
+  "operation": "render"
+}

@@ -71,6 +71,7 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MinimumFlushVolume.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -3428,7 +3429,7 @@ int CLI::run(int argc, char **argv)
             //computing
             ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support", true);
 
-            const std::vector<int> &min_flush_volumes = Slic3r::GUI::get_min_flush_volumes(m_print_config, 0);
+            const std::vector<int> &min_flush_volumes = Slic3r::get_min_flush_volumes(m_print_config, 0);
 
             if (filament_is_support->size() != project_filament_count)
             {

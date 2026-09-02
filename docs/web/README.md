@@ -21,8 +21,8 @@ prerequisites pass.
 | --- | --- | --- | --- |
 | G0 | Scope and architecture | MVP, non-goals, limits, licensing, and security assumptions are documented | Complete |
 | G1 | Native baseline | Representative fixtures pass with recorded semantic output, wall time, and peak memory | Complete (initial matrix) |
-| G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Not started |
-| G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Not started |
+| G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
+| G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | In progress |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Not started |
 | G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Not started |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
@@ -42,12 +42,12 @@ prerequisites pass.
 
 ## Immediate implementation sequence
 
-1. Add a minimal `orca-slicer-worker` executable linked to `libslic3r` only.
-2. Reproduce the native baseline through that executable.
-3. Remove its dependencies on `GUI::PartPlateList`, `BitmapCache`, OpenGL
-   thumbnails, and `GCodeViewer` through small core-facing adapters.
-4. Introduce the versioned job manifest only after the worker can reproduce the
-   baseline through a direct native test.
+1. Define typed progress, warning, error, cancellation, and artifact records for
+   the versioned worker contract.
+2. Write G-code through an artifact transaction so failed or canceled jobs never
+   expose partial downloads.
+3. Add process-level cancellation and resource-limit tests before connecting a
+   long-lived API service.
 
 The first browser screen is intentionally after these steps.
 
@@ -57,4 +57,6 @@ The canonical build environment is defined by
 The initial G1 run on 2026-09-01 built the Linux package, passed all 610
 registered CTest tests, and produced deterministic semantic output for the
 cube, bridge, and concave-hole CLI fixtures. Five tests were explicitly marked
-skipped by the existing suite. The next active gate is G2.
+skipped by the existing suite. On 2026-09-02, the headless worker reproduced all
+recorded semantic fields for those three fixtures while passing its forbidden-
+dependency audit. The next active gate is G3.

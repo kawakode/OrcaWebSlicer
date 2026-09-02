@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
     test_calib.cpp
     test_clipper_offset.cpp
     test_clipper_utils.cpp
+    test_color.cpp
     test_config.cpp
     test_config_variant_expansion.cpp
     test_toolordering_nozzle_group.cpp
@@ -21,6 +22,7 @@ add_executable(${_TEST_NAME}_tests
     test_elephant_foot_compensation.cpp
     test_fill_corner_smoothing.cpp
     test_filament_mixer.cpp
+    test_flush_volumes.cpp
     test_fill_plane_path.cpp
     test_geometry.cpp
     test_multimaterial_segmentation.cpp
@@ -38,6 +40,8 @@ add_executable(${_TEST_NAME}_tests
     test_utils.cpp
     test_timeutils.cpp
     test_voronoi.cpp
+    test_worker_manifest.cpp
+    test_slice_request.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp
     # test_png_io.cpp

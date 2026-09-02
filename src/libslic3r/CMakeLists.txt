@@ -194,6 +194,8 @@ set(lisbslic3r_sources
     Flow.hpp
     FlushVolCalc.cpp
     FlushVolCalc.hpp
+    MinimumFlushVolume.cpp
+    MinimumFlushVolume.hpp
     Format/3mf.cpp
     Format/3mf.hpp
     Format/AMF.cpp
@@ -484,6 +486,10 @@ set(lisbslic3r_sources
     Utils.hpp
     VariableWidth.cpp
     VariableWidth.hpp
+    Web/WorkerManifest.cpp
+    Web/WorkerManifest.hpp
+    Web/SinglePlateSlice.cpp
+    Web/SinglePlateSlice.hpp
     Zipper.cpp
     Zipper.hpp
     FilamentGroup.hpp

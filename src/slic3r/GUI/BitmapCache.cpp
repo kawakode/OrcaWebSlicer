@@ -517,43 +517,20 @@ wxBitmap BitmapCache::mksolid(size_t width, size_t height, unsigned char r, unsi
 
 bool BitmapCache::parse_color(const std::string& scolor, unsigned char* rgb_out)
 {
-    if (scolor.size() == 9) {
-        unsigned char rgba[4];
-        parse_color4(scolor, rgba);
-        rgb_out[0] = rgba[0];
-        rgb_out[1] = rgba[1];
-        rgb_out[2] = rgba[2];
-        return true;
-    }
-    rgb_out[0] = rgb_out[1] = rgb_out[2] = 0;
-    if (scolor.size() != 7 || scolor.front() != '#')
-        return false;
-    const char* c = scolor.data() + 1;
-    for (size_t i = 0; i < 3; ++i) {
-        int digit1 = hex_digit_to_int(*c++);
-        int digit2 = hex_digit_to_int(*c++);
-        if (digit1 == -1 || digit2 == -1)
-            return false;
-        rgb_out[i] = (unsigned char)(digit1 * 16 + digit2);
-    }
-
-    return true;
+    std::array<unsigned char, 4> decoded;
+    const bool valid = Slic3r::decode_color(scolor, decoded);
+    rgb_out[0] = decoded[0];
+    rgb_out[1] = decoded[1];
+    rgb_out[2] = decoded[2];
+    return valid;
 }
 
 bool BitmapCache::parse_color4(const std::string& scolor, unsigned char* rgba_out)
 {
-    rgba_out[0] = rgba_out[1] = rgba_out[2] = 0; rgba_out[3] = 255;
-    if ((scolor.size() != 7 && scolor.size() != 9) || scolor.front() != '#')
-        return false;
-    const char* c = scolor.data() + 1;
-    for (size_t i = 0; i < scolor.size() / 2; ++i) {
-        int digit1 = hex_digit_to_int(*c++);
-        int digit2 = hex_digit_to_int(*c++);
-        if (digit1 == -1 || digit2 == -1)
-            return false;
-        rgba_out[i] = (unsigned char)(digit1 * 16 + digit2);
-    }
-    return true;
+    std::array<unsigned char, 4> decoded;
+    const bool valid = Slic3r::decode_color(scolor, decoded);
+    std::copy(decoded.begin(), decoded.end(), rgba_out);
+    return valid;
 }
 //BBS Replace svg green with the specified colour
 bool BitmapCache::load_from_svg_file_change_color(const std::string &filename, unsigned width, unsigned height, ImTextureID &texture_id, const char *hexColor)

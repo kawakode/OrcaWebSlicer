@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "job_id": "resolved-profile-smoke",
+  "operation": "slice",
+  "input_model": "model.obj",
+  "output_gcode": "result.gcode",
+  "profiles": {
+    "machine": "profiles/machine.json",
+    "process": "profiles/process.json",
+    "filament": "profiles/filament.json"
+  }
+}

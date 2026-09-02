@@ -1,6 +1,7 @@
 name: orca-web
 
 x-build-environment: &build-environment
+  image: orca-web-build:latest
   build:
     context: ../..
     dockerfile: docker/web/Dockerfile
@@ -18,12 +19,14 @@ x-build-environment: &build-environment
     GITHUB_WORKSPACE: /workspace
     ORCA_WEB_GIT_COMMIT: ${ORCA_WEB_GIT_COMMIT:-}
     ORCA_WEB_GIT_DIRTY: ${ORCA_WEB_GIT_DIRTY:-}
+    ORCA_SLICER_RESOURCES: /workspace/resources
     RUNNER_OS: Linux
     RUNNER_TEMP: /tmp
   volumes:
     - ../..:/workspace
     - orca-deps-build:/workspace/deps/build
     - orca-app-build:/workspace/build
+    - orca-worker-build:/workspace/build-worker
     - orca-ccache:/cache/ccache
 
 services:
@@ -49,6 +52,83 @@ services:
         -C Release
         --output-on-failure
 
+  worker-build:
+    <<: *build-environment
+    command:
+      - bash
+      - -lc
+      - >-
+        cmake
+        -S .
+        -B build-worker
+        -G "Ninja Multi-Config"
+        -DCMAKE_C_COMPILER=/usr/bin/clang
+        -DCMAKE_CXX_COMPILER=/usr/bin/clang++
+        -DCMAKE_PREFIX_PATH=/workspace/deps/build/OrcaSlicer_dep/usr/local
+        -DDEP_BUILD_DIR=/workspace/deps/build
+        -DBUILD_TESTS=ON
+        -DORCA_WEB_WORKER=ON
+        -DSLIC3R_BUILD_SANDBOXES=OFF
+        -DSLIC3R_GUI=OFF
+        -DSLIC3R_STATIC=ON
+        && cmake
+        --build build-worker
+        --config Release
+        --target orca-slicer-worker libslic3r_tests
+        -j "$${CMAKE_BUILD_PARALLEL_LEVEL}"
+
+  worker-smoke:
+    <<: *build-environment
+    command:
+      - bash
+      - -lc
+      - >-
+        set -euo pipefail;
+        worker=build-worker/src/Release/orca-slicer-worker;
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[WorkerManifest]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[Color]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[FlushVolumes]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[SliceRequest]";
+        "$${worker}" --version;
+        "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
+        set +e;
+        "$${worker}" --validate-manifest tests/data/web-worker/invalid-envelope.json;
+        invalid_status=$$?;
+        set -e;
+        test "$${invalid_status}" -eq 4;
+        job_dir=$$(mktemp -d);
+        trap 'rm -rf "$${job_dir}"' EXIT;
+        cp tests/data/20mm_cube.obj "$${job_dir}/model.obj";
+        cp tests/data/web-worker/slice-envelope.json "$${job_dir}/request.json";
+        "$${worker}" --slice-manifest "$${job_dir}/request.json";
+        test -s "$${job_dir}/result.gcode";
+        grep -q '^G1 ' "$${job_dir}/result.gcode";
+        profile_job_dir=$$(mktemp -d);
+        cp tests/data/20mm_cube.obj "$${profile_job_dir}/model.obj";
+        cp tests/data/web-worker/profile-slice-envelope.json "$${profile_job_dir}/request.json";
+        python3 scripts/materialize_web_profiles.py
+        --output "$${profile_job_dir}/profiles"
+        --machine "resources/profiles/Anycubic/machine/Anycubic Kobra 0.4 nozzle.json"
+        --process "resources/profiles/Anycubic/process/0.20mm Standard @Anycubic Kobra.json"
+        --filament "resources/profiles/Anycubic/filament/Anycubic Generic PLA.json";
+        "$${worker}" --slice-manifest "$${profile_job_dir}/request.json";
+        test -s "$${profile_job_dir}/result.gcode";
+        grep -q '^G1 ' "$${profile_job_dir}/result.gcode";
+        rm -rf "$${profile_job_dir}";
+        python3 scripts/check_web_worker_deps.py "$${worker}"
+
+  worker-baseline:
+    <<: *build-environment
+    command:
+      - python3
+      - scripts/web_worker_baseline.py
+      - --manifest
+      - docs/web/baseline-cases.json
+      - --worker
+      - build-worker/src/Release/orca-slicer-worker
+      - --native-baselines
+      - build/web-baseline
+
   baseline:
     <<: *build-environment
     command:
@@ -63,4 +143,5 @@ services:
 volumes:
   orca-deps-build:
   orca-app-build:
+  orca-worker-build:
   orca-ccache:

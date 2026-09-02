@@ -2,6 +2,7 @@
 #include <wx/display.h>
 #include <wx/sizer.h>
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MinimumFlushVolume.hpp"
 #include "WipeTowerDialog.hpp"
 #include "GUI.hpp"
 #include "I18N.hpp"

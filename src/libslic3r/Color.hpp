@@ -162,6 +162,7 @@ ColorRGB opposite(const ColorRGB& a, const ColorRGB& b);
 
 bool can_decode_color(const std::string& color);
 
+bool decode_color(const std::string& color_in, std::array<unsigned char, 4>& color_out);
 bool decode_color(const std::string& color_in, ColorRGB& color_out);
 bool decode_color(const std::string& color_in, ColorRGBA& color_out);
 

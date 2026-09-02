@@ -1,7 +1,7 @@
 # Headless extraction audit
 
-Date: 2026-09-01
-Status: Initial static audit complete
+Date: 2026-09-02
+Status: G2 complete; remaining items belong to later MVP gates
 
 ## Target boundary
 
@@ -16,7 +16,7 @@ slicing, 3MF packaging, thumbnails, progress reporting, and process termination.
 Copying that method into a new executable would preserve the coupling we need to
 remove.
 
-## Current blockers
+## Original blockers and disposition
 
 ### Unconditional desktop includes
 
@@ -70,6 +70,9 @@ Before creating worker equivalents:
 3. Keep GUI adapters calling the same core function so behavior has one owner.
 4. Add a focused `libslic3r` test before changing CLI call sites.
 
+Completed: color decoding and minimum flush-volume calculations now have core
+APIs and focused headless tests. Desktop callers use the same implementations.
+
 ### Thumbnail rendering
 
 CLI project export creates hidden GLFW contexts and calls `OpenGLManager`,
@@ -122,6 +125,12 @@ The work will be split into reviewable units in this order:
    on semantic differences.
 
 Each unit must leave the desktop executable behavior unchanged.
+
+All seven G2 units are complete for job-local STL/OBJ input. The worker loads
+resolved profiles, uses core arrangement and slicing APIs, exports G-code, and
+matches the initial native semantic matrix without linking the desktop target.
+3MF import, transactional artifacts, progress, and cancellation remain explicit
+G3/G4 work rather than blockers to the headless boundary.
 
 ## Dependency guard
 

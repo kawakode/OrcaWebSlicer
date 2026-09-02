@@ -319,6 +319,33 @@ bool can_decode_color(const std::string &color)
     return (color.size() == 7 && color.front() == '#') || (color.size() == 9 && color.front() == '#');
 }
 
+bool decode_color(const std::string& color_in, std::array<unsigned char, 4>& color_out)
+{
+    color_out = {0, 0, 0, 255};
+    if (!can_decode_color(color_in))
+        return false;
+
+    auto hex_digit_to_int = [](const char c) {
+        return
+            (c >= '0' && c <= '9') ? int(c - '0') :
+            (c >= 'A' && c <= 'F') ? int(c - 'A') + 10 :
+            (c >= 'a' && c <= 'f') ? int(c - 'a') + 10 : -1;
+    };
+
+    const char *c = color_in.data() + 1;
+    const size_t component_count = color_in.size() / 2;
+    for (size_t i = 0; i < component_count; ++i) {
+        const int digit1 = hex_digit_to_int(*c++);
+        const int digit2 = hex_digit_to_int(*c++);
+        if (digit1 == -1 || digit2 == -1) {
+            color_out = {0, 0, 0, 255};
+            return false;
+        }
+        color_out[i] = static_cast<unsigned char>(digit1 * 16 + digit2);
+    }
+    return true;
+}
+
 bool decode_color(const std::string& color_in, ColorRGB& color_out)
 {
     ColorRGBA rgba;
@@ -331,33 +358,13 @@ bool decode_color(const std::string& color_in, ColorRGB& color_out)
 
 bool decode_color(const std::string& color_in, ColorRGBA& color_out)
 {
-	auto hex_digit_to_int = [](const char c) {
-		return
-			(c >= '0' && c <= '9') ? int(c - '0') :
-			(c >= 'A' && c <= 'F') ? int(c - 'A') + 10 :
-			(c >= 'a' && c <= 'f') ? int(c - 'a') + 10 : -1;
-	};
-
-    color_out = ColorRGBA::BLACK();
-    if (can_decode_color(color_in)) {
-        const char *c = color_in.data() + 1;
-        if (color_in.size() == 7) {
-            for (unsigned int i = 0; i < 3; ++i) {
-                const int digit1 = hex_digit_to_int(*c++);
-                const int digit2 = hex_digit_to_int(*c++);
-                if (digit1 != -1 && digit2 != -1)
-                    color_out.set(i, float(digit1 * 16 + digit2) * INV_255);
-            }
-        } else {
-            for (unsigned int i = 0; i < 4; ++i) {
-                const int digit1 = hex_digit_to_int(*c++);
-                const int digit2 = hex_digit_to_int(*c++);
-                if (digit1 != -1 && digit2 != -1)
-                    color_out.set(i, float(digit1 * 16 + digit2) * INV_255);
-            }
-        }
-    } else
+    std::array<unsigned char, 4> decoded;
+    if (!decode_color(color_in, decoded)) {
+        color_out = ColorRGBA::BLACK();
         return false;
+    }
+
+    color_out = ColorRGBA(decoded[0], decoded[1], decoded[2], decoded[3]);
 
     assert(0.0f <= color_out.r() && color_out.r() <= 1.0f);
     assert(0.0f <= color_out.g() && color_out.g() <= 1.0f);

@@ -13,6 +13,11 @@ find_package(libnoise REQUIRED)
 
 add_subdirectory(libslic3r)
 
+if(ORCA_WEB_WORKER)
+    add_executable(orca-slicer-worker OrcaSlicerWorker.cpp)
+    target_link_libraries(orca-slicer-worker PRIVATE libslic3r)
+endif()
+
 if (SLIC3R_GUI)
     add_subdirectory(glad)
     # imgui, imguizmo, and hidapi are now included from deps_src

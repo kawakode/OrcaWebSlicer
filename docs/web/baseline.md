@@ -80,6 +80,18 @@ The runner resolves each selected shipped profile's inheritance into a
 self-contained temporary JSON file. This matches desktop preset layering while
 keeping generated configurations and raw artifacts out of version control.
 
+## Headless parity result
+
+On 2026-09-02, `orca-slicer-worker` loaded the same resolved machine, process,
+and filament profiles and reproduced every recorded semantic field for
+`cube-default`, `bridge`, and `concave-hole`. The comparison covers layer and Z
+ranges, tools, extrusion roles and totals, temperatures, command counts, XY
+bounds, and motion distance. Run it against the latest native record with:
+
+```powershell
+docker compose -f docker/web/compose.yml run --rm worker-baseline
+```
+
 ## Reproducibility rules
 
 - Pin the compiler, dependency build, profiles, locale, and worker resource limits.

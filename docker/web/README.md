@@ -23,7 +23,34 @@ docker compose -f docker/web/compose.yml run --rm build
 
 The first build is long because OrcaSlicer's native dependencies are compiled.
 The dependency build, application build, and ccache are named volumes, so later
-runs are incremental.
+runs are incremental. All services share one build-environment image; only their
+commands and build-volume targets differ.
+
+## Build the headless worker
+
+The worker has a separate CMake tree configured with `SLIC3R_GUI=OFF`. This is
+an architectural check, not just a differently named desktop executable:
+
+```powershell
+docker compose -f docker/web/compose.yml run --rm worker-build
+docker compose -f docker/web/compose.yml run --rm worker-smoke
+docker compose -f docker/web/compose.yml run --rm worker-baseline
+```
+
+The Compose environment sets `ORCA_SLICER_RESOURCES=/workspace/resources`.
+Packaged workers must set the same variable when the resources directory is not
+discoverable beside the executable or in the current working directory.
+
+The smoke check runs the focused manifest, request, core-color, and flush-volume
+contract tests; slices a 20 mm cube both from explicit settings and from resolved
+Anycubic machine/process/filament profiles; exercises the version and manifest-
+envelope commands; verifies the invalid-manifest exit code; and rejects GUI,
+OpenGL, device-access, embedded Python, WebKit, and media libraries in the
+worker's dynamic dependency list.
+
+`worker-baseline` compares cube, bridge, and concave-hole worker output against
+the newest native run under `build/web-baseline`. Run the `baseline` service
+first when that volume is empty or when the desktop reference needs refreshing.
 
 ## Verify and record the baseline
 
