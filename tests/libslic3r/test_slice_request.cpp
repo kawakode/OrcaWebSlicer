@@ -21,9 +21,9 @@ bool has_error(const SinglePlateSliceRequestValidation &validation, const std::s
 TEST_CASE("Single-plate request accepts safe artifact paths and serialized settings", "[SliceRequest]")
 {
     const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
-        "schema_version": 1,
+        "protocol_version": 1,
         "job_id": "slice-1",
-        "operation": "slice",
+        "operation": {"name":"slice","version":1,"payload":{
         "input_model": "input/model.obj",
         "output_gcode": "output/model.gcode",
         "profiles": {
@@ -32,6 +32,7 @@ TEST_CASE("Single-plate request accepts safe artifact paths and serialized setti
             "filament": "profiles/filament.json"
         },
         "settings": {"layer_height": "0.2", "brim_type": "no_brim"}
+        }}
     })");
 
     REQUIRE(validation.is_valid());
@@ -45,12 +46,13 @@ TEST_CASE("Single-plate request accepts safe artifact paths and serialized setti
 TEST_CASE("Single-plate request requires a complete resolved profile set", "[SliceRequest]")
 {
     const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
-        "schema_version": 1,
+        "protocol_version": 1,
         "job_id": "slice-4",
-        "operation": "slice",
+        "operation": {"name":"slice","version":1,"payload":{
         "input_model": "model.obj",
         "output_gcode": "model.gcode",
         "profiles": {"machine": "../machine.json"}
+        }}
     })");
 
     REQUIRE_FALSE(validation.is_valid());
@@ -60,11 +62,12 @@ TEST_CASE("Single-plate request requires a complete resolved profile set", "[Sli
 TEST_CASE("Single-plate request rejects paths outside its job directory", "[SliceRequest]")
 {
     const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
-        "schema_version": 1,
+        "protocol_version": 1,
         "job_id": "slice-2",
-        "operation": "slice",
+        "operation": {"name":"slice","version":1,"payload":{
         "input_model": "../model.obj",
         "output_gcode": "C:\\output.gcode"
+        }}
     })");
 
     REQUIRE_FALSE(validation.is_valid());
@@ -75,11 +78,12 @@ TEST_CASE("Single-plate request rejects paths outside its job directory", "[Slic
 TEST_CASE("Single-plate request limits initial model and artifact formats", "[SliceRequest]")
 {
     const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
-        "schema_version": 1,
+        "protocol_version": 1,
         "job_id": "slice-3",
-        "operation": "slice",
+        "operation": {"name":"slice","version":1,"payload":{
         "input_model": "model.3mf",
         "output_gcode": "preview.png"
+        }}
     })");
 
     REQUIRE_FALSE(validation.is_valid());

@@ -7,19 +7,35 @@
 
 namespace Slic3r::Web {
 
-inline constexpr int WORKER_MANIFEST_SCHEMA_VERSION = 1;
+inline constexpr int WORKER_PROTOCOL_VERSION = 1;
+inline constexpr int SLICE_OPERATION_VERSION = 1;
+
+enum class WorkerErrorCategory {
+    Request,
+    Input,
+    Profile,
+    Validation,
+    Slicing,
+    Cancellation,
+    ResourceLimit,
+    Internal
+};
+
+const char *worker_error_category_name(WorkerErrorCategory category);
 
 struct WorkerManifest
 {
-    int         schema_version {WORKER_MANIFEST_SCHEMA_VERSION};
+    int         protocol_version {WORKER_PROTOCOL_VERSION};
     std::string job_id;
     std::string operation;
+    int         operation_version {SLICE_OPERATION_VERSION};
 };
 
 struct WorkerManifestError
 {
     std::string code;
     std::string message;
+    WorkerErrorCategory category {WorkerErrorCategory::Request};
 };
 
 struct WorkerManifestValidation

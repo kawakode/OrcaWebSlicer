@@ -1,0 +1,14 @@
+{
+  "protocol_version": 1,
+  "job_id": "contract-job",
+  "outcome": "failed",
+  "warnings": [],
+  "timing": {"duration_ms": 25, "cpu_time_ms": 20},
+  "resource_usage": {"peak_memory_bytes": 1048576},
+  "artifacts": [],
+  "error": {
+    "category": "input",
+    "code": "invalid_input_model",
+    "message": "input_model must be a safe relative path."
+  }
+}

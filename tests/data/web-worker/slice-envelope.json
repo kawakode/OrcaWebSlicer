@@ -1,12 +1,17 @@
 {
-  "schema_version": 1,
+  "protocol_version": 1,
   "job_id": "single-plate-smoke",
-  "operation": "slice",
-  "input_model": "model.obj",
-  "output_gcode": "result.gcode",
-  "settings": {
-    "layer_height": "0.3",
-    "initial_layer_print_height": "0.3",
-    "layer_change_gcode": "G92 E0\n"
+  "operation": {
+    "name": "slice",
+    "version": 1,
+    "payload": {
+      "input_model": "model.obj",
+      "output_gcode": "result.gcode",
+      "settings": {
+        "layer_height": "0.3",
+        "initial_layer_print_height": "0.3",
+        "layer_change_gcode": "G92 E0\n"
+      }
+    }
   }
 }

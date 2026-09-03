@@ -9,6 +9,7 @@ This directory is the source of truth for the web effort:
 - [MVP scope and acceptance criteria](mvp.md)
 - [Native compatibility baseline](baseline.md)
 - [Headless extraction audit](headless-audit.md)
+- [Worker protocol version 1](worker-protocol.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 
 ## Delivery gates
@@ -42,12 +43,12 @@ prerequisites pass.
 
 ## Immediate implementation sequence
 
-1. Define typed progress, warning, error, cancellation, and artifact records for
-   the versioned worker contract.
-2. Write G-code through an artifact transaction so failed or canceled jobs never
+1. Write G-code through an artifact transaction so failed or canceled jobs never
    expose partial downloads.
-3. Add process-level cancellation and resource-limit tests before connecting a
+2. Add process-level cancellation and resource-limit tests before connecting a
    long-lived API service.
+3. Add guarded single-plate 3MF import after path containment and extraction
+   limits are enforced.
 
 The first browser screen is intentionally after these steps.
 

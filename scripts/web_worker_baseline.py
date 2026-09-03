@@ -56,15 +56,20 @@ def run_case(worker, case, repo, sources, native_run, output_root):
     materialize_profile_set(sources, job / "profiles")
 
     request = {
-        "schema_version": 1,
+        "protocol_version": 1,
         "job_id": "baseline-{}".format(case["name"]),
-        "operation": "slice",
-        "input_model": input_model,
-        "output_gcode": "result.gcode",
-        "profiles": {
-            "machine": "profiles/machine.json",
-            "process": "profiles/process.json",
-            "filament": "profiles/filament.json",
+        "operation": {
+            "name": "slice",
+            "version": 1,
+            "payload": {
+                "input_model": input_model,
+                "output_gcode": "result.gcode",
+                "profiles": {
+                    "machine": "profiles/machine.json",
+                    "process": "profiles/process.json",
+                    "filament": "profiles/filament.json",
+                },
+            },
         },
     }
     request_path = job / "request.json"

@@ -1,0 +1,14 @@
+{
+  "protocol_version": 1,
+  "job_id": "contract-job",
+  "outcome": "canceled",
+  "warnings": [],
+  "timing": {"duration_ms": 500, "cpu_time_ms": 300},
+  "resource_usage": {"peak_memory_bytes": 33554432},
+  "artifacts": [],
+  "error": {
+    "category": "cancellation",
+    "code": "job_canceled",
+    "message": "The slicing job was canceled."
+  }
+}

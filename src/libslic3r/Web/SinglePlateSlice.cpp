@@ -18,9 +18,10 @@
 namespace Slic3r::Web {
 namespace {
 
-void add_error(SinglePlateSliceRequestValidation &result, const char *code, const char *message)
+void add_error(SinglePlateSliceRequestValidation &result, const char *code, const char *message,
+               WorkerErrorCategory category = WorkerErrorCategory::Request)
 {
-    result.errors.push_back({code, message});
+    result.errors.push_back({code, message, category});
 }
 
 bool is_safe_relative_path(const std::string &value)
@@ -57,7 +58,8 @@ bool read_profile_path(const nlohmann::json &profiles, const char *key, std::str
     const auto value = profiles.find(key);
     if (value == profiles.end() || !value->is_string() || !is_safe_relative_path(value->get_ref<const std::string &>()) ||
         lowercase_extension(value->get_ref<const std::string &>()) != ".json") {
-        add_error(result, "invalid_profile_path", "machine, process, and filament profiles must be safe relative JSON paths.");
+        add_error(result, "invalid_profile_path", "machine, process, and filament profiles must be safe relative JSON paths.",
+                  WorkerErrorCategory::Profile);
         return false;
     }
     target = value->get<std::string>();
@@ -76,21 +78,22 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     }
 
     const nlohmann::json manifest = nlohmann::json::parse(serialized.begin(), serialized.end(), nullptr, false);
+    const nlohmann::json &payload = manifest.at("operation").at("payload");
     SinglePlateSliceRequest request;
     request.envelope = *envelope_validation.manifest;
 
-    const auto input_model = manifest.find("input_model");
-    if (input_model == manifest.end() || !input_model->is_string() || !is_safe_relative_path(input_model->get_ref<const std::string &>())) {
-        add_error(result, "invalid_input_model", "input_model must be a safe relative path.");
+    const auto input_model = payload.find("input_model");
+    if (input_model == payload.end() || !input_model->is_string() || !is_safe_relative_path(input_model->get_ref<const std::string &>())) {
+        add_error(result, "invalid_input_model", "input_model must be a safe relative path.", WorkerErrorCategory::Input);
     } else if (const std::string extension = lowercase_extension(input_model->get_ref<const std::string &>());
                extension != ".stl" && extension != ".obj") {
-        add_error(result, "unsupported_input_format", "input_model must be an STL or OBJ file.");
+        add_error(result, "unsupported_input_format", "input_model must be an STL or OBJ file.", WorkerErrorCategory::Input);
     } else {
         request.input_model = input_model->get<std::string>();
     }
 
-    const auto output_gcode = manifest.find("output_gcode");
-    if (output_gcode == manifest.end() || !output_gcode->is_string() || !is_safe_relative_path(output_gcode->get_ref<const std::string &>())) {
+    const auto output_gcode = payload.find("output_gcode");
+    if (output_gcode == payload.end() || !output_gcode->is_string() || !is_safe_relative_path(output_gcode->get_ref<const std::string &>())) {
         add_error(result, "invalid_output_gcode", "output_gcode must be a safe relative path.");
     } else if (lowercase_extension(output_gcode->get_ref<const std::string &>()) != ".gcode") {
         add_error(result, "unsupported_output_format", "output_gcode must use the .gcode extension.");
@@ -98,8 +101,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         request.output_gcode = output_gcode->get<std::string>();
     }
 
-    const auto settings = manifest.find("settings");
-    if (settings != manifest.end()) {
+    const auto settings = payload.find("settings");
+    if (settings != payload.end()) {
         if (!settings->is_object() || settings->size() > 256) {
             add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
         } else {
@@ -114,8 +117,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     }
 
 
-    const auto profiles = manifest.find("profiles");
-    if (profiles != manifest.end()) {
+    const auto profiles = payload.find("profiles");
+    if (profiles != payload.end()) {
         if (!profiles->is_object()) {
             add_error(result, "invalid_profiles", "profiles must be an object.");
         } else {
@@ -130,9 +133,16 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     return result;
 }
 
-SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root)
+SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                          const SinglePlateSliceCallbacks &callbacks)
 {
     try {
+        const auto progress = [&callbacks](const char *stage, unsigned percent, const char *message) {
+            if (callbacks.progress)
+                callbacks.progress({stage, percent, message});
+        };
+
+        progress("input", 2, "Loading model");
         const std::filesystem::path input_path = job_root / request.input_model;
         const std::filesystem::path output_path = job_root / request.output_gcode;
         if (!std::filesystem::is_regular_file(input_path))
@@ -150,8 +160,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         if (!loaded || model.objects.empty())
             return failure("model_load_failed", "The input model could not be loaded.");
 
+        progress("input", 10, "Model loaded");
         model.add_default_instances();
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        progress("configuration", 12, "Loading profiles");
         for (const std::string *profile_path : {&request.machine_profile, &request.process_profile, &request.filament_profile}) {
             if (profile_path->empty())
                 continue;
@@ -170,6 +182,7 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         for (const auto &[key, value] : request.settings)
             config.set_deserialize_strict(key, value);
 
+        progress("arrangement", 20, "Arranging objects");
         ArrangeParams arrange_params(scaled(min_object_distance(config)));
         arrange_params.progressind = [](unsigned, std::string) {};
         arrange_objects(model, get_bed_shape(config), arrange_params);
@@ -188,12 +201,28 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         if (!output_directory.empty())
             std::filesystem::create_directories(output_directory);
 
-        print.set_status_silent();
+        unsigned last_public_percent = 25;
+        bool exporting = false;
+        print.set_status_callback([&callbacks, &last_public_percent, &exporting](const PrintBase::SlicingStatus &status) {
+            if (status.warning_step >= 0 && !status.text.empty() && callbacks.warning)
+                callbacks.warning(status.text);
+            if (status.percent < 0 || !callbacks.progress)
+                return;
+            const unsigned engine_percent = static_cast<unsigned>(std::clamp(status.percent, 0, 100));
+            const unsigned public_percent = exporting ? 90 + (engine_percent * 8 / 100) : 25 + (engine_percent * 60 / 100);
+            last_public_percent = std::max(last_public_percent, public_percent);
+            callbacks.progress({exporting ? "export" : "slicing", last_public_percent,
+                                exporting ? "Exporting G-code" : "Slicing model"});
+        });
+        progress("slicing", 25, "Slicing model");
         print.process();
+        exporting = true;
+        progress("export", 90, "Exporting G-code");
         print.export_gcode(output_path.string(), nullptr, nullptr);
         if (!std::filesystem::is_regular_file(output_path) || std::filesystem::file_size(output_path) == 0)
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
 
+        progress("finalize", 99, "Validating artifact");
         return {true, {}, {}};
     } catch (const std::exception &error) {
         return failure("slice_failed", error.what());

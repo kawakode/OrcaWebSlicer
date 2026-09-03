@@ -3,6 +3,7 @@
 #include "WorkerManifest.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,7 +38,21 @@ struct SinglePlateSliceResult
     std::string message;
 };
 
+struct SinglePlateSliceProgress
+{
+    std::string stage;
+    unsigned    percent {0};
+    std::string message;
+};
+
+struct SinglePlateSliceCallbacks
+{
+    std::function<void(const SinglePlateSliceProgress &)> progress;
+    std::function<void(const std::string &)> warning;
+};
+
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized);
-SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root);
+SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                          const SinglePlateSliceCallbacks &callbacks = {});
 
 } // namespace Slic3r::Web

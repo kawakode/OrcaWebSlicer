@@ -20,12 +20,28 @@ bool is_safe_job_id(const std::string &job_id)
     });
 }
 
-void add_error(WorkerManifestValidation &result, const char *code, const char *message)
+void add_error(WorkerManifestValidation &result, const char *code, const char *message,
+               WorkerErrorCategory category = WorkerErrorCategory::Request)
 {
-    result.errors.push_back({code, message});
+    result.errors.push_back({code, message, category});
 }
 
 } // namespace
+
+const char *worker_error_category_name(WorkerErrorCategory category)
+{
+    switch (category) {
+    case WorkerErrorCategory::Request:       return "request";
+    case WorkerErrorCategory::Input:         return "input";
+    case WorkerErrorCategory::Profile:       return "profile";
+    case WorkerErrorCategory::Validation:    return "validation";
+    case WorkerErrorCategory::Slicing:       return "slicing";
+    case WorkerErrorCategory::Cancellation:  return "cancellation";
+    case WorkerErrorCategory::ResourceLimit: return "resource_limit";
+    case WorkerErrorCategory::Internal:      return "internal";
+    }
+    return "internal";
+}
 
 WorkerManifestValidation validate_worker_manifest(std::string_view serialized)
 {
@@ -43,11 +59,11 @@ WorkerManifestValidation validate_worker_manifest(std::string_view serialized)
 
     WorkerManifest manifest;
 
-    const auto schema_version = envelope.find("schema_version");
-    if (schema_version == envelope.end() || !schema_version->is_number_integer()) {
-        add_error(result, "invalid_schema_version", "schema_version must be an integer.");
-    } else if (*schema_version != WORKER_MANIFEST_SCHEMA_VERSION) {
-        add_error(result, "unsupported_schema_version", "schema_version is not supported.");
+    const auto protocol_version = envelope.find("protocol_version");
+    if (protocol_version == envelope.end() || !protocol_version->is_number_integer()) {
+        add_error(result, "invalid_protocol_version", "protocol_version must be an integer.");
+    } else if (*protocol_version != WORKER_PROTOCOL_VERSION) {
+        add_error(result, "unsupported_protocol_version", "protocol_version is not supported.");
     }
 
     const auto job_id = envelope.find("job_id");
@@ -58,10 +74,28 @@ WorkerManifestValidation validate_worker_manifest(std::string_view serialized)
     }
 
     const auto operation = envelope.find("operation");
-    if (operation == envelope.end() || !operation->is_string() || *operation != "slice") {
-        add_error(result, "unsupported_operation", "operation must be 'slice'.");
+    if (operation == envelope.end() || !operation->is_object()) {
+        add_error(result, "invalid_operation", "operation must be an object.");
     } else {
-        manifest.operation = operation->get<std::string>();
+        const auto name = operation->find("name");
+        if (name == operation->end() || !name->is_string() || *name != "slice") {
+            add_error(result, "unsupported_operation", "operation.name must be 'slice'.");
+        } else {
+            manifest.operation = name->get<std::string>();
+        }
+
+        const auto version = operation->find("version");
+        if (version == operation->end() || !version->is_number_integer()) {
+            add_error(result, "invalid_operation_version", "operation.version must be an integer.");
+        } else if (*version != SLICE_OPERATION_VERSION) {
+            add_error(result, "unsupported_operation_version", "The slice operation version is not supported.");
+        } else {
+            manifest.operation_version = version->get<int>();
+        }
+
+        const auto payload = operation->find("payload");
+        if (payload == operation->end() || !payload->is_object())
+            add_error(result, "invalid_operation_payload", "operation.payload must be an object.");
     }
 
     if (result.errors.empty())

@@ -488,6 +488,8 @@ set(lisbslic3r_sources
     VariableWidth.hpp
     Web/WorkerManifest.cpp
     Web/WorkerManifest.hpp
+    Web/WorkerProtocol.cpp
+    Web/WorkerProtocol.hpp
     Web/SinglePlateSlice.cpp
     Web/SinglePlateSlice.hpp
     Zipper.cpp

@@ -41,10 +41,11 @@ The Compose environment sets `ORCA_SLICER_RESOURCES=/workspace/resources`.
 Packaged workers must set the same variable when the resources directory is not
 discoverable beside the executable or in the current working directory.
 
-The smoke check runs the focused manifest, request, core-color, and flush-volume
+The smoke check runs the focused manifest, protocol, request, core-color, and flush-volume
 contract tests; slices a 20 mm cube both from explicit settings and from resolved
 Anycubic machine/process/filament profiles; exercises the version and manifest-
-envelope commands; verifies the invalid-manifest exit code; and rejects GUI,
+envelope commands; verifies terminal NDJSON events, `result.json` artifact
+metadata, and the invalid-manifest exit code; and rejects GUI,
 OpenGL, device-access, embedded Python, WebKit, and media libraries in the
 worker's dynamic dependency list.
 
