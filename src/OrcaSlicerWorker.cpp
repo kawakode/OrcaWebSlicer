@@ -463,6 +463,17 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::InternalError);
         }
 
+        if (!Slic3r::Web::remove_abandoned_artifacts(job_root, job_id, job_root_error)) {
+            emitter.error(job_root_error);
+            final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
+            final_result.error = job_root_error;
+            finish_timing(final_result, started, cpu_started);
+            if (!write_result(job_root, final_result, error))
+                std::cerr << error << '\n';
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
+        }
+
         CancellationSignalGuard cancellation_signals;
         if (!cancellation_signals.installed()) {
             const Slic3r::Web::WorkerManifestError signal_error {
@@ -582,6 +593,8 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::Success);
         if (final_result.outcome == Slic3r::Web::WorkerJobState::Canceled)
             return static_cast<int>(ExitCode::Canceled);
+        if (final_result.error && final_result.error->category == Slic3r::Web::WorkerErrorCategory::ResourceLimit)
+            return static_cast<int>(ExitCode::ResourceLimit);
         return static_cast<int>(ExitCode::SliceFailed);
     }
 

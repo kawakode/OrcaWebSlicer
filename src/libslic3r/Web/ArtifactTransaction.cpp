@@ -86,6 +86,37 @@ bool resolve_job_file(const std::filesystem::path &canonical_root, std::string_v
     return true;
 }
 
+bool remove_abandoned_artifacts(const std::filesystem::path &canonical_root, std::string_view job_id,
+                                WorkerManifestError &error)
+{
+    const std::string suffix = "." + std::string(job_id) + ".partial";
+    std::error_code filesystem_error;
+    std::filesystem::recursive_directory_iterator entry(canonical_root, filesystem_error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!filesystem_error && entry != end) {
+        const std::filesystem::path &path = entry->path();
+        const std::string filename = path.filename().string();
+        const std::filesystem::file_status status = entry->symlink_status(filesystem_error);
+        if (filesystem_error)
+            break;
+
+        if (status.type() == std::filesystem::file_type::regular && filename.size() > suffix.size() &&
+            filename.front() == '.' && filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            std::filesystem::remove(path, filesystem_error);
+            if (filesystem_error)
+                break;
+        }
+        entry.increment(filesystem_error);
+    }
+
+    if (filesystem_error) {
+        set_error(error, "artifact_cleanup_failed", "Unable to remove abandoned temporary artifacts.",
+                  WorkerErrorCategory::Internal);
+        return false;
+    }
+    return true;
+}
+
 ArtifactTransaction::ArtifactTransaction(std::filesystem::path target_path, std::filesystem::path temporary_path)
     : m_target_path(std::move(target_path)), m_temporary_path(std::move(temporary_path))
 {

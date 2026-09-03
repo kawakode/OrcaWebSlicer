@@ -9,6 +9,7 @@
 #include "libslic3r/Print.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -62,10 +63,14 @@ SinglePlateSliceResult failure(std::string code, std::string message,
 class PrintCancellationMonitor
 {
 public:
-    PrintCancellationMonitor(Print &print, const std::function<bool()> &cancellation_requested)
-        : m_print(print), m_cancellation_requested(cancellation_requested)
+    PrintCancellationMonitor(Print &print, const std::function<bool()> &cancellation_requested,
+                             const std::filesystem::path &output_path,
+                             const std::optional<std::uintmax_t> &max_output_bytes,
+                             std::atomic_bool &output_limit_exceeded)
+        : m_print(print), m_cancellation_requested(cancellation_requested), m_output_path(output_path),
+          m_max_output_bytes(max_output_bytes), m_output_limit_exceeded(output_limit_exceeded)
     {
-        if (m_cancellation_requested)
+        if (m_cancellation_requested || m_max_output_bytes)
             m_thread = std::thread([this]() { monitor(); });
     }
 
@@ -89,9 +94,18 @@ private:
         std::unique_lock<std::mutex> lock(m_mutex);
         while (!m_condition.wait_for(lock, std::chrono::milliseconds(10), [this]() { return m_stopped; })) {
             lock.unlock();
-            if (m_cancellation_requested()) {
+            if (m_cancellation_requested && m_cancellation_requested()) {
                 m_print.cancel();
                 return;
+            }
+            if (m_max_output_bytes) {
+                std::error_code error;
+                const std::uintmax_t size = std::filesystem::file_size(m_output_path, error);
+                if (!error && size > *m_max_output_bytes) {
+                    m_output_limit_exceeded = true;
+                    m_print.cancel();
+                    return;
+                }
             }
             lock.lock();
         }
@@ -99,6 +113,9 @@ private:
 
     Print                         &m_print;
     const std::function<bool()>   &m_cancellation_requested;
+    const std::filesystem::path   &m_output_path;
+    const std::optional<std::uintmax_t> &m_max_output_bytes;
+    std::atomic_bool              &m_output_limit_exceeded;
     std::mutex                     m_mutex;
     std::condition_variable        m_condition;
     std::thread                    m_thread;
@@ -169,6 +186,21 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         }
     }
 
+    const auto limits = payload.find("limits");
+    if (limits != payload.end()) {
+        if (!limits->is_object()) {
+            add_error(result, "invalid_limits", "limits must be an object.");
+        } else {
+            const auto max_output_bytes = limits->find("max_output_bytes");
+            if (max_output_bytes != limits->end()) {
+                if (!max_output_bytes->is_number_unsigned() || max_output_bytes->get<std::uint64_t>() == 0) {
+                    add_error(result, "invalid_output_limit", "max_output_bytes must be a positive unsigned integer.");
+                } else {
+                    request.max_output_bytes = max_output_bytes->get<std::uint64_t>();
+                }
+            }
+        }
+    }
 
     const auto profiles = payload.find("profiles");
     if (profiles != payload.end()) {
@@ -189,6 +221,7 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
 SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                           const SinglePlateSliceCallbacks &callbacks)
 {
+    std::atomic_bool output_limit_exceeded {false};
     try {
         const auto progress = [&callbacks](const char *stage, unsigned percent, const char *message) {
             if (callbacks.progress)
@@ -249,8 +282,15 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         arrange_objects(model, get_bed_shape(config), arrange_params);
         throw_if_canceled();
 
+        std::optional<ArtifactTransaction> artifact =
+            ArtifactTransaction::begin(job_root, request.output_gcode, request.envelope.job_id, path_error);
+        if (!artifact)
+            return failure(path_error.code, path_error.message, path_error.category);
+
         Print print;
-        PrintCancellationMonitor cancellation_monitor(print, callbacks.cancellation_requested);
+        PrintCancellationMonitor cancellation_monitor(print, callbacks.cancellation_requested,
+                                                       artifact->temporary_path(), request.max_output_bytes,
+                                                       output_limit_exceeded);
         for (ModelObject *object : model.objects) {
             object->ensure_on_bed();
             print.auto_assign_extruders(object);
@@ -259,11 +299,6 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         const StringObjectException validation_error = print.validate();
         if (!validation_error.string.empty())
             return failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
-
-        std::optional<ArtifactTransaction> artifact =
-            ArtifactTransaction::begin(job_root, request.output_gcode, request.envelope.job_id, path_error);
-        if (!artifact)
-            return failure(path_error.code, path_error.message, path_error.category);
 
         unsigned last_public_percent = 25;
         bool exporting = false;
@@ -285,8 +320,13 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         exporting = true;
         progress("export", 90, "Exporting G-code");
         print.export_gcode(artifact->temporary_path().string(), nullptr, nullptr);
-        if (!std::filesystem::is_regular_file(artifact->temporary_path()) ||
-            std::filesystem::file_size(artifact->temporary_path()) == 0)
+        if (!std::filesystem::is_regular_file(artifact->temporary_path()))
+            return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
+        const std::uintmax_t output_size = std::filesystem::file_size(artifact->temporary_path());
+        if (request.max_output_bytes && output_size > *request.max_output_bytes)
+            return failure("output_size_limit_exceeded", "G-code output exceeds the configured size limit.",
+                           WorkerErrorCategory::ResourceLimit);
+        if (output_size == 0)
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
 
         throw_if_canceled();
@@ -295,6 +335,9 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             return failure(path_error.code, path_error.message, path_error.category);
         return {true, {}, {}, WorkerErrorCategory::Slicing};
     } catch (const CanceledException &) {
+        if (output_limit_exceeded)
+            return failure("output_size_limit_exceeded", "G-code output exceeds the configured size limit.",
+                           WorkerErrorCategory::ResourceLimit);
         return failure("job_canceled", "The slicing job was canceled.", WorkerErrorCategory::Cancellation);
     } catch (const std::exception &error) {
         return failure("slice_failed", error.what());

@@ -2,6 +2,7 @@
 
 #include "WorkerManifest.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -21,6 +22,7 @@ struct SinglePlateSliceRequest
     std::string process_profile;
     std::string filament_profile;
     std::vector<std::pair<std::string, std::string>> settings;
+    std::optional<std::uintmax_t> max_output_bytes;
 };
 
 struct SinglePlateSliceRequestValidation

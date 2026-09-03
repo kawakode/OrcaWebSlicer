@@ -43,6 +43,11 @@ The manifest file is limited to 1 MiB, and a slice payload may contain at most
 256 serialized setting overrides. The initial worker rejects model formats
 other than STL and OBJ before invoking an importer.
 
+The optional `operation.payload.limits.max_output_bytes` field is a positive
+unsigned integer. When present, the worker monitors the temporary G-code during
+export and fails with resource-limit error `output_size_limit_exceeded` before
+publishing an oversized artifact.
+
 ## Event transport
 
 Each stdout line is one complete compact JSON object. Every event contains
@@ -101,10 +106,12 @@ and symlinks that resolve outside the root are rejected.
 G-code is first written to a hidden, job-specific `.partial` file beside its
 requested target. The worker validates that temporary file and atomically
 renames it to the requested path without replacing an existing target. Normal
-validation, slicing, and export failures remove the temporary file. The
-executor remains responsible for cleaning abandoned job directories after a
-forced termination or process crash. `result.json` uses the same write-then-
-rename publication rule.
+validation, slicing, export, cancellation, and output-limit failures remove the
+temporary file. Before rerunning an accepted job ID, the worker removes that
+job's abandoned `.partial` files from earlier crashes. The executor remains
+responsible for deleting the complete job directory after a forced termination
+or process crash. `result.json` uses the same write-then-rename publication
+rule.
 
 ## Terminal result
 

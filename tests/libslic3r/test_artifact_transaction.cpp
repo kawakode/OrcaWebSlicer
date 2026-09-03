@@ -127,6 +127,24 @@ TEST_CASE("Artifact transaction removes an interrupted temporary output", "[Arti
     REQUIRE_FALSE(std::filesystem::exists(target));
 }
 
+TEST_CASE("Artifact cleanup removes only abandoned outputs for the current job", "[ArtifactTransaction]")
+{
+    TemporaryDirectory temporary;
+    const std::filesystem::path job = temporary.path() / "job";
+    REQUIRE(std::filesystem::create_directories(job / "nested"));
+    write_file(job / ".result.gcode.job-4.partial", "abandoned\n");
+    write_file(job / "nested/.result.json.job-4.partial", "abandoned\n");
+    write_file(job / ".result.gcode.other-job.partial", "other\n");
+    write_file(job / "ordinary.partial", "ordinary\n");
+
+    WorkerManifestError error;
+    REQUIRE(remove_abandoned_artifacts(canonical_job(job), "job-4", error));
+    REQUIRE_FALSE(std::filesystem::exists(job / ".result.gcode.job-4.partial"));
+    REQUIRE_FALSE(std::filesystem::exists(job / "nested/.result.json.job-4.partial"));
+    REQUIRE(std::filesystem::exists(job / ".result.gcode.other-job.partial"));
+    REQUIRE(std::filesystem::exists(job / "ordinary.partial"));
+}
+
 TEST_CASE("Job paths reject symlinks that escape the root", "[ArtifactTransaction]")
 {
     TemporaryDirectory temporary;

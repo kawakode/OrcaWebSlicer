@@ -46,7 +46,7 @@ cancellation, and artifact safety are reliable.
 - [x] Write G-code and reports to temporary names inside the job directory.
 - [x] Atomically promote artifacts only after slicing and validation complete.
 - [x] Remove partial artifacts after validation errors and graceful cancellation.
-- [ ] Remove abandoned partial artifacts after crashes and output-limit failures.
+- [x] Remove abandoned partial artifacts after crashes and output-limit failures.
 - [x] Record artifact size and SHA-256 in the final result.
 - [x] Test existing files, nested output directories, symlink attacks, and
   interrupted writes on Linux and Windows-compatible filesystems.

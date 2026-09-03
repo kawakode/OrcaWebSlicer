@@ -116,3 +116,35 @@ TEST_CASE("Single-plate request limits serialized setting count", "[SliceRequest
     REQUIRE_FALSE(validation.is_valid());
     REQUIRE(has_error(validation, "invalid_settings"));
 }
+
+TEST_CASE("Single-plate request accepts a configured output size limit", "[SliceRequest]")
+{
+    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
+        "protocol_version": 1,
+        "job_id": "slice-output-limit",
+        "operation": {"name":"slice","version":1,"payload":{
+        "input_model": "model.obj",
+        "output_gcode": "model.gcode",
+        "limits": {"max_output_bytes": 4096}
+        }}
+    })");
+
+    REQUIRE(validation.is_valid());
+    REQUIRE(validation.request->max_output_bytes == 4096);
+}
+
+TEST_CASE("Single-plate request rejects invalid output size limits", "[SliceRequest]")
+{
+    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
+        "protocol_version": 1,
+        "job_id": "slice-output-limit-invalid",
+        "operation": {"name":"slice","version":1,"payload":{
+        "input_model": "model.obj",
+        "output_gcode": "model.gcode",
+        "limits": {"max_output_bytes": 0}
+        }}
+    })");
+
+    REQUIRE_FALSE(validation.is_valid());
+    REQUIRE(has_error(validation, "invalid_output_limit"));
+}

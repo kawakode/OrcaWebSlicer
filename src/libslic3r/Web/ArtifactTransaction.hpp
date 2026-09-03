@@ -16,6 +16,9 @@ bool resolve_job_file(const std::filesystem::path &canonical_root, std::string_v
                       WorkerErrorCategory category, std::filesystem::path &resolved_path,
                       WorkerManifestError &error);
 
+bool remove_abandoned_artifacts(const std::filesystem::path &canonical_root, std::string_view job_id,
+                                WorkerManifestError &error);
+
 class ArtifactTransaction
 {
 public:
