@@ -129,8 +129,9 @@ Each unit must leave the desktop executable behavior unchanged.
 All seven G2 units are complete for job-local STL/OBJ input. The worker loads
 resolved profiles, uses core arrangement and slicing APIs, exports G-code, and
 matches the initial native semantic matrix without linking the desktop target.
-3MF import, transactional artifacts, progress, and cancellation remain explicit
-G3/G4 work rather than blockers to the headless boundary.
+Transactional artifacts, progress, and graceful cancellation are implemented
+in G3. 3MF import and resource-limit enforcement remain explicit G3 work rather
+than blockers to the headless boundary.
 
 ## Dependency guard
 

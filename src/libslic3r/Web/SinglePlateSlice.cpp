@@ -10,10 +10,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <exception>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <system_error>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -54,6 +58,52 @@ SinglePlateSliceResult failure(std::string code, std::string message,
 {
     return {false, std::move(code), std::move(message), category};
 }
+
+class PrintCancellationMonitor
+{
+public:
+    PrintCancellationMonitor(Print &print, const std::function<bool()> &cancellation_requested)
+        : m_print(print), m_cancellation_requested(cancellation_requested)
+    {
+        if (m_cancellation_requested)
+            m_thread = std::thread([this]() { monitor(); });
+    }
+
+    ~PrintCancellationMonitor()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_stopped = true;
+        }
+        m_condition.notify_one();
+        if (m_thread.joinable())
+            m_thread.join();
+    }
+
+    PrintCancellationMonitor(const PrintCancellationMonitor &) = delete;
+    PrintCancellationMonitor &operator=(const PrintCancellationMonitor &) = delete;
+
+private:
+    void monitor()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        while (!m_condition.wait_for(lock, std::chrono::milliseconds(10), [this]() { return m_stopped; })) {
+            lock.unlock();
+            if (m_cancellation_requested()) {
+                m_print.cancel();
+                return;
+            }
+            lock.lock();
+        }
+    }
+
+    Print                         &m_print;
+    const std::function<bool()>   &m_cancellation_requested;
+    std::mutex                     m_mutex;
+    std::condition_variable        m_condition;
+    std::thread                    m_thread;
+    bool                           m_stopped {false};
+};
 
 bool read_profile_path(const nlohmann::json &profiles, const char *key, std::string &target,
                        SinglePlateSliceRequestValidation &result)
@@ -144,7 +194,12 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             if (callbacks.progress)
                 callbacks.progress({stage, percent, message});
         };
+        const auto throw_if_canceled = [&callbacks]() {
+            if (callbacks.cancellation_requested && callbacks.cancellation_requested())
+                throw CanceledException();
+        };
 
+        throw_if_canceled();
         progress("input", 2, "Loading model");
         std::filesystem::path input_path;
         WorkerManifestError path_error;
@@ -163,6 +218,7 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         if (!loaded || model.objects.empty())
             return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
 
+        throw_if_canceled();
         progress("input", 10, "Model loaded");
         model.add_default_instances();
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -182,6 +238,7 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
                 return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason,
                                WorkerErrorCategory::Profile);
             config.apply(profile);
+            throw_if_canceled();
         }
         for (const auto &[key, value] : request.settings)
             config.set_deserialize_strict(key, value);
@@ -190,8 +247,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         ArrangeParams arrange_params(scaled(min_object_distance(config)));
         arrange_params.progressind = [](unsigned, std::string) {};
         arrange_objects(model, get_bed_shape(config), arrange_params);
+        throw_if_canceled();
 
         Print print;
+        PrintCancellationMonitor cancellation_monitor(print, callbacks.cancellation_requested);
         for (ModelObject *object : model.objects) {
             object->ensure_on_bed();
             print.auto_assign_extruders(object);
@@ -219,8 +278,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             callbacks.progress({exporting ? "export" : "slicing", last_public_percent,
                                 exporting ? "Exporting G-code" : "Slicing model"});
         });
+        throw_if_canceled();
         progress("slicing", 25, "Slicing model");
         print.process();
+        throw_if_canceled();
         exporting = true;
         progress("export", 90, "Exporting G-code");
         print.export_gcode(artifact->temporary_path().string(), nullptr, nullptr);
@@ -228,10 +289,13 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             std::filesystem::file_size(artifact->temporary_path()) == 0)
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
 
+        throw_if_canceled();
         progress("finalize", 99, "Validating artifact");
         if (!artifact->commit(path_error))
             return failure(path_error.code, path_error.message, path_error.category);
         return {true, {}, {}, WorkerErrorCategory::Slicing};
+    } catch (const CanceledException &) {
+        return failure("job_canceled", "The slicing job was canceled.", WorkerErrorCategory::Cancellation);
     } catch (const std::exception &error) {
         return failure("slice_failed", error.what());
     }

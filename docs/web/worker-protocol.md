@@ -77,6 +77,13 @@ Specific codes may be added within those categories.
 | 7 | A configured resource limit was exceeded |
 | 8 | Worker setup or result publication failed |
 
+After accepting a slice job, the worker treats `SIGINT` and `SIGTERM` on POSIX
+and console close, Ctrl+C, and Ctrl+Break events on Windows as cancellation
+requests. Cancellation is propagated through the engine's existing checks. A
+gracefully canceled job emits an error with category `cancellation` and code
+`job_canceled`, publishes a canceled `result.json`, emits a final `canceled`
+state, and exits with code 6. It does not publish G-code.
+
 Envelope failures cannot safely identify a job and therefore write diagnostics
 to stderr without job events or a result. Once an envelope is accepted, every
 terminal path emits a terminal state and attempts to publish `result.json`.

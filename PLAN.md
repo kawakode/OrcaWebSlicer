@@ -45,8 +45,8 @@ cancellation, and artifact safety are reliable.
 - [x] Canonicalize the job root once and reject paths or symlinks that escape it.
 - [x] Write G-code and reports to temporary names inside the job directory.
 - [x] Atomically promote artifacts only after slicing and validation complete.
-- [ ] Remove partial artifacts after validation errors, cancellation, crashes,
-  and output-limit failures.
+- [x] Remove partial artifacts after validation errors and graceful cancellation.
+- [ ] Remove abandoned partial artifacts after crashes and output-limit failures.
 - [x] Record artifact size and SHA-256 in the final result.
 - [x] Test existing files, nested output directories, symlink attacks, and
   interrupted writes on Linux and Windows-compatible filesystems.
@@ -56,13 +56,14 @@ cancellation, and artifact safety are reliable.
 - [x] Adapt existing `Print` status callbacks into monotonic protocol events.
 - [x] Map engine stages to stable public stages without exposing internal class
   names as API contracts.
-- [ ] Install a cancellation token checked by model import, arrangement,
+- [x] Install a cancellation token checked by model import, arrangement,
   slicing, and export where the existing engine permits it.
-- [ ] Handle process termination requests gracefully, then support forced
-  termination after a bounded grace period in the executor.
-- [ ] Ensure canceled jobs return a stable exit code and no downloadable partial
+- [x] Handle `SIGINT`, `SIGTERM`, and Windows console cancellation requests
+  gracefully in the worker.
+- [ ] Support forced termination after a bounded grace period in the executor.
+- [x] Ensure canceled jobs return a stable exit code and no downloadable partial
   artifacts.
-- [ ] Add a deliberately slow fixture and automated cancellation tests.
+- [x] Add a deliberately slow fixture and automated cancellation tests.
 
 ### 4. Enforce initial safety limits
 
@@ -91,12 +92,12 @@ cancellation, and artifact safety are reliable.
 
 ### G3 exit criteria
 
-- [ ] Every terminal outcome has a contract test and stable exit behavior.
-- [ ] Progress is monotonic and warnings remain attached to the job.
-- [ ] Cancellation stops a real slice and removes partial artifacts.
+- [x] Every terminal outcome has a contract test and stable exit behavior.
+- [x] Progress is monotonic and warnings remain attached to the job.
+- [x] Cancellation stops a real slice and removes partial artifacts.
 - [ ] Limits and path containment are tested with adversarial inputs.
 - [ ] STL, OBJ, and one selected 3MF plate produce transactional artifacts.
-- [ ] `worker-smoke`, `worker-baseline`, and the forbidden-dependency audit pass.
+- [x] `worker-smoke`, `worker-baseline`, and the forbidden-dependency audit pass.
 
 ## Phase 2: Build the first browser vertical slice (G4, priority P1)
 

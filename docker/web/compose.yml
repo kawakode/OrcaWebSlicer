@@ -121,6 +121,9 @@ services:
         test -z "$$(find "$${conflict_job_dir}" -name '*.partial' -print -quit)";
         python3 -c 'import json, pathlib, sys; events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]; result=json.loads(pathlib.Path(sys.argv[2]).read_text()); assert events[-1]["state"] == "failed"; assert result["outcome"] == "failed"; assert result["error"]["category"] == "validation"; assert result["error"]["code"] == "artifact_exists"' "$${conflict_job_dir}/events.ndjson" "$${conflict_job_dir}/result.json";
         rm -rf "$${conflict_job_dir}";
+        python3 scripts/test_web_worker_cancellation.py
+        --worker "$${worker}"
+        --model tests/data/20mm_cube.obj;
         profile_job_dir=$$(mktemp -d);
         cp tests/data/20mm_cube.obj "$${profile_job_dir}/model.obj";
         cp tests/data/web-worker/profile-slice-envelope.json "$${profile_job_dir}/request.json";

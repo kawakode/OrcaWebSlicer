@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <csignal>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -26,6 +27,7 @@
 #include <windows.h>
 #include <psapi.h>
 #else
+#include <signal.h>
 #include <sys/resource.h>
 #endif
 
@@ -48,6 +50,91 @@ enum class ExitCode : int {
     ResourceLimit   = 7,
     InternalError   = 8
 };
+
+#ifdef _WIN32
+
+volatile LONG cancellation_requested_flag = FALSE;
+
+BOOL WINAPI cancellation_handler(DWORD signal)
+{
+    if (signal != CTRL_C_EVENT && signal != CTRL_BREAK_EVENT && signal != CTRL_CLOSE_EVENT)
+        return FALSE;
+    InterlockedExchange(&cancellation_requested_flag, TRUE);
+    return TRUE;
+}
+
+bool cancellation_requested()
+{
+    return InterlockedCompareExchange(&cancellation_requested_flag, FALSE, FALSE) != FALSE;
+}
+
+class CancellationSignalGuard
+{
+public:
+    CancellationSignalGuard()
+    {
+        InterlockedExchange(&cancellation_requested_flag, FALSE);
+        m_installed = SetConsoleCtrlHandler(cancellation_handler, TRUE) != FALSE;
+    }
+
+    ~CancellationSignalGuard()
+    {
+        if (m_installed)
+            SetConsoleCtrlHandler(cancellation_handler, FALSE);
+    }
+
+    bool installed() const { return m_installed; }
+
+private:
+    bool m_installed {false};
+};
+
+#else
+
+volatile std::sig_atomic_t cancellation_requested_flag = 0;
+
+void cancellation_handler(int)
+{
+    cancellation_requested_flag = 1;
+}
+
+bool cancellation_requested()
+{
+    return cancellation_requested_flag != 0;
+}
+
+class CancellationSignalGuard
+{
+public:
+    CancellationSignalGuard()
+    {
+        cancellation_requested_flag = 0;
+        struct sigaction action {};
+        action.sa_handler = cancellation_handler;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        m_sigint_installed = sigaction(SIGINT, &action, &m_previous_sigint) == 0;
+        m_sigterm_installed = sigaction(SIGTERM, &action, &m_previous_sigterm) == 0;
+    }
+
+    ~CancellationSignalGuard()
+    {
+        if (m_sigint_installed)
+            sigaction(SIGINT, &m_previous_sigint, nullptr);
+        if (m_sigterm_installed)
+            sigaction(SIGTERM, &m_previous_sigterm, nullptr);
+    }
+
+    bool installed() const { return m_sigint_installed && m_sigterm_installed; }
+
+private:
+    struct sigaction m_previous_sigint {};
+    struct sigaction m_previous_sigterm {};
+    bool             m_sigint_installed {false};
+    bool             m_sigterm_installed {false};
+};
+
+#endif
 
 class EventEmitter
 {
@@ -376,6 +463,22 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::InternalError);
         }
 
+        CancellationSignalGuard cancellation_signals;
+        if (!cancellation_signals.installed()) {
+            const Slic3r::Web::WorkerManifestError signal_error {
+                "cancellation_setup_failed", "Unable to install process cancellation handlers.",
+                Slic3r::Web::WorkerErrorCategory::Internal
+            };
+            emitter.error(signal_error);
+            final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
+            final_result.error = signal_error;
+            finish_timing(final_result, started, cpu_started);
+            if (!write_result(job_root, final_result, error))
+                std::cerr << error << '\n';
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
+        }
+
         const Slic3r::Web::SinglePlateSliceRequestValidation validation =
             Slic3r::Web::validate_single_plate_slice_request(contents);
         if (!validation.is_valid()) {
@@ -415,13 +518,25 @@ int main(int argc, char **argv)
             warnings.push_back(warning);
             emitter.warning(warning);
         };
+        callbacks.cancellation_requested = []() { return cancellation_requested(); };
         const Slic3r::Web::SinglePlateSliceResult result =
             Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);
         if (result.success) {
             const std::filesystem::path artifact_path = job_root / validation.request->output_gcode;
-            const std::string sha256 = sha256_file(artifact_path, error);
-            if (sha256.empty()) {
+            std::string sha256;
+            if (!cancellation_requested())
+                sha256 = sha256_file(artifact_path, error);
+            if (cancellation_requested()) {
+                std::error_code ignored;
+                std::filesystem::remove(artifact_path, ignored);
+                const Slic3r::Web::WorkerManifestError cancellation_error {
+                    "job_canceled", "The slicing job was canceled.", Slic3r::Web::WorkerErrorCategory::Cancellation
+                };
+                emitter.error(cancellation_error);
+                final_result.outcome = Slic3r::Web::WorkerJobState::Canceled;
+                final_result.error = cancellation_error;
+            } else if (sha256.empty()) {
                 std::error_code ignored;
                 std::filesystem::remove(artifact_path, ignored);
                 const Slic3r::Web::WorkerManifestError hash_error {
@@ -443,7 +558,8 @@ int main(int argc, char **argv)
                 result.code, result.message, result.category
             };
             emitter.error(slice_error);
-            final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
+            final_result.outcome = result.category == Slic3r::Web::WorkerErrorCategory::Cancellation ?
+                Slic3r::Web::WorkerJobState::Canceled : Slic3r::Web::WorkerJobState::Failed;
             final_result.error = slice_error;
         }
 
@@ -462,8 +578,11 @@ int main(int argc, char **argv)
         }
 
         emitter.state(final_result.outcome);
-        return static_cast<int>(final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded ?
-            ExitCode::Success : ExitCode::SliceFailed);
+        if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded)
+            return static_cast<int>(ExitCode::Success);
+        if (final_result.outcome == Slic3r::Web::WorkerJobState::Canceled)
+            return static_cast<int>(ExitCode::Canceled);
+        return static_cast<int>(ExitCode::SliceFailed);
     }
 
     print_usage(std::cerr);

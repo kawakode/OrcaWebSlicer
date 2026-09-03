@@ -46,8 +46,8 @@ prerequisites pass.
 Transactional G-code publication and job-root path containment are now in
 place. The remaining sequence is:
 
-1. Add process-level cancellation and resource-limit tests before connecting a
-   long-lived API service.
+1. Add executor-enforced termination grace periods and resource limits before
+   connecting a long-lived API service.
 2. Add guarded single-plate 3MF import after path containment and extraction
    limits are enforced.
 

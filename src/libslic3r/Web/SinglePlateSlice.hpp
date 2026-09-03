@@ -50,6 +50,7 @@ struct SinglePlateSliceCallbacks
 {
     std::function<void(const SinglePlateSliceProgress &)> progress;
     std::function<void(const std::string &)> warning;
+    std::function<bool()> cancellation_requested;
 };
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized);
