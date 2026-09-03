@@ -71,9 +71,10 @@ cancellation, and artifact safety are reliable.
   300 second, 4 GiB memory, and configured output-size limits.
 - [ ] Keep hard CPU, memory, process, and wall-time limits in the worker runtime;
   use worker-side checks for clearer errors where possible.
-- [ ] Run slicing workers with network access disabled.
-- [ ] Reject unsupported formats before invoking expensive import paths.
-- [ ] Bound manifest size, setting count, log volume, and event volume.
+- [x] Run slicing workers with network access disabled.
+- [x] Reject unsupported formats before invoking expensive import paths.
+- [x] Bound manifest size and setting count.
+- [ ] Bound log and event volume.
 - [ ] Verify logs never include complete G-code, model contents, or credentials.
 
 ### 5. Add single-plate 3MF input

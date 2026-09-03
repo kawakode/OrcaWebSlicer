@@ -79,6 +79,7 @@ services:
 
   worker-smoke:
     <<: *build-environment
+    network_mode: none
     command:
       - bash
       - -lc
@@ -98,6 +99,14 @@ services:
         invalid_status=$$?;
         set -e;
         test "$${invalid_status}" -eq 4;
+        oversized_manifest=$$(mktemp);
+        python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(b" " * (1024 * 1024 + 1))' "$${oversized_manifest}";
+        set +e;
+        "$${worker}" --validate-manifest "$${oversized_manifest}";
+        oversized_status=$$?;
+        set -e;
+        rm -f "$${oversized_manifest}";
+        test "$${oversized_status}" -eq 3;
         job_dir=$$(mktemp -d);
         trap 'rm -rf "$${job_dir}"' EXIT;
         cp tests/data/20mm_cube.obj "$${job_dir}/model.obj";
@@ -141,6 +150,7 @@ services:
 
   worker-baseline:
     <<: *build-environment
+    network_mode: none
     command:
       - python3
       - scripts/web_worker_baseline.py

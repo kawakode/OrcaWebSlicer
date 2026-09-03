@@ -39,6 +39,10 @@ slice payload version produces `unsupported_operation_version`. Unknown fields
 are allowed at every object level. Required fields cannot be removed or change
 type within a version.
 
+The manifest file is limited to 1 MiB, and a slice payload may contain at most
+256 serialized setting overrides. The initial worker rejects model formats
+other than STL and OBJ before invoking an importer.
+
 ## Event transport
 
 Each stdout line is one complete compact JSON object. Every event contains

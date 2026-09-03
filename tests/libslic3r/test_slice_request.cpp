@@ -3,6 +3,7 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
 
 #include <algorithm>
+#include <nlohmann/json.hpp>
 #include <string>
 
 using namespace Slic3r::Web;
@@ -89,4 +90,29 @@ TEST_CASE("Single-plate request limits initial model and artifact formats", "[Sl
     REQUIRE_FALSE(validation.is_valid());
     REQUIRE(has_error(validation, "unsupported_input_format"));
     REQUIRE(has_error(validation, "unsupported_output_format"));
+}
+
+TEST_CASE("Single-plate request limits serialized setting count", "[SliceRequest]")
+{
+    nlohmann::json settings = nlohmann::json::object();
+    for (unsigned index = 0; index < 257; ++index)
+        settings["setting_" + std::to_string(index)] = "value";
+
+    nlohmann::json manifest = {
+        {"protocol_version", 1},
+        {"job_id", "slice-settings-limit"},
+        {"operation", {
+            {"name", "slice"},
+            {"version", 1},
+            {"payload", {
+                {"input_model", "model.obj"},
+                {"output_gcode", "model.gcode"},
+                {"settings", std::move(settings)}
+            }}
+        }}
+    };
+
+    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(manifest.dump());
+    REQUIRE_FALSE(validation.is_valid());
+    REQUIRE(has_error(validation, "invalid_settings"));
 }
