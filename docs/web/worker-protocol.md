@@ -81,6 +81,20 @@ Envelope failures cannot safely identify a job and therefore write diagnostics
 to stderr without job events or a result. Once an envelope is accepted, every
 terminal path emits a terminal state and attempts to publish `result.json`.
 
+## Artifact publication
+
+The worker canonicalizes the job root once. Input, profile, and output paths
+must be relative paths contained by that root; absolute paths, parent traversal,
+and symlinks that resolve outside the root are rejected.
+
+G-code is first written to a hidden, job-specific `.partial` file beside its
+requested target. The worker validates that temporary file and atomically
+renames it to the requested path without replacing an existing target. Normal
+validation, slicing, and export failures remove the temporary file. The
+executor remains responsible for cleaning abandoned job directories after a
+forced termination or process crash. `result.json` uses the same write-then-
+rename publication rule.
+
 ## Terminal result
 
 `result.json` contains `protocol_version`, `job_id`, terminal `outcome`, all

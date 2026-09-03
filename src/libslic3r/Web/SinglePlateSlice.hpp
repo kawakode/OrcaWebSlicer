@@ -36,6 +36,7 @@ struct SinglePlateSliceResult
     bool success {false};
     std::string code;
     std::string message;
+    WorkerErrorCategory category {WorkerErrorCategory::Slicing};
 };
 
 struct SinglePlateSliceProgress

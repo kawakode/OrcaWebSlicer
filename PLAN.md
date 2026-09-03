@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-02
+Last updated: 2026-09-03
 
 ## Objective
 
@@ -42,13 +42,13 @@ cancellation, and artifact safety are reliable.
 
 ### 2. Make artifact creation transactional
 
-- [ ] Canonicalize the job root once and reject paths or symlinks that escape it.
-- [ ] Write G-code and reports to temporary names inside the job directory.
-- [ ] Atomically promote artifacts only after slicing and validation complete.
+- [x] Canonicalize the job root once and reject paths or symlinks that escape it.
+- [x] Write G-code and reports to temporary names inside the job directory.
+- [x] Atomically promote artifacts only after slicing and validation complete.
 - [ ] Remove partial artifacts after validation errors, cancellation, crashes,
   and output-limit failures.
 - [x] Record artifact size and SHA-256 in the final result.
-- [ ] Test existing files, nested output directories, symlink attacks, and
+- [x] Test existing files, nested output directories, symlink attacks, and
   interrupted writes on Linux and Windows-compatible filesystems.
 
 ### 3. Add progress and cancellation

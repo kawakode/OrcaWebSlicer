@@ -42,6 +42,7 @@ add_executable(${_TEST_NAME}_tests
     test_voronoi.cpp
     test_worker_manifest.cpp
     test_worker_protocol.cpp
+    test_artifact_transaction.cpp
     test_slice_request.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp

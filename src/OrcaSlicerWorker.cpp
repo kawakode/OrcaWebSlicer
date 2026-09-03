@@ -1,4 +1,5 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
+#include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/WorkerManifest.hpp"
 #include "libslic3r/Web/WorkerProtocol.hpp"
 #include "libslic3r/Utils.hpp"
@@ -214,19 +215,6 @@ nlohmann::json validation_response(const Slic3r::Web::WorkerManifestValidation &
     return response;
 }
 
-Slic3r::Web::WorkerErrorCategory slice_error_category(const std::string &code)
-{
-    if (code.rfind("profile_", 0) == 0)
-        return Slic3r::Web::WorkerErrorCategory::Profile;
-    if (code.rfind("input_", 0) == 0 || code.rfind("model_", 0) == 0)
-        return Slic3r::Web::WorkerErrorCategory::Input;
-    if (code.find("validation") != std::string::npos)
-        return Slic3r::Web::WorkerErrorCategory::Validation;
-    if (code == "slice_failed" || code.rfind("gcode_", 0) == 0)
-        return Slic3r::Web::WorkerErrorCategory::Slicing;
-    return Slic3r::Web::WorkerErrorCategory::Internal;
-}
-
 std::uintmax_t peak_memory_bytes()
 {
 #ifdef _WIN32
@@ -295,12 +283,15 @@ std::string sha256_file(const std::filesystem::path &path, std::string &error)
 
 bool write_result(const std::filesystem::path &job_root, const Slic3r::Web::WorkerResult &result, std::string &error)
 {
-    const std::filesystem::path target = job_root / "result.json";
-    const std::filesystem::path temporary = job_root / "result.json.tmp";
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
+    Slic3r::Web::WorkerManifestError artifact_error;
+    std::optional<Slic3r::Web::ArtifactTransaction> artifact =
+        Slic3r::Web::ArtifactTransaction::begin(job_root, "result.json", result.job_id, artifact_error);
+    if (!artifact) {
+        error = artifact_error.message;
+        return false;
+    }
 
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    std::ofstream output(artifact->temporary_path(), std::ios::binary | std::ios::trunc);
     if (!output) {
         error = "Unable to create the temporary result file.";
         return false;
@@ -308,19 +299,11 @@ bool write_result(const std::filesystem::path &job_root, const Slic3r::Web::Work
     output << Slic3r::Web::serialize_worker_result(result) << '\n';
     output.close();
     if (!output) {
-        std::filesystem::remove(temporary, ignored);
         error = "Unable to write the complete result file.";
         return false;
     }
-    if (std::filesystem::exists(target)) {
-        std::filesystem::remove(temporary, ignored);
-        error = "result.json already exists.";
-        return false;
-    }
-    std::filesystem::rename(temporary, target, ignored);
-    if (ignored) {
-        std::filesystem::remove(temporary, ignored);
-        error = "Unable to publish result.json atomically.";
+    if (!artifact->commit(artifact_error)) {
+        error = artifact_error.message;
         return false;
     }
     return true;
@@ -377,14 +360,21 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::InvalidManifest);
         }
 
-        const std::filesystem::path manifest_path = std::filesystem::absolute(argv[2]);
-        const std::filesystem::path job_root = manifest_path.parent_path();
         const std::string &job_id = envelope_validation.manifest->job_id;
         EventEmitter emitter(job_id);
         emitter.state(Slic3r::Web::WorkerJobState::Accepted);
 
         Slic3r::Web::WorkerResult final_result;
         final_result.job_id = job_id;
+
+        const std::filesystem::path manifest_path = std::filesystem::absolute(argv[2]);
+        std::filesystem::path job_root;
+        Slic3r::Web::WorkerManifestError job_root_error;
+        if (!Slic3r::Web::canonicalize_job_root(manifest_path.parent_path(), job_root, job_root_error)) {
+            emitter.error(job_root_error);
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
+        }
 
         const Slic3r::Web::SinglePlateSliceRequestValidation validation =
             Slic3r::Web::validate_single_plate_slice_request(contents);
@@ -432,6 +422,8 @@ int main(int argc, char **argv)
             const std::filesystem::path artifact_path = job_root / validation.request->output_gcode;
             const std::string sha256 = sha256_file(artifact_path, error);
             if (sha256.empty()) {
+                std::error_code ignored;
+                std::filesystem::remove(artifact_path, ignored);
                 const Slic3r::Web::WorkerManifestError hash_error {
                     "artifact_hash_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
                 };
@@ -448,7 +440,7 @@ int main(int argc, char **argv)
             }
         } else {
             const Slic3r::Web::WorkerManifestError slice_error {
-                result.code, result.message, slice_error_category(result.code)
+                result.code, result.message, result.category
             };
             emitter.error(slice_error);
             final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
@@ -457,6 +449,10 @@ int main(int argc, char **argv)
 
         finish_timing(final_result, started, cpu_started);
         if (!write_result(job_root, final_result, error)) {
+            if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded) {
+                std::error_code ignored;
+                std::filesystem::remove(job_root / validation.request->output_gcode, ignored);
+            }
             const Slic3r::Web::WorkerManifestError result_error {
                 "result_publish_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
             };

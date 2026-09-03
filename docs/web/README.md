@@ -43,11 +43,12 @@ prerequisites pass.
 
 ## Immediate implementation sequence
 
-1. Write G-code through an artifact transaction so failed or canceled jobs never
-   expose partial downloads.
-2. Add process-level cancellation and resource-limit tests before connecting a
+Transactional G-code publication and job-root path containment are now in
+place. The remaining sequence is:
+
+1. Add process-level cancellation and resource-limit tests before connecting a
    long-lived API service.
-3. Add guarded single-plate 3MF import after path containment and extraction
+2. Add guarded single-plate 3MF import after path containment and extraction
    limits are enforced.
 
 The first browser screen is intentionally after these steps.

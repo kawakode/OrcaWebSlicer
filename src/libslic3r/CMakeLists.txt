@@ -486,6 +486,8 @@ set(lisbslic3r_sources
     Utils.hpp
     VariableWidth.cpp
     VariableWidth.hpp
+    Web/ArtifactTransaction.cpp
+    Web/ArtifactTransaction.hpp
     Web/WorkerManifest.cpp
     Web/WorkerManifest.hpp
     Web/WorkerProtocol.cpp

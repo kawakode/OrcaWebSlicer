@@ -1,5 +1,7 @@
 #include "SinglePlateSlice.hpp"
 
+#include "ArtifactTransaction.hpp"
+
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Model.hpp"
@@ -47,9 +49,10 @@ std::string lowercase_extension(const std::string &value)
     return extension;
 }
 
-SinglePlateSliceResult failure(std::string code, std::string message)
+SinglePlateSliceResult failure(std::string code, std::string message,
+                               WorkerErrorCategory category = WorkerErrorCategory::Slicing)
 {
-    return {false, std::move(code), std::move(message)};
+    return {false, std::move(code), std::move(message), category};
 }
 
 bool read_profile_path(const nlohmann::json &profiles, const char *key, std::string &target,
@@ -143,10 +146,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         };
 
         progress("input", 2, "Loading model");
-        const std::filesystem::path input_path = job_root / request.input_model;
-        const std::filesystem::path output_path = job_root / request.output_gcode;
-        if (!std::filesystem::is_regular_file(input_path))
-            return failure("input_not_found", "The input model does not exist or is not a regular file.");
+        std::filesystem::path input_path;
+        WorkerManifestError path_error;
+        if (!resolve_job_file(job_root, request.input_model, WorkerErrorCategory::Input, input_path, path_error))
+            return failure(path_error.code, path_error.message, path_error.category);
 
         Model model;
         bool loaded = false;
@@ -158,7 +161,7 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
         }
         if (!loaded || model.objects.empty())
-            return failure("model_load_failed", "The input model could not be loaded.");
+            return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
 
         progress("input", 10, "Model loaded");
         model.add_default_instances();
@@ -172,11 +175,12 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
             std::map<std::string, std::string> metadata;
             std::string reason;
-            const std::filesystem::path resolved_profile = job_root / *profile_path;
-            if (!std::filesystem::is_regular_file(resolved_profile))
-                return failure("profile_not_found", "A resolved profile does not exist or is not a regular file.");
+            std::filesystem::path resolved_profile;
+            if (!resolve_job_file(job_root, *profile_path, WorkerErrorCategory::Profile, resolved_profile, path_error))
+                return failure(path_error.code, path_error.message, path_error.category);
             if (profile.load_from_json(resolved_profile.string(), substitutions, true, metadata, reason) != 0)
-                return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason);
+                return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason,
+                               WorkerErrorCategory::Profile);
             config.apply(profile);
         }
         for (const auto &[key, value] : request.settings)
@@ -195,11 +199,12 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         print.apply(model, config);
         const StringObjectException validation_error = print.validate();
         if (!validation_error.string.empty())
-            return failure("slice_validation_failed", validation_error.string);
+            return failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
 
-        const std::filesystem::path output_directory = output_path.parent_path();
-        if (!output_directory.empty())
-            std::filesystem::create_directories(output_directory);
+        std::optional<ArtifactTransaction> artifact =
+            ArtifactTransaction::begin(job_root, request.output_gcode, request.envelope.job_id, path_error);
+        if (!artifact)
+            return failure(path_error.code, path_error.message, path_error.category);
 
         unsigned last_public_percent = 25;
         bool exporting = false;
@@ -218,12 +223,15 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         print.process();
         exporting = true;
         progress("export", 90, "Exporting G-code");
-        print.export_gcode(output_path.string(), nullptr, nullptr);
-        if (!std::filesystem::is_regular_file(output_path) || std::filesystem::file_size(output_path) == 0)
+        print.export_gcode(artifact->temporary_path().string(), nullptr, nullptr);
+        if (!std::filesystem::is_regular_file(artifact->temporary_path()) ||
+            std::filesystem::file_size(artifact->temporary_path()) == 0)
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
 
         progress("finalize", 99, "Validating artifact");
-        return {true, {}, {}};
+        if (!artifact->commit(path_error))
+            return failure(path_error.code, path_error.message, path_error.category);
+        return {true, {}, {}, WorkerErrorCategory::Slicing};
     } catch (const std::exception &error) {
         return failure("slice_failed", error.what());
     }
