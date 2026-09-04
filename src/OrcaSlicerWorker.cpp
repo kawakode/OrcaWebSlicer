@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <csignal>
 #include <chrono>
 #include <cstdint>
@@ -16,8 +17,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -39,6 +42,11 @@
 namespace {
 
 constexpr std::uintmax_t MAX_MANIFEST_SIZE = 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_INPUT_BYTES = 250ull * 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_TRIANGLES = 1'000'000;
+constexpr std::uint64_t DEFAULT_MAX_WALL_TIME_MS = 300'000;
+constexpr std::uintmax_t DEFAULT_MAX_MEMORY_BYTES = 4ull * 1024 * 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_OUTPUT_BYTES = 1024ull * 1024 * 1024;
 
 enum class ExitCode : int {
     Success         = 0,
@@ -321,6 +329,53 @@ std::uintmax_t peak_memory_bytes()
 #endif
 }
 
+bool read_configured_limit(const char *name, std::uintmax_t default_value, std::uintmax_t &value, std::string &error)
+{
+    value = default_value;
+    const char *configured = std::getenv(name);
+    if (configured == nullptr || *configured == '\0')
+        return true;
+
+    const std::string_view serialized(configured);
+    std::uintmax_t parsed = 0;
+    const auto [end, parse_error] = std::from_chars(serialized.data(), serialized.data() + serialized.size(), parsed);
+    if (parse_error != std::errc() || end != serialized.data() + serialized.size() || parsed == 0) {
+        error = std::string(name) + " must be a positive unsigned integer.";
+        return false;
+    }
+    value = parsed;
+    return true;
+}
+
+template<typename T>
+void tighten_limit(std::optional<T> &requested, T configured)
+{
+    requested = std::min(requested.value_or(configured), configured);
+}
+
+bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::string &error)
+{
+    std::uintmax_t max_input_bytes = 0;
+    std::uintmax_t max_triangles = 0;
+    std::uintmax_t max_wall_time_ms = 0;
+    std::uintmax_t max_memory_bytes = 0;
+    std::uintmax_t max_output_bytes = 0;
+    if (!read_configured_limit("ORCA_WEB_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES, max_input_bytes, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_TRIANGLES", DEFAULT_MAX_TRIANGLES, max_triangles, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_WALL_TIME_MS", DEFAULT_MAX_WALL_TIME_MS, max_wall_time_ms, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_MEMORY_BYTES", DEFAULT_MAX_MEMORY_BYTES, max_memory_bytes, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES, max_output_bytes, error))
+        return false;
+
+    tighten_limit(request.max_input_bytes, max_input_bytes);
+    tighten_limit(request.max_triangles, max_triangles);
+    tighten_limit(request.max_wall_time_ms, static_cast<std::uint64_t>(
+        std::min<std::uintmax_t>(max_wall_time_ms, std::numeric_limits<std::uint64_t>::max())));
+    tighten_limit(request.max_memory_bytes, max_memory_bytes);
+    tighten_limit(request.max_output_bytes, max_output_bytes);
+    return true;
+}
+
 std::string sha256_file(const std::filesystem::path &path, std::string &error)
 {
     std::ifstream input(path, std::ios::binary);
@@ -490,7 +545,7 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::InternalError);
         }
 
-        const Slic3r::Web::SinglePlateSliceRequestValidation validation =
+        Slic3r::Web::SinglePlateSliceRequestValidation validation =
             Slic3r::Web::validate_single_plate_slice_request(contents);
         if (!validation.is_valid()) {
             for (const Slic3r::Web::WorkerManifestError &request_error : validation.errors)
@@ -502,6 +557,20 @@ int main(int argc, char **argv)
                 std::cerr << error << '\n';
             emitter.state(Slic3r::Web::WorkerJobState::Failed);
             return static_cast<int>(ExitCode::InvalidManifest);
+        }
+
+        if (!apply_runtime_limits(*validation.request, error)) {
+            const Slic3r::Web::WorkerManifestError limit_error {
+                "invalid_runtime_limits", error, Slic3r::Web::WorkerErrorCategory::Internal
+            };
+            emitter.error(limit_error);
+            final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
+            final_result.error = limit_error;
+            finish_timing(final_result, started, cpu_started);
+            if (!write_result(job_root, final_result, error))
+                std::cerr << error << '\n';
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
         }
 
         if (!initialize_resources(argv[0], error)) {
@@ -530,6 +599,7 @@ int main(int argc, char **argv)
             emitter.warning(warning);
         };
         callbacks.cancellation_requested = []() { return cancellation_requested(); };
+        callbacks.memory_usage_bytes = []() { return peak_memory_bytes(); };
         const Slic3r::Web::SinglePlateSliceResult result =
             Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);

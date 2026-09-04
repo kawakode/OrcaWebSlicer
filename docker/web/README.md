@@ -41,8 +41,16 @@ The Compose environment sets `ORCA_SLICER_RESOURCES=/workspace/resources`.
 Packaged workers must set the same variable when the resources directory is not
 discoverable beside the executable or in the current working directory.
 
+Worker ceilings default to 250 MiB of input, 1,000,000 triangles, 300 seconds,
+4 GiB of memory, and 1 GiB of generated G-code. Override them with
+`ORCA_WEB_MAX_INPUT_BYTES`, `ORCA_WEB_MAX_TRIANGLES`,
+`ORCA_WEB_MAX_WALL_TIME_MS`, `ORCA_WEB_MAX_MEMORY_BYTES`, and
+`ORCA_WEB_MAX_OUTPUT_BYTES`. Values are byte counts except wall time, which is
+milliseconds. Manifest limits can only tighten these server ceilings.
+
 The smoke check runs the focused manifest, protocol, request, core-color, and flush-volume
-contract tests; slices a 20 mm cube both from explicit settings and from resolved
+contract tests; exercises stable input, triangle, wall-time, memory, and output
+limit failures; slices a 20 mm cube both from explicit settings and from resolved
 Anycubic machine/process/filament profiles; exercises the version and manifest-
 envelope commands; verifies terminal NDJSON events, `result.json` artifact
 metadata, and the invalid-manifest exit code; and rejects GUI,

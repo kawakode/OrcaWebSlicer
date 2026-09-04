@@ -43,10 +43,30 @@ The manifest file is limited to 1 MiB, and a slice payload may contain at most
 256 serialized setting overrides. The initial worker rejects model formats
 other than STL and OBJ before invoking an importer.
 
-The optional `operation.payload.limits.max_output_bytes` field is a positive
-unsigned integer. When present, the worker monitors the temporary G-code during
-export and fails with resource-limit error `output_size_limit_exceeded` before
-publishing an oversized artifact.
+The optional `operation.payload.limits` object accepts positive unsigned
+integers for `max_input_bytes`, `max_triangles`, `max_wall_time_ms`,
+`max_memory_bytes`, and `max_output_bytes`. A request may tighten, but never
+raise, the server-configured ceiling. The worker applies these defaults when a
+field is omitted:
+
+| Environment variable | Default | Stable error code |
+| --- | ---: | --- |
+| `ORCA_WEB_MAX_INPUT_BYTES` | 250 MiB | `input_size_limit_exceeded` |
+| `ORCA_WEB_MAX_TRIANGLES` | 1,000,000 | `triangle_limit_exceeded` |
+| `ORCA_WEB_MAX_WALL_TIME_MS` | 300,000 | `wall_time_limit_exceeded` |
+| `ORCA_WEB_MAX_MEMORY_BYTES` | 4 GiB | `memory_limit_exceeded` |
+| `ORCA_WEB_MAX_OUTPUT_BYTES` | 1 GiB | `output_size_limit_exceeded` |
+
+Input size is checked before import and triangle count immediately after import.
+Wall time and memory are checked between stages and monitored during slicing and
+G-code export. Output size is monitored on the temporary G-code and checked
+again before publication. A limit failure publishes no G-code and exits with
+code 7.
+
+These checks provide useful terminal results during graceful shutdown. The
+executor must also impose hard process, memory, CPU, and wall-time ceilings and
+forcibly terminate a worker that does not stop within its grace period. A future
+3MF request additionally requires a separate extracted-content limit.
 
 ## Event transport
 

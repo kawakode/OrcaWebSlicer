@@ -22,6 +22,10 @@ struct SinglePlateSliceRequest
     std::string process_profile;
     std::string filament_profile;
     std::vector<std::pair<std::string, std::string>> settings;
+    std::optional<std::uintmax_t> max_input_bytes;
+    std::optional<std::uintmax_t> max_triangles;
+    std::optional<std::uint64_t> max_wall_time_ms;
+    std::optional<std::uintmax_t> max_memory_bytes;
     std::optional<std::uintmax_t> max_output_bytes;
 };
 
@@ -53,6 +57,7 @@ struct SinglePlateSliceCallbacks
     std::function<void(const SinglePlateSliceProgress &)> progress;
     std::function<void(const std::string &)> warning;
     std::function<bool()> cancellation_requested;
+    std::function<std::uintmax_t()> memory_usage_bytes;
 };
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized);

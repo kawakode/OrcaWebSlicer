@@ -53,6 +53,7 @@ the slicing engine:
 - Maximum triangle count per plate: 1,000,000, matching the existing CLI default.
 - Maximum slicing time: 300 seconds, matching the existing CLI default.
 - Maximum worker memory: 4 GiB.
+- Maximum generated G-code: 1 GiB.
 - Job artifacts expire after 24 hours unless a deployment overrides retention.
 
 Every limit must produce a stable error code and a useful user-facing message.

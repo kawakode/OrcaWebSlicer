@@ -19,6 +19,11 @@ x-build-environment: &build-environment
     GITHUB_WORKSPACE: /workspace
     ORCA_WEB_GIT_COMMIT: ${ORCA_WEB_GIT_COMMIT:-}
     ORCA_WEB_GIT_DIRTY: ${ORCA_WEB_GIT_DIRTY:-}
+    ORCA_WEB_MAX_INPUT_BYTES: ${ORCA_WEB_MAX_INPUT_BYTES:-262144000}
+    ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
+    ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
+    ORCA_WEB_MAX_TRIANGLES: ${ORCA_WEB_MAX_TRIANGLES:-1000000}
+    ORCA_WEB_MAX_WALL_TIME_MS: ${ORCA_WEB_MAX_WALL_TIME_MS:-300000}
     ORCA_SLICER_RESOURCES: /workspace/resources
     RUNNER_OS: Linux
     RUNNER_TEMP: /tmp
@@ -144,6 +149,9 @@ services:
         python3 -c 'import json, pathlib, sys; events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]; result=json.loads(pathlib.Path(sys.argv[2]).read_text()); assert events[-1]["state"] == "failed"; assert result["outcome"] == "failed"; assert result["artifacts"] == []; assert result["error"]["category"] == "resource_limit"; assert result["error"]["code"] == "output_size_limit_exceeded"' "$${limit_job_dir}/events.ndjson" "$${limit_job_dir}/result.json";
         rm -rf "$${limit_job_dir}";
         python3 scripts/test_web_worker_cancellation.py
+        --worker "$${worker}"
+        --model tests/data/20mm_cube.obj;
+        python3 scripts/test_web_worker_limits.py
         --worker "$${worker}"
         --model tests/data/20mm_cube.obj;
         profile_job_dir=$$(mktemp -d);

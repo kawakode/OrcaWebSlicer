@@ -67,8 +67,10 @@ cancellation, and artifact safety are reliable.
 
 ### 4. Enforce initial safety limits
 
-- [ ] Enforce the 250 MiB upload, 1 GiB extracted-content, 1,000,000 triangle,
-  300 second, 4 GiB memory, and configured output-size limits.
+- [x] Enforce server-configured 250 MiB input, 1,000,000 triangle, 300 second,
+  4 GiB memory, and 1 GiB output defaults in the worker, while allowing requests
+  only to tighten them.
+- [ ] Enforce the 1 GiB extracted-content limit when 3MF support is added.
 - [ ] Keep hard CPU, memory, process, and wall-time limits in the worker runtime;
   use worker-side checks for clearer errors where possible.
 - [x] Run slicing workers with network access disabled.
@@ -96,7 +98,9 @@ cancellation, and artifact safety are reliable.
 - [x] Every terminal outcome has a contract test and stable exit behavior.
 - [x] Progress is monotonic and warnings remain attached to the job.
 - [x] Cancellation stops a real slice and removes partial artifacts.
-- [ ] Limits and path containment are tested with adversarial inputs.
+- [ ] Limits and path containment are tested with adversarial inputs; worker-side
+  limit failures and path/symlink attacks are covered, while executor hard-limit
+  tests and 3MF decompression cases remain.
 - [ ] STL, OBJ, and one selected 3MF plate produce transactional artifacts.
 - [x] `worker-smoke`, `worker-baseline`, and the forbidden-dependency audit pass.
 

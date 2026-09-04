@@ -117,34 +117,60 @@ TEST_CASE("Single-plate request limits serialized setting count", "[SliceRequest
     REQUIRE(has_error(validation, "invalid_settings"));
 }
 
-TEST_CASE("Single-plate request accepts a configured output size limit", "[SliceRequest]")
+TEST_CASE("Single-plate request accepts configured resource limits", "[SliceRequest]")
 {
     const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
         "protocol_version": 1,
-        "job_id": "slice-output-limit",
+        "job_id": "slice-resource-limits",
         "operation": {"name":"slice","version":1,"payload":{
         "input_model": "model.obj",
         "output_gcode": "model.gcode",
-        "limits": {"max_output_bytes": 4096}
+        "limits": {
+            "max_input_bytes": 1024,
+            "max_triangles": 2048,
+            "max_wall_time_ms": 3000,
+            "max_memory_bytes": 8192,
+            "max_output_bytes": 4096
+        }
         }}
     })");
 
     REQUIRE(validation.is_valid());
+    REQUIRE(validation.request->max_input_bytes == 1024);
+    REQUIRE(validation.request->max_triangles == 2048);
+    REQUIRE(validation.request->max_wall_time_ms == 3000);
+    REQUIRE(validation.request->max_memory_bytes == 8192);
     REQUIRE(validation.request->max_output_bytes == 4096);
 }
 
-TEST_CASE("Single-plate request rejects invalid output size limits", "[SliceRequest]")
+TEST_CASE("Single-plate request rejects invalid resource limits", "[SliceRequest]")
 {
-    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
-        "protocol_version": 1,
-        "job_id": "slice-output-limit-invalid",
-        "operation": {"name":"slice","version":1,"payload":{
-        "input_model": "model.obj",
-        "output_gcode": "model.gcode",
-        "limits": {"max_output_bytes": 0}
-        }}
-    })");
-
-    REQUIRE_FALSE(validation.is_valid());
-    REQUIRE(has_error(validation, "invalid_output_limit"));
+    const std::vector<std::pair<std::string, std::string>> cases {
+        {"max_input_bytes", "invalid_input_limit"},
+        {"max_triangles", "invalid_triangle_limit"},
+        {"max_wall_time_ms", "invalid_wall_time_limit"},
+        {"max_memory_bytes", "invalid_memory_limit"},
+        {"max_output_bytes", "invalid_output_limit"}
+    };
+    for (const auto &[field, code] : cases) {
+        DYNAMIC_SECTION(field) {
+            nlohmann::json manifest = {
+                {"protocol_version", 1},
+                {"job_id", "slice-resource-limit-invalid"},
+                {"operation", {
+                    {"name", "slice"},
+                    {"version", 1},
+                    {"payload", {
+                        {"input_model", "model.obj"},
+                        {"output_gcode", "model.gcode"},
+                        {"limits", {{field, 0}}}
+                    }}
+                }}
+            };
+            const SinglePlateSliceRequestValidation validation =
+                validate_single_plate_slice_request(manifest.dump());
+            REQUIRE_FALSE(validation.is_valid());
+            REQUIRE(has_error(validation, code));
+        }
+    }
 }
