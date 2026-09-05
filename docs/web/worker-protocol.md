@@ -27,7 +27,8 @@ operation-specific fields live inside `operation.payload`.
         "process": "profiles/process.json",
         "filament": "profiles/filament.json"
       },
-      "settings": {"layer_height": "0.2"}
+      "settings": {"layer_height": "0.2"},
+      "plate_index": 1
     }
   }
 }
@@ -40,14 +41,17 @@ are allowed at every object level. Required fields cannot be removed or change
 type within a version.
 
 The manifest file is limited to 1 MiB, and a slice payload may contain at most
-256 serialized setting overrides. The initial worker rejects model formats
-other than STL and OBJ before invoking an importer.
+256 serialized setting overrides. The worker rejects model formats other than
+STL, OBJ, and 3MF before invoking an importer.
+
+`plate_index` is the optional 1-based plate to slice from a project archive. It
+defaults to 1 and is ignored for meshes, which always describe one plate.
 
 The optional `operation.payload.limits` object accepts positive unsigned
 integers for `max_input_bytes`, `max_triangles`, `max_wall_time_ms`,
-`max_memory_bytes`, and `max_output_bytes`. A request may tighten, but never
-raise, the server-configured ceiling. The worker applies these defaults when a
-field is omitted:
+`max_memory_bytes`, `max_output_bytes`, and `max_extracted_bytes`. A request may
+tighten, but never raise, the server-configured ceiling. The worker applies these
+defaults when a field is omitted:
 
 | Environment variable | Default | Stable error code |
 | --- | ---: | --- |
@@ -56,17 +60,18 @@ field is omitted:
 | `ORCA_WEB_MAX_WALL_TIME_MS` | 300,000 | `wall_time_limit_exceeded` |
 | `ORCA_WEB_MAX_MEMORY_BYTES` | 4 GiB | `memory_limit_exceeded` |
 | `ORCA_WEB_MAX_OUTPUT_BYTES` | 1 GiB | `output_size_limit_exceeded` |
+| `ORCA_WEB_MAX_EXTRACTED_BYTES` | 1 GiB | `archive_extracted_size_limit_exceeded` |
 
 Input size is checked before import and triangle count immediately after import.
 Wall time and memory are checked between stages and monitored during slicing and
 G-code export. Output size is monitored on the temporary G-code and checked
-again before publication. A limit failure publishes no G-code and exits with
-code 7.
+again before publication. Extracted content is checked against a project
+archive's central directory before the importer opens it. A limit failure
+publishes no G-code and exits with code 7.
 
 These checks provide useful terminal results during graceful shutdown. The
 executor must also impose hard process, memory, CPU, and wall-time ceilings and
-forcibly terminate a worker that does not stop within its grace period. A future
-3MF request additionally requires a separate extracted-content limit.
+forcibly terminate a worker that does not stop within its grace period.
 
 The implemented [isolated executor](executor.md) applies those hard Linux
 limits, bounds event and diagnostic capture, and validates the terminal worker
@@ -120,6 +125,39 @@ state, and exits with code 6. It does not publish G-code.
 Envelope failures cannot safely identify a job and therefore write diagnostics
 to stderr without job events or a result. Once an envelope is accepted, every
 terminal path emits a terminal state and attempts to publish `result.json`.
+
+## Project archive input
+
+A `.3mf` input is imported through the core project importer, which needs no
+desktop plate list, and never through the desktop's OpenGL thumbnail or
+auxiliary-file paths.
+
+Before the importer opens the archive, its central directory is checked entry by
+entry. An entry is rejected as `archive_entry_unsafe` when it is a symbolic link
+or when its name is absolute, carries a drive letter, uses backslashes, contains
+a `.` or `..` component, or contains control characters. An archive that is not
+a readable ZIP container is rejected as `archive_unreadable`. Declared sizes are
+bounded by `archive_entry_count_limit_exceeded`,
+`archive_entry_size_limit_exceeded`,
+`archive_compression_ratio_limit_exceeded`, and
+`archive_extracted_size_limit_exceeded`, all in the `resource_limit` category.
+
+Only the first plate is in scope. A project holding more than one plate is
+rejected with `multi_plate_project_unsupported`, and a `plate_index` beyond the
+project's plates is rejected with `plate_index_out_of_range`, because slicing a
+later plate requires the desktop plate-list layout that offsets every plate on
+one shared coordinate system. A plate with no printable object is rejected with
+`empty_plate_selection`. All four are `input` failures.
+
+When the archive declares a plate, the importer keeps its stored object
+transforms: the objects are never re-arranged, and only objects entirely below
+the bed are lifted onto it. A plain 3MF that declares no plate is a mesh
+container whose coordinates carry no placement, so it is arranged like a loose
+mesh instead.
+
+The configuration chain is the engine defaults, then the archive's embedded
+project and plate configuration including its filament mapping, then any
+profiles resolved by the request, then the request's curated setting overrides.
 
 ## Artifact publication
 

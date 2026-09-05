@@ -22,11 +22,15 @@ struct SinglePlateSliceRequest
     std::string process_profile;
     std::string filament_profile;
     std::vector<std::pair<std::string, std::string>> settings;
+    // 1-based plate selection inside a project archive. Mesh inputs describe a
+    // single implicit plate and ignore it.
+    unsigned plate_index {1};
     std::optional<std::uintmax_t> max_input_bytes;
     std::optional<std::uintmax_t> max_triangles;
     std::optional<std::uint64_t> max_wall_time_ms;
     std::optional<std::uintmax_t> max_memory_bytes;
     std::optional<std::uintmax_t> max_output_bytes;
+    std::optional<std::uintmax_t> max_extracted_bytes;
 };
 
 struct SinglePlateSliceRequestValidation

@@ -47,6 +47,7 @@ constexpr std::uintmax_t DEFAULT_MAX_TRIANGLES = 1'000'000;
 constexpr std::uint64_t DEFAULT_MAX_WALL_TIME_MS = 300'000;
 constexpr std::uintmax_t DEFAULT_MAX_MEMORY_BYTES = 4ull * 1024 * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_OUTPUT_BYTES = 1024ull * 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_EXTRACTED_BYTES = 1024ull * 1024 * 1024;
 
 enum class ExitCode : int {
     Success         = 0,
@@ -360,11 +361,13 @@ bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::st
     std::uintmax_t max_wall_time_ms = 0;
     std::uintmax_t max_memory_bytes = 0;
     std::uintmax_t max_output_bytes = 0;
+    std::uintmax_t max_extracted_bytes = 0;
     if (!read_configured_limit("ORCA_WEB_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES, max_input_bytes, error) ||
         !read_configured_limit("ORCA_WEB_MAX_TRIANGLES", DEFAULT_MAX_TRIANGLES, max_triangles, error) ||
         !read_configured_limit("ORCA_WEB_MAX_WALL_TIME_MS", DEFAULT_MAX_WALL_TIME_MS, max_wall_time_ms, error) ||
         !read_configured_limit("ORCA_WEB_MAX_MEMORY_BYTES", DEFAULT_MAX_MEMORY_BYTES, max_memory_bytes, error) ||
-        !read_configured_limit("ORCA_WEB_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES, max_output_bytes, error))
+        !read_configured_limit("ORCA_WEB_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES, max_output_bytes, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_EXTRACTED_BYTES", DEFAULT_MAX_EXTRACTED_BYTES, max_extracted_bytes, error))
         return false;
 
     tighten_limit(request.max_input_bytes, max_input_bytes);
@@ -373,6 +376,7 @@ bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::st
         std::min<std::uintmax_t>(max_wall_time_ms, std::numeric_limits<std::uint64_t>::max())));
     tighten_limit(request.max_memory_bytes, max_memory_bytes);
     tighten_limit(request.max_output_bytes, max_output_bytes);
+    tighten_limit(request.max_extracted_bytes, max_extracted_bytes);
     return true;
 }
 

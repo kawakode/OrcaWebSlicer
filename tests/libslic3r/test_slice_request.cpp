@@ -82,7 +82,7 @@ TEST_CASE("Single-plate request limits initial model and artifact formats", "[Sl
         "protocol_version": 1,
         "job_id": "slice-3",
         "operation": {"name":"slice","version":1,"payload":{
-        "input_model": "model.3mf",
+        "input_model": "model.step",
         "output_gcode": "preview.png"
         }}
     })");
@@ -90,6 +90,63 @@ TEST_CASE("Single-plate request limits initial model and artifact formats", "[Sl
     REQUIRE_FALSE(validation.is_valid());
     REQUIRE(has_error(validation, "unsupported_input_format"));
     REQUIRE(has_error(validation, "unsupported_output_format"));
+}
+
+TEST_CASE("Single-plate request accepts a project archive and plate selection", "[SliceRequest]")
+{
+    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
+        "protocol_version": 1,
+        "job_id": "slice-project",
+        "operation": {"name":"slice","version":1,"payload":{
+        "input_model": "input/project.3MF",
+        "output_gcode": "output/project.gcode",
+        "plate_index": 1
+        }}
+    })");
+
+    REQUIRE(validation.is_valid());
+    REQUIRE(validation.request->input_model == "input/project.3MF");
+    REQUIRE(validation.request->plate_index == 1);
+}
+
+TEST_CASE("Single-plate request defaults to the first plate", "[SliceRequest]")
+{
+    const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(R"({
+        "protocol_version": 1,
+        "job_id": "slice-project-default-plate",
+        "operation": {"name":"slice","version":1,"payload":{
+        "input_model": "project.3mf",
+        "output_gcode": "project.gcode"
+        }}
+    })");
+
+    REQUIRE(validation.is_valid());
+    REQUIRE(validation.request->plate_index == 1);
+}
+
+TEST_CASE("Single-plate request rejects an unusable plate selection", "[SliceRequest]")
+{
+    for (const auto &plate_index : {nlohmann::json(0), nlohmann::json(37), nlohmann::json(-1), nlohmann::json("1")}) {
+        DYNAMIC_SECTION(plate_index.dump()) {
+            nlohmann::json manifest = {
+                {"protocol_version", 1},
+                {"job_id", "slice-invalid-plate"},
+                {"operation", {
+                    {"name", "slice"},
+                    {"version", 1},
+                    {"payload", {
+                        {"input_model", "project.3mf"},
+                        {"output_gcode", "project.gcode"},
+                        {"plate_index", plate_index}
+                    }}
+                }}
+            };
+            const SinglePlateSliceRequestValidation validation =
+                validate_single_plate_slice_request(manifest.dump());
+            REQUIRE_FALSE(validation.is_valid());
+            REQUIRE(has_error(validation, "invalid_plate_index"));
+        }
+    }
 }
 
 TEST_CASE("Single-plate request limits serialized setting count", "[SliceRequest]")
@@ -130,7 +187,8 @@ TEST_CASE("Single-plate request accepts configured resource limits", "[SliceRequ
             "max_triangles": 2048,
             "max_wall_time_ms": 3000,
             "max_memory_bytes": 8192,
-            "max_output_bytes": 4096
+            "max_output_bytes": 4096,
+            "max_extracted_bytes": 16384
         }
         }}
     })");
@@ -141,6 +199,7 @@ TEST_CASE("Single-plate request accepts configured resource limits", "[SliceRequ
     REQUIRE(validation.request->max_wall_time_ms == 3000);
     REQUIRE(validation.request->max_memory_bytes == 8192);
     REQUIRE(validation.request->max_output_bytes == 4096);
+    REQUIRE(validation.request->max_extracted_bytes == 16384);
 }
 
 TEST_CASE("Single-plate request rejects invalid resource limits", "[SliceRequest]")
@@ -150,7 +209,8 @@ TEST_CASE("Single-plate request rejects invalid resource limits", "[SliceRequest
         {"max_triangles", "invalid_triangle_limit"},
         {"max_wall_time_ms", "invalid_wall_time_limit"},
         {"max_memory_bytes", "invalid_memory_limit"},
-        {"max_output_bytes", "invalid_output_limit"}
+        {"max_output_bytes", "invalid_output_limit"},
+        {"max_extracted_bytes", "invalid_extracted_limit"}
     };
     for (const auto &[field, code] : cases) {
         DYNAMIC_SECTION(field) {

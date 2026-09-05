@@ -24,8 +24,8 @@ prerequisites pass.
 | G0 | Scope and architecture | MVP, non-goals, limits, licensing, and security assumptions are documented | Complete |
 | G1 | Native baseline | Representative fixtures pass with recorded semantic output, wall time, and peak memory | Complete (initial matrix) |
 | G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
-| G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | In progress |
-| G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Not started |
+| G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
+| G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | In progress |
 | G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Not started |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
 
@@ -44,11 +44,12 @@ prerequisites pass.
 
 ## Immediate implementation sequence
 
-Transactional publication, path containment, cooperative worker limits, and the
-isolated executor boundary are now in place. The remaining sequence is:
+Transactional publication, path containment, cooperative worker limits, the
+isolated executor boundary, and guarded single-plate 3MF import are now in
+place. The remaining sequence is:
 
-1. Add guarded single-plate 3MF import after path containment and extraction
-   limits are enforced.
+1. Record the ADR selecting the frontend and API frameworks, then build the
+   job-directory lifecycle and minimum API around the existing executor.
 
 The first browser screen is intentionally after these steps.
 

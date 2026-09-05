@@ -126,12 +126,12 @@ The work will be split into reviewable units in this order:
 
 Each unit must leave the desktop executable behavior unchanged.
 
-All seven G2 units are complete for job-local STL/OBJ input. The worker loads
-resolved profiles, uses core arrangement and slicing APIs, exports G-code, and
-matches the initial native semantic matrix without linking the desktop target.
-Transactional artifacts, progress, and graceful cancellation are implemented
-in G3. 3MF import and resource-limit enforcement remain explicit G3 work rather
-than blockers to the headless boundary.
+All seven G2 units are complete for job-local STL, OBJ, and single-plate 3MF
+input. The worker loads resolved profiles, uses core arrangement and slicing
+APIs, exports G-code, and matches the initial native semantic matrix without
+linking the desktop target. Transactional artifacts, progress, graceful
+cancellation, resource limits, and guarded project-archive import are
+implemented in G3.
 
 ## Dependency guard
 
@@ -156,8 +156,11 @@ a claim that `libslic3r` already has a minimal dependency graph.
 
 ## First unresolved questions
 
-- Which current 3MF loader path exposes the exact one-plate metadata needed without
-  constructing `PartPlateList`?
+Resolved: `load_bbs_3mf` exposes the selected plate's objects, project and plate
+configuration, and filament mapping with no `PartPlateList`, and needs neither
+`LoadAuxiliary` nor thumbnails. Slicing a plate after the first would additionally
+require the desktop plate-origin layout, so it stays outside the MVP scope.
+
 - Which CLI validations are web contracts and which are upload-service policy?
 - Can all required progress stages be represented by existing `Print` status
   callbacks, or is orchestration-level instrumentation needed?

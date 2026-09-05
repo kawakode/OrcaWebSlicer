@@ -24,6 +24,7 @@ x-build-environment: &build-environment
     ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
     ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
     ORCA_WEB_MAX_EVENT_BYTES: ${ORCA_WEB_MAX_EVENT_BYTES:-1048576}
+    ORCA_WEB_MAX_EXTRACTED_BYTES: ${ORCA_WEB_MAX_EXTRACTED_BYTES:-1073741824}
     ORCA_WEB_MAX_EVENT_LINE_BYTES: ${ORCA_WEB_MAX_EVENT_LINE_BYTES:-65536}
     ORCA_WEB_MAX_EVENTS: ${ORCA_WEB_MAX_EVENTS:-4096}
     ORCA_WEB_MAX_LOG_BYTES: ${ORCA_WEB_MAX_LOG_BYTES:-1048576}
@@ -106,6 +107,7 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[Color]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[FlushVolumes]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SliceRequest]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -157,6 +159,50 @@ services:
         test -z "$$(find "$${limit_job_dir}" -name '*.partial' -print -quit)";
         python3 -c 'import json, pathlib, sys; events=[json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]; result=json.loads(pathlib.Path(sys.argv[2]).read_text()); assert events[-1]["state"] == "failed"; assert result["outcome"] == "failed"; assert result["artifacts"] == []; assert result["error"]["category"] == "resource_limit"; assert result["error"]["code"] == "output_size_limit_exceeded"' "$${limit_job_dir}/events.ndjson" "$${limit_job_dir}/result.json";
         rm -rf "$${limit_job_dir}";
+        project_job_dir=$$(mktemp -d);
+        cp "tests/data/test_3mf/Geräte/Büchse.3mf" "$${project_job_dir}/project.3mf";
+        cp tests/data/web-worker/project-slice-envelope.json "$${project_job_dir}/request.json";
+        "$${worker}" --slice-manifest "$${project_job_dir}/request.json" | tee "$${project_job_dir}/events.ndjson";
+        test -s "$${project_job_dir}/result.gcode";
+        test -z "$$(find "$${project_job_dir}" -name '*.partial' -print -quit)";
+        grep -q '^G1 ' "$${project_job_dir}/result.gcode";
+        python3 -c 'import json, pathlib, sys; result=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert result["outcome"] == "succeeded"; assert result["artifacts"][0]["path"] == "result.gcode"' "$${project_job_dir}/result.json";
+        rm -rf "$${project_job_dir}";
+        bomb_job_dir=$$(mktemp -d);
+        python3 -c 'import sys, zipfile; archive=zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED); [archive.writestr("Metadata/entry_%d.json" % index, bytes(512 * 1024)) for index in range(4)]; archive.close()' "$${bomb_job_dir}/project.3mf";
+        cp tests/data/web-worker/project-extraction-limit-envelope.json "$${bomb_job_dir}/request.json";
+        set +e;
+        "$${worker}" --slice-manifest "$${bomb_job_dir}/request.json" | tee "$${bomb_job_dir}/events.ndjson";
+        bomb_status=$$?;
+        set -e;
+        test "$${bomb_status}" -eq 7;
+        test ! -e "$${bomb_job_dir}/result.gcode";
+        python3 -c 'import json, pathlib, sys; result=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert result["outcome"] == "failed"; assert result["artifacts"] == []; assert result["error"]["category"] == "resource_limit"; assert result["error"]["code"] == "archive_extracted_size_limit_exceeded"' "$${bomb_job_dir}/result.json";
+        rm -rf "$${bomb_job_dir}";
+        multi_plate_job_dir=$$(mktemp -d);
+        python3 -c 'import shutil, sys, zipfile; shutil.copyfile(sys.argv[1], sys.argv[2]); archive=zipfile.ZipFile(sys.argv[2], "a"); archive.writestr("Metadata/model_settings.config", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n  <plate>\n    <metadata key=\"plater_id\" value=\"1\"/>\n  </plate>\n  <plate>\n    <metadata key=\"plater_id\" value=\"2\"/>\n  </plate>\n</config>\n"); archive.close()' "tests/data/test_3mf/Geräte/Büchse.3mf" "$${multi_plate_job_dir}/project.3mf";
+        cp tests/data/web-worker/project-slice-envelope.json "$${multi_plate_job_dir}/request.json";
+        set +e;
+        "$${worker}" --slice-manifest "$${multi_plate_job_dir}/request.json" | tee "$${multi_plate_job_dir}/events.ndjson";
+        multi_plate_status=$$?;
+        set -e;
+        test "$${multi_plate_status}" -eq 5;
+        test ! -e "$${multi_plate_job_dir}/result.gcode";
+        python3 -c 'import json, pathlib, sys; result=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert result["outcome"] == "failed"; assert result["artifacts"] == []; assert result["error"]["category"] == "input"; assert result["error"]["code"] == "multi_plate_project_unsupported"' "$${multi_plate_job_dir}/result.json";
+        rm -rf "$${multi_plate_job_dir}";
+        escape_job_dir=$$(mktemp -d);
+        python3 -c 'import sys, zipfile; archive=zipfile.ZipFile(sys.argv[1], "w"); archive.writestr("3D/3dmodel.model", "<model/>"); archive.writestr("../escaped.config", "escaped"); archive.close()' "$${escape_job_dir}/project.3mf";
+        cp tests/data/web-worker/project-slice-envelope.json "$${escape_job_dir}/request.json";
+        set +e;
+        "$${worker}" --slice-manifest "$${escape_job_dir}/request.json" | tee "$${escape_job_dir}/events.ndjson";
+        escape_status=$$?;
+        set -e;
+        test "$${escape_status}" -eq 5;
+        test ! -e "$${escape_job_dir}/result.gcode";
+        test ! -e "$${escape_job_dir}/escaped.config";
+        test ! -e "$${escape_job_dir}/../escaped.config";
+        python3 -c 'import json, pathlib, sys; result=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert result["outcome"] == "failed"; assert result["error"]["category"] == "input"; assert result["error"]["code"] == "archive_entry_unsafe"' "$${escape_job_dir}/result.json";
+        rm -rf "$${escape_job_dir}";
         python3 scripts/test_web_worker_cancellation.py
         --worker "$${worker}"
         --model tests/data/20mm_cube.obj;

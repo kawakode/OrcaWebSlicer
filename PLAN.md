@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-04
+Last updated: 2026-09-05
 
 ## Objective
 
@@ -19,9 +19,11 @@ The foundation is complete:
 - [x] Cube, bridge, and concave-hole worker output matches the native semantic
   baseline.
 - [x] Docker smoke, dependency, and parity checks are automated.
+- [x] G3: the versioned worker contract, transactional artifacts, cancellation,
+  safety limits, and guarded single-plate 3MF import are complete.
 
-The active gate is G3. Browser work begins only after the worker contract,
-cancellation, and artifact safety are reliable.
+The active gate is G4. It starts from the web-stack ADR and the job-directory
+lifecycle around the existing isolated executor.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -70,7 +72,7 @@ cancellation, and artifact safety are reliable.
 - [x] Enforce server-configured 250 MiB input, 1,000,000 triangle, 300 second,
   4 GiB memory, and 1 GiB output defaults in the worker, while allowing requests
   only to tighten them.
-- [ ] Enforce the 1 GiB extracted-content limit when 3MF support is added.
+- [x] Enforce the 1 GiB extracted-content limit when 3MF support is added.
 - [x] Keep hard CPU, memory, process, and wall-time limits in the worker runtime;
   use worker-side checks for clearer errors where possible.
 - [x] Run slicing workers with network access disabled.
@@ -81,27 +83,27 @@ cancellation, and artifact safety are reliable.
 
 ### 5. Add single-plate 3MF input
 
-- [ ] Identify the smallest core 3MF import path that does not construct
+- [x] Identify the smallest core 3MF import path that does not construct
   `GUI::PartPlateList`.
-- [ ] Extract the selected plate's model, transforms, project configuration, and
+- [x] Extract the selected plate's model, transforms, project configuration, and
   filament mapping into the neutral worker request model.
-- [ ] Reject multi-plate selection beyond the declared single-plate scope with a
+- [x] Reject multi-plate selection beyond the declared single-plate scope with a
   stable error.
-- [ ] Protect archive extraction against absolute paths, `..`, symlinks,
+- [x] Protect archive extraction against absolute paths, `..`, symlinks,
   decompression bombs, and oversized entries.
-- [ ] Preserve existing embedded metadata where possible; do not generate
+- [x] Preserve existing embedded metadata where possible; do not generate
   desktop OpenGL thumbnails.
-- [ ] Add Unicode-path, invalid-archive, multi-plate, and compatibility fixtures.
+- [x] Add Unicode-path, invalid-archive, multi-plate, and compatibility fixtures.
 
 ### G3 exit criteria
 
 - [x] Every terminal outcome has a contract test and stable exit behavior.
 - [x] Progress is monotonic and warnings remain attached to the job.
 - [x] Cancellation stops a real slice and removes partial artifacts.
-- [ ] Limits and path containment are tested with adversarial inputs; worker-side
-  limits, path/symlink attacks, and executor hard-limit cases are covered, while
-  3MF decompression cases remain.
-- [ ] STL, OBJ, and one selected 3MF plate produce transactional artifacts.
+- [x] Limits and path containment are tested with adversarial inputs; worker-side
+  limits, path/symlink attacks, executor hard-limit cases, and 3MF archive
+  containment and decompression cases are covered.
+- [x] STL, OBJ, and one selected 3MF plate produce transactional artifacts.
 - [x] `worker-smoke`, `worker-baseline`, and the forbidden-dependency audit pass.
 
 ## Phase 2: Build the first browser vertical slice (G4, priority P1)

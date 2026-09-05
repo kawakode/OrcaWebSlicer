@@ -1,12 +1,16 @@
 #include "SinglePlateSlice.hpp"
 
 #include "ArtifactTransaction.hpp"
+#include "ProjectArchive.hpp"
 
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Semver.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -191,6 +195,90 @@ void read_positive_limit(const nlohmann::json &limits, const char *key, std::opt
     target = static_cast<T>(value->get<std::uint64_t>());
 }
 
+// Mirrors the desktop plate-count ceiling so an out-of-range selection is
+// rejected while parsing instead of after opening the archive.
+constexpr std::uint64_t MAX_PLATE_INDEX = 36;
+
+// Releases the owning collections load_bbs_3mf fills in, which the desktop
+// otherwise frees through the plater.
+struct ProjectImportGuard
+{
+    PlateDataPtrs        &plate_data_list;
+    std::vector<Preset *> &project_presets;
+
+    ~ProjectImportGuard()
+    {
+        release_PlateData_list(plate_data_list);
+        for (Preset *preset : project_presets)
+            delete preset;
+        project_presets.clear();
+    }
+};
+
+struct ProjectPlate
+{
+    DynamicPrintConfig config;
+    // True only when the archive declares plates. A plain 3MF is a mesh
+    // container whose coordinates carry no plate placement, so it is arranged
+    // like a loose mesh instead.
+    bool declares_plate {false};
+};
+
+// Loads one plate of a project archive into the neutral worker model. The
+// importer streams the archive itself, so containment and extraction limits are
+// checked against the central directory before it is handed over.
+SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &input_path,
+                                          Model &model, ProjectPlate &project)
+{
+    ProjectArchiveLimits archive_limits;
+    if (request.max_extracted_bytes) {
+        archive_limits.max_extracted_bytes = *request.max_extracted_bytes;
+        archive_limits.max_entry_bytes = std::min(archive_limits.max_entry_bytes, *request.max_extracted_bytes);
+    }
+    ProjectArchiveInspection inspection;
+    WorkerManifestError archive_error;
+    if (!inspect_project_archive(input_path, archive_limits, inspection, archive_error))
+        return failure(archive_error.code, archive_error.message, archive_error.category);
+
+    DynamicPrintConfig        loaded_config;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+    PlateDataPtrs             plate_data_list;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    bool                      is_orca_3mf = false;
+    Semver                    file_version;
+    const ProjectImportGuard  import_guard {plate_data_list, project_presets};
+
+    // LoadAuxiliary is deliberately omitted: the worker never needs the
+    // embedded thumbnails or auxiliary files the desktop renders.
+    const LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances;
+    if (!load_bbs_3mf(input_path.string().c_str(), &loaded_config, &substitutions, &model, &plate_data_list,
+                      &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr, strategy, nullptr,
+                      static_cast<int>(request.plate_index)))
+        return failure("project_load_failed", "The project archive could not be imported.", WorkerErrorCategory::Input);
+
+    // Slicing a plate other than the first requires the desktop plate-list
+    // layout that offsets every plate on one shared coordinate system, which is
+    // outside the declared single-plate scope.
+    if (plate_data_list.size() > 1)
+        return failure("multi_plate_project_unsupported",
+                       "The project contains more than one plate, which is outside the single-plate worker scope.",
+                       WorkerErrorCategory::Input);
+    if (request.plate_index != 1)
+        return failure("plate_index_out_of_range", "The project does not contain the requested plate.",
+                       WorkerErrorCategory::Input);
+
+    project.config = std::move(loaded_config);
+    project.declares_plate = !plate_data_list.empty();
+    if (project.declares_plate) {
+        const PlateData &plate = *plate_data_list.front();
+        project.config.apply(plate.config, true);
+        if (!plate.filament_maps.empty())
+            project.config.option<ConfigOptionInts>("filament_map", true)->values = plate.filament_maps;
+    }
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
 bool read_profile_path(const nlohmann::json &profiles, const char *key, std::string &target,
                        SinglePlateSliceRequestValidation &result)
 {
@@ -225,8 +313,9 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     if (input_model == payload.end() || !input_model->is_string() || !is_safe_relative_path(input_model->get_ref<const std::string &>())) {
         add_error(result, "invalid_input_model", "input_model must be a safe relative path.", WorkerErrorCategory::Input);
     } else if (const std::string extension = lowercase_extension(input_model->get_ref<const std::string &>());
-               extension != ".stl" && extension != ".obj") {
-        add_error(result, "unsupported_input_format", "input_model must be an STL or OBJ file.", WorkerErrorCategory::Input);
+               extension != ".stl" && extension != ".obj" && extension != ".3mf") {
+        add_error(result, "unsupported_input_format", "input_model must be an STL, OBJ, or 3MF file.",
+                  WorkerErrorCategory::Input);
     } else {
         request.input_model = input_model->get<std::string>();
     }
@@ -265,6 +354,19 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
             read_positive_limit(*limits, "max_wall_time_ms", request.max_wall_time_ms, "invalid_wall_time_limit", result);
             read_positive_limit(*limits, "max_memory_bytes", request.max_memory_bytes, "invalid_memory_limit", result);
             read_positive_limit(*limits, "max_output_bytes", request.max_output_bytes, "invalid_output_limit", result);
+            read_positive_limit(*limits, "max_extracted_bytes", request.max_extracted_bytes, "invalid_extracted_limit",
+                                result);
+        }
+    }
+
+    const auto plate_index = payload.find("plate_index");
+    if (plate_index != payload.end()) {
+        if (!plate_index->is_number_unsigned() || plate_index->get<std::uint64_t>() == 0 ||
+            plate_index->get<std::uint64_t>() > MAX_PLATE_INDEX) {
+            add_error(result, "invalid_plate_index", "plate_index must be a 1-based plate number.",
+                      WorkerErrorCategory::Input);
+        } else {
+            request.plate_index = plate_index->get<unsigned>();
         }
     }
 
@@ -318,17 +420,29 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             return failure("input_size_limit_exceeded", "The input model exceeds the configured size limit.",
                            WorkerErrorCategory::ResourceLimit);
 
+        const std::string extension = lowercase_extension(request.input_model);
+        const bool is_project = extension == ".3mf";
         Model model;
-        bool loaded = false;
-        if (lowercase_extension(request.input_model) == ".stl") {
-            loaded = load_stl(input_path.string().c_str(), &model);
+        ProjectPlate project;
+        if (is_project) {
+            if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project);
+                !loaded.success)
+                return loaded;
+            if (model.objects.empty())
+                return failure("empty_plate_selection", "The selected plate contains no printable objects.",
+                               WorkerErrorCategory::Input);
         } else {
-            ObjInfo obj_info;
-            std::string message;
-            loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
+            bool loaded = false;
+            if (extension == ".stl") {
+                loaded = load_stl(input_path.string().c_str(), &model);
+            } else {
+                ObjInfo obj_info;
+                std::string message;
+                loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
+            }
+            if (!loaded || model.objects.empty())
+                return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
         }
-        if (!loaded || model.objects.empty())
-            return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
 
         std::uintmax_t triangle_count = 0;
         for (const ModelObject *object : model.objects) {
@@ -342,9 +456,14 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
 
         throw_if_canceled();
         progress("input", 10, "Model loaded");
-        model.add_default_instances();
+        if (!is_project)
+            model.add_default_instances();
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         progress("configuration", 12, "Loading profiles");
+        // The embedded project configuration is the base for a project archive;
+        // profiles resolved by the request and curated overrides still win.
+        if (is_project)
+            config.apply(project.config, true);
         for (const std::string *profile_path : {&request.machine_profile, &request.process_profile, &request.filament_profile}) {
             if (profile_path->empty())
                 continue;
@@ -365,10 +484,16 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         for (const auto &[key, value] : request.settings)
             config.set_deserialize_strict(key, value);
 
-        progress("arrangement", 20, "Arranging objects");
-        ArrangeParams arrange_params(scaled(min_object_distance(config)));
-        arrange_params.progressind = [](unsigned, std::string) {};
-        arrange_objects(model, get_bed_shape(config), arrange_params);
+        // A plate carries the placement its author chose, so only loose meshes
+        // and plate-less archives are arranged.
+        if (project.declares_plate) {
+            progress("arrangement", 20, "Keeping project placement");
+        } else {
+            progress("arrangement", 20, "Arranging objects");
+            ArrangeParams arrange_params(scaled(min_object_distance(config)));
+            arrange_params.progressind = [](unsigned, std::string) {};
+            arrange_objects(model, get_bed_shape(config), arrange_params);
+        }
         throw_if_canceled();
 
         std::optional<ArtifactTransaction> artifact =
@@ -380,7 +505,9 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         PrintCancellationMonitor cancellation_monitor(print, request, callbacks, artifact->temporary_path(), started,
                                                        limit_exceeded);
         for (ModelObject *object : model.objects) {
-            object->ensure_on_bed();
+            // A plate may deliberately sink an object below the bed, so only
+            // fully buried objects are lifted, matching the desktop importer.
+            object->ensure_on_bed(project.declares_plate);
             print.auto_assign_extruders(object);
         }
         print.apply(model, config);
