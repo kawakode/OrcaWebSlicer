@@ -19,12 +19,21 @@ x-build-environment: &build-environment
     GITHUB_WORKSPACE: /workspace
     ORCA_WEB_GIT_COMMIT: ${ORCA_WEB_GIT_COMMIT:-}
     ORCA_WEB_GIT_DIRTY: ${ORCA_WEB_GIT_DIRTY:-}
+    ORCA_WEB_MAX_CPU_TIME_MS: ${ORCA_WEB_MAX_CPU_TIME_MS:-300000}
     ORCA_WEB_MAX_INPUT_BYTES: ${ORCA_WEB_MAX_INPUT_BYTES:-262144000}
     ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
     ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
+    ORCA_WEB_MAX_EVENT_BYTES: ${ORCA_WEB_MAX_EVENT_BYTES:-1048576}
+    ORCA_WEB_MAX_EVENT_LINE_BYTES: ${ORCA_WEB_MAX_EVENT_LINE_BYTES:-65536}
+    ORCA_WEB_MAX_EVENTS: ${ORCA_WEB_MAX_EVENTS:-4096}
+    ORCA_WEB_MAX_LOG_BYTES: ${ORCA_WEB_MAX_LOG_BYTES:-1048576}
+    ORCA_WEB_MAX_OPEN_FILES: ${ORCA_WEB_MAX_OPEN_FILES:-128}
+    ORCA_WEB_MAX_PROCESSES: ${ORCA_WEB_MAX_PROCESSES:-64}
     ORCA_WEB_MAX_TRIANGLES: ${ORCA_WEB_MAX_TRIANGLES:-1000000}
     ORCA_WEB_MAX_WALL_TIME_MS: ${ORCA_WEB_MAX_WALL_TIME_MS:-300000}
+    ORCA_WEB_TERMINATION_GRACE_MS: ${ORCA_WEB_TERMINATION_GRACE_MS:-5000}
     ORCA_SLICER_RESOURCES: /workspace/resources
+    PYTHONDONTWRITEBYTECODE: "1"
     RUNNER_OS: Linux
     RUNNER_TEMP: /tmp
   volumes:
@@ -181,6 +190,28 @@ services:
       - build-worker/src/Release/orca-slicer-worker
       - --native-baselines
       - build/web-baseline
+
+  executor-smoke:
+    <<: *build-environment
+    network_mode: none
+    init: true
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - bash
+      - -lc
+      - >-
+        python3 -m unittest discover -s tests/web -p 'test_*.py' -v
+        && python3 scripts/test_web_worker_executor.py
+        --worker build-worker/src/Release/orca-slicer-worker
+        --model tests/data/20mm_cube.obj
 
   baseline:
     <<: *build-environment

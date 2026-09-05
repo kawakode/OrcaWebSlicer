@@ -10,6 +10,7 @@ This directory is the source of truth for the web effort:
 - [Native compatibility baseline](baseline.md)
 - [Headless extraction audit](headless-audit.md)
 - [Worker protocol version 1](worker-protocol.md)
+- [Isolated worker executor](executor.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 
 ## Delivery gates
@@ -43,13 +44,10 @@ prerequisites pass.
 
 ## Immediate implementation sequence
 
-Transactional G-code publication and job-root path containment are now in
-place. The remaining sequence is:
+Transactional publication, path containment, cooperative worker limits, and the
+isolated executor boundary are now in place. The remaining sequence is:
 
-1. Add executor-enforced termination grace periods, hard process limits, and
-   bounded event/log capture before connecting a long-lived API service. The
-   worker now provides stable cooperative limit failures.
-2. Add guarded single-plate 3MF import after path containment and extraction
+1. Add guarded single-plate 3MF import after path containment and extraction
    limits are enforced.
 
 The first browser screen is intentionally after these steps.

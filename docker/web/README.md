@@ -34,6 +34,7 @@ an architectural check, not just a differently named desktop executable:
 ```powershell
 docker compose -f docker/web/compose.yml run --rm worker-build
 docker compose -f docker/web/compose.yml run --rm worker-smoke
+docker compose -f docker/web/compose.yml run --rm executor-smoke
 docker compose -f docker/web/compose.yml run --rm worker-baseline
 ```
 
@@ -47,6 +48,20 @@ Worker ceilings default to 250 MiB of input, 1,000,000 triangles, 300 seconds,
 `ORCA_WEB_MAX_WALL_TIME_MS`, `ORCA_WEB_MAX_MEMORY_BYTES`, and
 `ORCA_WEB_MAX_OUTPUT_BYTES`. Values are byte counts except wall time, which is
 milliseconds. Manifest limits can only tighten these server ceilings.
+
+`executor-smoke` verifies the framework-neutral process boundary against fake
+failure workers and the real C++ worker. The executor applies hard Linux CPU,
+address-space, file-size, process-count, and file-descriptor limits; bounds
+NDJSON events and stderr; and escalates from `SIGTERM` to `SIGKILL` after a
+configurable grace period. Its additional settings are
+`ORCA_WEB_MAX_EVENT_BYTES`, `ORCA_WEB_MAX_EVENT_LINE_BYTES`,
+`ORCA_WEB_MAX_EVENTS`, `ORCA_WEB_MAX_LOG_BYTES`,
+`ORCA_WEB_MAX_OPEN_FILES`, `ORCA_WEB_MAX_PROCESSES`,
+`ORCA_WEB_MAX_CPU_TIME_MS`, and `ORCA_WEB_TERMINATION_GRACE_MS`.
+
+The smoke service itself is unprivileged, offline, capability-free, read-only
+outside its private temporary storage, and cgroup PID-limited. This proves the
+local isolation mechanics without selecting the final production sandbox.
 
 The smoke check runs the focused manifest, protocol, request, core-color, and flush-volume
 contract tests; exercises stable input, triangle, wall-time, memory, and output

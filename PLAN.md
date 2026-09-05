@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 ## Objective
 
@@ -60,7 +60,7 @@ cancellation, and artifact safety are reliable.
   slicing, and export where the existing engine permits it.
 - [x] Handle `SIGINT`, `SIGTERM`, and Windows console cancellation requests
   gracefully in the worker.
-- [ ] Support forced termination after a bounded grace period in the executor.
+- [x] Support forced termination after a bounded grace period in the executor.
 - [x] Ensure canceled jobs return a stable exit code and no downloadable partial
   artifacts.
 - [x] Add a deliberately slow fixture and automated cancellation tests.
@@ -71,13 +71,13 @@ cancellation, and artifact safety are reliable.
   4 GiB memory, and 1 GiB output defaults in the worker, while allowing requests
   only to tighten them.
 - [ ] Enforce the 1 GiB extracted-content limit when 3MF support is added.
-- [ ] Keep hard CPU, memory, process, and wall-time limits in the worker runtime;
+- [x] Keep hard CPU, memory, process, and wall-time limits in the worker runtime;
   use worker-side checks for clearer errors where possible.
 - [x] Run slicing workers with network access disabled.
 - [x] Reject unsupported formats before invoking expensive import paths.
 - [x] Bound manifest size and setting count.
-- [ ] Bound log and event volume.
-- [ ] Verify logs never include complete G-code, model contents, or credentials.
+- [x] Bound log and event volume.
+- [x] Verify logs never include complete G-code, model contents, or credentials.
 
 ### 5. Add single-plate 3MF input
 
@@ -99,8 +99,8 @@ cancellation, and artifact safety are reliable.
 - [x] Progress is monotonic and warnings remain attached to the job.
 - [x] Cancellation stops a real slice and removes partial artifacts.
 - [ ] Limits and path containment are tested with adversarial inputs; worker-side
-  limit failures and path/symlink attacks are covered, while executor hard-limit
-  tests and 3MF decompression cases remain.
+  limits, path/symlink attacks, and executor hard-limit cases are covered, while
+  3MF decompression cases remain.
 - [ ] STL, OBJ, and one selected 3MF plate produce transactional artifacts.
 - [x] `worker-smoke`, `worker-baseline`, and the forbidden-dependency audit pass.
 
@@ -119,10 +119,10 @@ cancellation, and artifact safety are reliable.
 
 - [ ] Create a fresh job directory for every request.
 - [ ] Copy only declared inputs and resolved profiles into that directory.
-- [ ] Spawn exactly one worker process per job with explicit resources and
+- [x] Spawn exactly one worker process per job with explicit resources and
   limits.
-- [ ] Parse worker events, persist the final result, and expose cancellation.
-- [ ] Treat malformed output, worker crashes, timeouts, and missing artifacts as
+- [x] Parse worker events, persist the final result, and expose cancellation.
+- [x] Treat malformed output, worker crashes, timeouts, and missing artifacts as
   isolated job failures.
 - [ ] Add cleanup for expired and abandoned job directories.
 

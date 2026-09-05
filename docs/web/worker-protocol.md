@@ -68,6 +68,10 @@ executor must also impose hard process, memory, CPU, and wall-time ceilings and
 forcibly terminate a worker that does not stop within its grace period. A future
 3MF request additionally requires a separate extracted-content limit.
 
+The implemented [isolated executor](executor.md) applies those hard Linux
+limits, bounds event and diagnostic capture, and validates the terminal worker
+contract before returning it to a future API.
+
 ## Event transport
 
 Each stdout line is one complete compact JSON object. Every event contains
