@@ -10,8 +10,9 @@ This directory is the source of truth for the web effort:
 - [Native compatibility baseline](baseline.md)
 - [Headless extraction audit](headless-audit.md)
 - [Worker protocol version 1](worker-protocol.md)
-- [Isolated worker executor](executor.md)
+- [Isolated worker executor and job directories](executor.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
+- [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 
 ## Delivery gates
 
@@ -45,13 +46,16 @@ prerequisites pass.
 ## Immediate implementation sequence
 
 Transactional publication, path containment, cooperative worker limits, the
-isolated executor boundary, and guarded single-plate 3MF import are now in
-place. The remaining sequence is:
+isolated executor boundary, guarded single-plate 3MF import, the web-stack ADR,
+and the disposable job-directory lifecycle are now in place. The remaining
+sequence is:
 
-1. Record the ADR selecting the frontend and API frameworks, then build the
-   job-directory lifecycle and minimum API around the existing executor.
+1. Build the minimum FastAPI service over the existing executor and
+   job-directory modules: upload, profile catalog, slice, status, cancel, retry,
+   and authorized artifact download.
+2. Add the first React screen over that API.
 
-The first browser screen is intentionally after these steps.
+The plater, generated settings UI, and layer preview stay in G5.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).

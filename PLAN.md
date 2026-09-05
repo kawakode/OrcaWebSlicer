@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-05
+Last updated: 2026-09-06
 
 ## Objective
 
@@ -22,8 +22,8 @@ The foundation is complete:
 - [x] G3: the versioned worker contract, transactional artifacts, cancellation,
   safety limits, and guarded single-plate 3MF import are complete.
 
-The active gate is G4. It starts from the web-stack ADR and the job-directory
-lifecycle around the existing isolated executor.
+The active gate is G4. The web stack is chosen and the job-directory lifecycle
+around the isolated executor is complete, so the next work is the API itself.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -110,23 +110,23 @@ lifecycle around the existing isolated executor.
 
 ### 6. Select the minimum web stack
 
-- [ ] Record an ADR choosing the frontend framework, API framework, and local
+- [x] Record an ADR choosing the frontend framework, API framework, and local
   development layout.
-- [ ] Prefer a thin API that never parses untrusted models in its long-lived
+- [x] Prefer a thin API that never parses untrusted models in its long-lived
   process.
-- [ ] Defer database, queue, and object-store commitments until local job
+- [x] Defer database, queue, and object-store commitments until local job
   throughput and artifact sizes are measured.
 
 ### 7. Implement the isolated job executor
 
-- [ ] Create a fresh job directory for every request.
-- [ ] Copy only declared inputs and resolved profiles into that directory.
+- [x] Create a fresh job directory for every request.
+- [x] Copy only declared inputs and resolved profiles into that directory.
 - [x] Spawn exactly one worker process per job with explicit resources and
   limits.
 - [x] Parse worker events, persist the final result, and expose cancellation.
 - [x] Treat malformed output, worker crashes, timeouts, and missing artifacts as
   isolated job failures.
-- [ ] Add cleanup for expired and abandoned job directories.
+- [x] Add cleanup for expired and abandoned job directories.
 
 ### 8. Add the minimum API
 
