@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract for G4
+Status: Active contract for G5
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -21,13 +21,16 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | --- | --- | --- |
 | `GET` | `/health` | Liveness plus the protocol and API versions |
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
+| `GET` | `/settings` | The engine's own definition of every curated setting |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model |
 | `POST` | `/jobs` | Submit one slice request |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
 | `POST` | `/jobs/{job_id}/retry` | Rerun the same inputs under a new job ID |
-| `GET` | `/jobs/{job_id}/artifacts/{name}` | Download `gcode` or `result` |
+| `GET` | `/jobs/{job_id}/artifacts/{name}` | Download `gcode`, `result`, or `preview` |
+| `GET` | `/jobs/{job_id}/preview` | The layer preview index |
+| `GET` | `/jobs/{job_id}/preview/layers/{n}` | One layer's toolpaths |
 
 Request bodies are validated against the published schema before any handler
 runs, and unknown fields are refused rather than ignored. A slice request names
@@ -81,6 +84,10 @@ the worker's relative paths never reach a URL.
 - `result` is available once the executor validated a terminal `result.json`,
   whatever the outcome, because a failed run's report is the useful part.
 - `gcode` is available only for a `succeeded` job that declared it.
+- `preview` is the layer preview index, available on the same terms as the
+  G-code. Its binary companion is never downloaded whole: it is read one layer
+  at a time through `/preview/layers/{n}`, described in
+  [preview-format.md](preview-format.md).
 
 Anything the executor did not validate is deleted rather than served. A
 cancellation, crash, timeout, or output-limit failure removes the whole job
@@ -90,16 +97,63 @@ directory, so a partially written G-code file is never downloadable.
 
 `GET /profiles` reads the bundled vendor indexes under `resources/profiles` and
 lists only user-selectable profiles. Passing `?printer=<machine profile id>`
-narrows the process and filament lists to those the printer accepts.
+narrows the process and filament lists to those the printer accepts. Every
+entry carries its `inherits_chain`: the flattened inheritance chain, root first.
 
-Compatibility in G4 uses the profiles' declared `compatible_printers` lists
-only. `compatible_printers_condition` expressions need the engine's config
-evaluator, which arrives with the generated settings catalog in G5. A profile
-that declares no restriction is offered for every printer.
+Compatibility follows the desktop's own order. A declared `compatible_printers`
+list wins. A profile that declares only a `compatible_printers_condition` is
+resolved once at startup by `orca-slicer-worker --evaluate-compatibility`, which
+runs the engine's placeholder parser over each printer's resolved configuration;
+the API never interprets an expression itself. A profile with neither is offered
+for every printer, and so is one whose condition the engine could not parse,
+which is what the desktop does with a broken expression.
 
 A selected chain is flattened once, at submission, into three job-local JSON
 files. The worker therefore never reads the bundled profile tree and never
 resolves a path outside its own job directory.
+
+## Settings
+
+`GET /settings` serves the document `orca-slicer-worker --export-settings-catalog`
+produces, which serializes `PrintConfigDef` for the curated MVP settings. It is
+read once at startup and carries, per setting, the engine's type, scope, unit,
+range, enum values and labels, serialized default, mode, and the setting that
+gates it:
+
+```json
+{
+  "catalog_version": 1,
+  "engine_version": "2.3.1",
+  "groups": [{"id": "quality", "label": "Quality"}],
+  "settings": [
+    {"key": "layer_height", "group": "quality", "scope": "process", "type": "float",
+     "vector": false, "unit": "mm", "min": 0.001, "max": 100, "default": "0.2", "…": "…"}
+  ]
+}
+```
+
+The browser generates its whole overrides form from this document, so no type,
+range, enum, or default is restated in TypeScript. The API uses the same
+document to refuse an out-of-range or misspelled override with
+`invalid_setting_value` or `unknown_setting` before a worker is spawned; the
+worker still validates everything it is given, so this check only makes the
+common mistakes cheap and legible.
+
+A deployment whose worker cannot answer keeps serving. `GET /settings` then
+returns `settings_catalog_unavailable` (503), the browser hides the overrides
+form, and jobs run with the selected profiles unchanged.
+
+## Job reports
+
+`GET /jobs/{job_id}` carries what was actually sliced alongside the state:
+
+- `profiles` names the machine, process, and filament entries with the
+  `inherits_chain` each one flattens.
+- `overrides` lists every submitted override paired with the engine's label,
+  unit, and scope for that setting.
+
+Both are recorded when the job is accepted, so a finished job still explains
+itself after its directory is reclaimed.
 
 ## Correlation IDs
 

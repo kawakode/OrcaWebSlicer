@@ -31,6 +31,7 @@ x-build-environment: &build-environment
     ORCA_WEB_WORKER: ${ORCA_WEB_WORKER:-/workspace/build-worker/src/Release/orca-slicer-worker}
     ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
     ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
+    ORCA_WEB_MAX_PREVIEW_BYTES: ${ORCA_WEB_MAX_PREVIEW_BYTES:-268435456}
     ORCA_WEB_MAX_EVENT_BYTES: ${ORCA_WEB_MAX_EVENT_BYTES:-1048576}
     ORCA_WEB_MAX_EXTRACTED_BYTES: ${ORCA_WEB_MAX_EXTRACTED_BYTES:-1073741824}
     ORCA_WEB_MAX_EVENT_LINE_BYTES: ${ORCA_WEB_MAX_EVENT_LINE_BYTES:-65536}
@@ -122,6 +123,8 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[FlushVolumes]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SliceRequest]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[SettingsCatalog]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[ProfileCompatibility]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -137,6 +140,20 @@ services:
         set -e;
         rm -f "$${oversized_manifest}";
         test "$${oversized_status}" -eq 3;
+        "$${worker}" --export-settings-catalog > /tmp/settings-catalog.json;
+        python3 -c 'import json, pathlib, sys; catalog=json.loads(pathlib.Path(sys.argv[1]).read_text()); groups={group["id"] for group in catalog["groups"]}; assert catalog["catalog_version"] == 1; assert catalog["settings"]; assert all(not setting.get("missing") for setting in catalog["settings"]); assert all(setting["group"] in groups for setting in catalog["settings"]); layer=[setting for setting in catalog["settings"] if setting["key"] == "layer_height"][0]; assert layer["type"] == "float"; assert layer["scope"] == "process"; assert layer["unit"] == "mm"; assert layer["default"]' /tmp/settings-catalog.json;
+        compatibility_dir=$$(mktemp -d);
+        mkdir -p "$${compatibility_dir}/printers";
+        python3 scripts/materialize_web_profiles.py
+        --output "$${compatibility_dir}/staged"
+        --machine "resources/profiles/Anycubic/machine/Anycubic Kobra 0.4 nozzle.json"
+        --process "resources/profiles/Anycubic/process/0.20mm Standard @Anycubic Kobra.json"
+        --filament "resources/profiles/Anycubic/filament/Anycubic Generic PLA.json";
+        cp "$${compatibility_dir}/staged/machine.json" "$${compatibility_dir}/printers/0.json";
+        python3 -c 'import json, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(json.dumps({"catalog_version": 1, "printers": [{"id": "kobra", "name": "Anycubic Kobra 0.4 nozzle", "profile": "printers/0.json"}], "candidates": [{"id": "matching", "condition": "printer_preset =~ /.*Kobra.*/"}, {"id": "other", "condition": "printer_preset =~ /.*Nonexistent.*/"}]}))' "$${compatibility_dir}/request.json";
+        "$${worker}" --evaluate-compatibility "$${compatibility_dir}/request.json" > "$${compatibility_dir}/response.json";
+        python3 -c 'import json, pathlib, sys; answered=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert answered["compatibility"]["matching"] == ["kobra"]; assert answered["compatibility"]["other"] == []; assert answered["unevaluated"] == []' "$${compatibility_dir}/response.json";
+        rm -rf "$${compatibility_dir}";
         job_dir=$$(mktemp -d);
         trap 'rm -rf "$${job_dir}"' EXIT;
         cp tests/data/20mm_cube.obj "$${job_dir}/model.obj";
@@ -236,6 +253,9 @@ services:
         test -s "$${profile_job_dir}/result.json";
         grep -q '^G1 ' "$${profile_job_dir}/result.gcode";
         rm -rf "$${profile_job_dir}";
+        python3 scripts/test_web_preview.py
+        --worker "$${worker}"
+        --model tests/data/20mm_cube.obj;
         python3 scripts/check_web_worker_deps.py "$${worker}"
 
   worker-baseline:

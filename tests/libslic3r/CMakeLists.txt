@@ -45,6 +45,8 @@ add_executable(${_TEST_NAME}_tests
     test_artifact_transaction.cpp
     test_slice_request.cpp
     test_project_archive.cpp
+    test_settings_catalog.cpp
+    test_profile_compatibility.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp
     # test_png_io.cpp

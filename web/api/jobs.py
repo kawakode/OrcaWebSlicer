@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import tempfile
@@ -22,11 +23,12 @@ from web_job_directory import (
     sweep_job_directories,
 )
 from web_profile_catalog import ProfileCatalog, ProfileCatalogError
+from web_settings_catalog import SettingsCatalog, SettingsCatalogError
 from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_path
 
 from . import PROTOCOL_VERSION
 from .config import ApiConfig
-from .errors import ApiError, from_catalog_error, from_job_directory_error
+from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
 from .uploads import UploadRecord, UploadStore
 
 
@@ -36,8 +38,17 @@ MAX_PLATE_INDEX = 64
 SETTING_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled"})
 OUTPUT_GCODE = "output/model.gcode"
+OUTPUT_PREVIEW = "output/preview.json"
 # Artifacts are downloaded by name, never by the worker's own relative path.
-ARTIFACT_NAMES = ("gcode", "result")
+ARTIFACT_NAMES = ("gcode", "result", "preview")
+_ARTIFACT_MEDIA = {
+    "gcode": ("text/x.gcode", "{job_id}.gcode"),
+    "result": ("application/json", "{job_id}-result.json"),
+    "preview": ("application/json", "{job_id}-preview.json"),
+}
+# The preview index names byte ranges into its binary companion, so it is read
+# once per job and kept; a layer request then seeks instead of parsing again.
+MAX_PREVIEW_INDEX_BYTES = 32 * 1024 * 1024
 
 # An executor status that is not "completed" never carries a worker result, so
 # the API states the failure in the worker's own error vocabulary instead.
@@ -88,6 +99,12 @@ class JobRecord:
     error: Optional[Dict[str, str]] = None
     result: Optional[Dict[str, Any]] = None
     retry_of: Optional[str] = None
+    # The flattened profile chain and the overrides that displace it, recorded
+    # when the job was accepted so the report explains what was actually sliced.
+    profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    overrides: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Parsed once and kept, so paging through layers never re-reads the index.
+    preview_index: Optional[Dict[str, Any]] = None
     cancellation: threading.Event = dataclasses.field(default_factory=threading.Event)
 
     def describe(self) -> Dict[str, Any]:
@@ -100,6 +117,8 @@ class JobRecord:
             "error": dict(self.error) if self.error else None,
             "artifacts": self._describe_artifacts(),
             "request": self.request.describe(),
+            "profiles": dict(self.profiles),
+            "overrides": list(self.overrides),
             "retry_of": self.retry_of,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -116,16 +135,21 @@ class JobRecord:
         if self.result is None:
             return []
         described = [{"name": "result", "media_type": "application/json"}]
+        media_types = {"gcode": "text/x.gcode", "preview": "application/json"}
         for artifact in self.result.get("artifacts", []):
-            if isinstance(artifact, dict) and artifact.get("kind") == "gcode":
-                described.append(
-                    {
-                        "name": "gcode",
-                        "media_type": "text/x.gcode",
-                        "size_bytes": artifact.get("size_bytes"),
-                        "sha256": artifact.get("sha256"),
-                    }
-                )
+            if not isinstance(artifact, dict):
+                continue
+            media_type = media_types.get(artifact.get("kind"))
+            if media_type is None:
+                continue
+            described.append(
+                {
+                    "name": artifact["kind"],
+                    "media_type": media_type,
+                    "size_bytes": artifact.get("size_bytes"),
+                    "sha256": artifact.get("sha256"),
+                }
+            )
         return described
 
 
@@ -138,9 +162,14 @@ class JobService:
         catalog: ProfileCatalog,
         uploads: UploadStore,
         logger: Optional[logging.Logger] = None,
+        settings_catalog: Optional[SettingsCatalog] = None,
     ) -> None:
         self._config = config
         self._catalog = catalog
+        # Absent when the worker could not describe its settings. The worker
+        # still validates every override it is given, so the job path stays
+        # correct; only the early, friendlier rejection is lost.
+        self._settings = settings_catalog
         self._uploads = uploads
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
@@ -164,6 +193,7 @@ class JobService:
         """Resolve a downloadable artifact to a path, media type, and filename."""
         if name not in ARTIFACT_NAMES:
             raise ApiError("unknown_artifact", f"No artifact is named {name}.", 404)
+        media_type, filename = _ARTIFACT_MEDIA[name]
         with self._lock:
             record = self._require(job_id)
             if name == "result":
@@ -173,16 +203,30 @@ class JobService:
                     raise ApiError(
                         "artifact_unavailable", "This job published no validated result.", 409
                     )
-                return self._readable(record.path / "result.json"), "application/json", f"{job_id}-result.json"
+                return self._readable(record.path / "result.json"), media_type, filename.format(job_id=job_id)
+            path = self._published(record, name)
+            return self._readable(path), media_type, filename.format(job_id=job_id)
 
-            if record.state == "succeeded" and record.result is not None:
-                for artifact in record.result.get("artifacts", []):
-                    if not isinstance(artifact, dict) or artifact.get("kind") != "gcode":
-                        continue
-                    path = resolve_artifact_path(record.path, artifact.get("path"))
-                    if path is not None:
-                        return self._readable(path), "text/x.gcode", f"{job_id}.gcode"
-            raise ApiError("artifact_unavailable", "This job published no G-code.", 409)
+    def preview(self, job_id: str) -> Dict[str, Any]:
+        """Read the layer preview index, which names byte ranges per layer."""
+        return dict(self._preview_index(job_id))
+
+    def preview_layer(self, job_id: str, layer: int) -> Tuple[Path, int, int]:
+        """Locate one layer inside the preview blob without reading the rest."""
+        index = self._preview_index(job_id)
+        layers = index.get("layers", [])
+        if not isinstance(layers, list) or not 0 <= layer < len(layers):
+            raise ApiError("unknown_preview_layer", "This preview has no such layer.", 404)
+        described = layers[layer]
+        with self._lock:
+            record = self._require(job_id)
+            path = self._published(record, "preview_data")
+        offset = int(described.get("offset", 0))
+        length = int(described.get("length", 0))
+        size = self._readable(path).stat().st_size
+        if offset < 0 or length < 0 or offset + length > size:
+            raise ApiError("artifact_unavailable", "The preview data no longer matches its index.", 410)
+        return path, offset, length
 
     # Commands
 
@@ -227,6 +271,8 @@ class JobService:
             path=prepared.path,
             created_at=time.time(),
             retry_of=retry_of,
+            profiles=self._describe_chain(request),
+            overrides=self._describe_overrides(request.settings),
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -395,6 +441,35 @@ class JobService:
             raise ApiError("artifact_unavailable", "The artifact is no longer available.", 410)
         return path
 
+    @staticmethod
+    def _published(record: JobRecord, kind: str) -> Path:
+        """Find the path the executor validated for one published artifact kind."""
+        if record.state == "succeeded" and record.result is not None:
+            for artifact in record.result.get("artifacts", []):
+                if not isinstance(artifact, dict) or artifact.get("kind") != kind:
+                    continue
+                path = resolve_artifact_path(record.path, artifact.get("path"))
+                if path is not None:
+                    return path
+        raise ApiError("artifact_unavailable", f"This job published no {kind}.", 409)
+
+    def _preview_index(self, job_id: str) -> Dict[str, Any]:
+        with self._lock:
+            record = self._require(job_id)
+            if record.preview_index is not None:
+                return record.preview_index
+            path = self._readable(self._published(record, "preview"))
+            if path.stat().st_size > MAX_PREVIEW_INDEX_BYTES:
+                raise ApiError("artifact_unavailable", "The preview index is too large to serve.", 409)
+            try:
+                index = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ApiError("artifact_unavailable", "The preview index could not be read.", 410) from error
+            if not isinstance(index, dict) or not isinstance(index.get("layers"), list):
+                raise ApiError("artifact_unavailable", "The preview index is not a preview.", 410)
+            record.preview_index = index
+            return index
+
     def _validate(self, request: SliceRequest) -> None:
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
@@ -410,6 +485,37 @@ class JobService:
                     "invalid_settings",
                     f"The value of {key} must be a string of at most {MAX_SETTING_VALUE_CHARS} characters.",
                 )
+        if self._settings is not None:
+            try:
+                self._settings.validate_overrides(request.settings)
+            except SettingsCatalogError as error:
+                raise from_settings_error(error) from error
+
+    def _describe_chain(self, request: SliceRequest) -> Dict[str, Any]:
+        """Name the effective profile chain each selection flattens."""
+        selected = {
+            "machine": request.machine_profile,
+            "process": request.process_profile,
+            "filament": request.filament_profile,
+        }
+        return {kind: self._catalog.get(profile_id, kind).describe() for kind, profile_id in selected.items()}
+
+    def _describe_overrides(self, settings: Dict[str, str]) -> List[Dict[str, Any]]:
+        """Pair each override with the engine's own description of the setting."""
+        described = []
+        for key, value in sorted(settings.items()):
+            entry: Dict[str, Any] = {"key": key, "value": value}
+            definition = self._settings.definition(key) if self._settings else None
+            if definition is not None:
+                entry.update(
+                    {
+                        "label": definition.get("label", ""),
+                        "unit": definition.get("unit", ""),
+                        "scope": definition.get("scope", ""),
+                    }
+                )
+            described.append(entry)
+        return described
 
     def _manifest(self, job_id: str, upload: UploadRecord, request: SliceRequest) -> Dict[str, Any]:
         return {
@@ -421,6 +527,7 @@ class JobService:
                 "payload": {
                     "input_model": f"input/model.{upload.model_format}",
                     "output_gcode": OUTPUT_GCODE,
+                    "output_preview": OUTPUT_PREVIEW,
                     "profiles": {
                         "machine": "profiles/machine.json",
                         "process": "profiles/process.json",

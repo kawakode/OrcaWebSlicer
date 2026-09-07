@@ -11,6 +11,8 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (  # noqa: E402
+    CONDITIONAL_EXPRESSION,
+    CONDITIONAL_PROCESS_ID,
     FILAMENT_ID,
     MACHINE_ID,
     OTHER_MACHINE_ID,
@@ -35,7 +37,7 @@ class ProfileCatalogTests(unittest.TestCase):
     def test_lists_only_user_selectable_profiles(self):
         machines = [entry.name for entry in self.catalog.list("machine")]
         self.assertEqual(machines, ["Other Printer 0.4 nozzle", "Test Printer 0.4 nozzle"])
-        self.assertEqual(len(self.catalog), 5)
+        self.assertEqual(len(self.catalog), 6)
 
     def test_ignores_a_vendor_entry_that_escapes_its_directory(self):
         self.assertTrue(all("passwd" not in entry.profile_id for entry in self.catalog.list("machine")))
@@ -48,11 +50,58 @@ class ProfileCatalogTests(unittest.TestCase):
 
     def test_filters_process_and_filament_by_the_selected_printer(self):
         printer = self.catalog.get(MACHINE_ID, "machine")
-        self.assertEqual([entry.profile_id for entry in self.catalog.list("process", printer)], [PROCESS_ID])
+        # An unresolved condition suits every printer, exactly as the desktop
+        # falls back when it cannot answer one.
+        self.assertEqual(
+            [entry.profile_id for entry in self.catalog.list("process", printer)],
+            [CONDITIONAL_PROCESS_ID, PROCESS_ID],
+        )
         # A filament that declares no compatible printers suits every printer.
         self.assertEqual([entry.profile_id for entry in self.catalog.list("filament", printer)], [FILAMENT_ID])
         other = self.catalog.get(OTHER_MACHINE_ID, "machine")
+        self.assertEqual(
+            [entry.profile_id for entry in self.catalog.list("process", other)],
+            [CONDITIONAL_PROCESS_ID, OTHER_PROCESS_ID],
+        )
+
+    def test_resolves_conditions_through_the_engine(self):
+        seen = {}
+
+        def evaluate(request):
+            query = json.loads(request.read_text(encoding="utf-8"))
+            seen.update(query)
+            # Only the profile that declares an expression is ever asked about.
+            return {
+                "compatibility": {
+                    candidate["id"]: [
+                        printer["id"]
+                        for printer in query["printers"]
+                        if candidate["condition"] in printer["name"]
+                    ]
+                    for candidate in query["candidates"]
+                }
+            }
+
+        self.assertEqual(self.catalog.resolve_conditions(evaluate), 1)
+        self.assertEqual([candidate["id"] for candidate in seen["candidates"]], [CONDITIONAL_PROCESS_ID])
+        self.assertEqual(seen["candidates"][0]["condition"], CONDITIONAL_EXPRESSION)
+
+        printer = self.catalog.get(MACHINE_ID, "machine")
+        self.assertEqual(
+            [entry.profile_id for entry in self.catalog.list("process", printer)],
+            [CONDITIONAL_PROCESS_ID, PROCESS_ID],
+        )
+        other = self.catalog.get(OTHER_MACHINE_ID, "machine")
         self.assertEqual([entry.profile_id for entry in self.catalog.list("process", other)], [OTHER_PROCESS_ID])
+
+    def test_reports_the_flattened_inheritance_chain(self):
+        described = self.catalog.get(PROCESS_ID, "process").describe()
+        self.assertEqual(described["inherits_chain"], ["fdm_process_common", "0.20mm Standard @Test"])
+        # A profile with no parent is a chain of one.
+        self.assertEqual(
+            self.catalog.get(FILAMENT_ID, "filament").describe()["inherits_chain"],
+            ["fdm_filament_pla", "Test Generic PLA"],
+        )
 
     def test_rejects_an_unknown_profile_and_a_mismatched_kind(self):
         with self.assertRaises(ProfileCatalogError) as raised:

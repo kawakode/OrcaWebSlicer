@@ -43,12 +43,15 @@ Packaged workers must set the same variable when the resources directory is not
 discoverable beside the executable or in the current working directory.
 
 Worker ceilings default to 250 MiB of input, 1,000,000 triangles, 300 seconds,
-4 GiB of memory, 1 GiB of generated G-code, and 1 GiB of content extracted from
-a project archive. Override them with `ORCA_WEB_MAX_INPUT_BYTES`,
-`ORCA_WEB_MAX_TRIANGLES`, `ORCA_WEB_MAX_WALL_TIME_MS`,
-`ORCA_WEB_MAX_MEMORY_BYTES`, `ORCA_WEB_MAX_OUTPUT_BYTES`, and
-`ORCA_WEB_MAX_EXTRACTED_BYTES`. Values are byte counts except wall time, which
-is milliseconds. Manifest limits can only tighten these server ceilings.
+4 GiB of memory, 1 GiB of generated G-code, 1 GiB of content extracted from a
+project archive, and 256 MiB of layer preview. Override them with
+`ORCA_WEB_MAX_INPUT_BYTES`, `ORCA_WEB_MAX_TRIANGLES`,
+`ORCA_WEB_MAX_WALL_TIME_MS`, `ORCA_WEB_MAX_MEMORY_BYTES`,
+`ORCA_WEB_MAX_OUTPUT_BYTES`, `ORCA_WEB_MAX_EXTRACTED_BYTES`, and
+`ORCA_WEB_MAX_PREVIEW_BYTES`. Values are byte counts except wall time, which is
+milliseconds. Manifest limits can only tighten these server ceilings. A print
+whose preview would exceed its ceiling still succeeds, with the G-code and a
+warning saying the preview was omitted.
 
 ## Run the API and the browser screen
 
@@ -94,15 +97,17 @@ outside its private temporary storage, and cgroup PID-limited. This proves the
 local isolation mechanics without selecting the final production sandbox.
 
 The smoke check runs the focused manifest, protocol, request, project-archive,
-core-color, and flush-volume
+settings-catalog, profile-compatibility, core-color, and flush-volume
 contract tests; exercises stable input, triangle, wall-time, memory, and output
 limit failures; slices a 20 mm cube both from explicit settings and from resolved
 Anycubic machine/process/filament profiles; slices a Unicode-path 3MF project and
 rejects multi-plate, over-extracting, and root-escaping archives; exercises the version and
-manifest-envelope commands; verifies terminal NDJSON events, `result.json`
-artifact metadata, and the invalid-manifest exit code; and rejects GUI,
-OpenGL, device-access, embedded Python, WebKit, and media libraries in the
-worker's dynamic dependency list.
+manifest-envelope commands; exports the engine settings catalog and resolves a
+`compatible_printers_condition` against a real bundled printer; verifies the
+published layer preview against the G-code it came from; verifies terminal NDJSON
+events, `result.json` artifact metadata, and the invalid-manifest exit code; and
+rejects GUI, OpenGL, device-access, embedded Python, WebKit, and media libraries
+in the worker's dynamic dependency list.
 
 `worker-baseline` compares cube, bridge, and concave-hole worker output against
 the newest native run under `build/web-baseline`. Run the `baseline` service

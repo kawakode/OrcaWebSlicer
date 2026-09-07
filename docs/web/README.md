@@ -12,7 +12,8 @@ This directory is the source of truth for the web effort:
 - [Worker protocol version 1](worker-protocol.md)
 - [Isolated worker executor and job directories](executor.md)
 - [Minimum API](api.md)
-- [First browser screen](frontend.md)
+- [Browser screen](frontend.md)
+- [Layer preview format version 1](preview-format.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 
@@ -29,7 +30,7 @@ prerequisites pass.
 | G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
-| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Not started |
+| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | In progress (settings and preview done; plater outstanding) |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
 
 ## Engineering rules
@@ -54,8 +55,12 @@ the disposable job-directory lifecycle, the [minimum API](api.md), and the
 browser upload produces semantically baseline-equivalent G-code through a
 disposable worker.
 
-G5 is next, starting with the single-plate plater, the settings UI generated
-from engine metadata, and the browser layer preview.
+G5 is under way. The settings UI is now generated from a versioned catalog the
+engine itself exports, compatibility expressions are resolved by the engine's
+own placeholder parser, and a sliced job publishes a
+[browsable layer preview](preview-format.md) the API serves one layer at a time.
+The single-plate plater and the remaining MVP compatibility work are what is
+left before the gate closes.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).

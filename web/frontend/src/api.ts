@@ -1,4 +1,11 @@
-import { ApiError, type Job, type ProfileCatalog, type Upload } from "./types";
+import {
+  ApiError,
+  type Job,
+  type PreviewIndex,
+  type ProfileCatalog,
+  type SettingsCatalog,
+  type Upload,
+} from "./types";
 
 const PREFIX = "/api/v1";
 
@@ -38,6 +45,11 @@ export function listProfiles(printer?: string): Promise<ProfileCatalog> {
   return request<ProfileCatalog>(`/profiles${query}`);
 }
 
+/** The engine's own setting definitions, which drive the generated form. */
+export function listSettings(): Promise<SettingsCatalog> {
+  return request<SettingsCatalog>("/settings");
+}
+
 export function uploadModel(file: File): Promise<Upload> {
   const body = new FormData();
   body.append("file", file);
@@ -68,5 +80,17 @@ export const cancelJob = (jobId: string): Promise<Job> =>
 export const retryJob = (jobId: string): Promise<Job> =>
   request<Job>(`/jobs/${jobId}/retry`, { method: "POST" });
 
-export const artifactUrl = (jobId: string, name: "gcode" | "result"): string =>
+export const artifactUrl = (jobId: string, name: "gcode" | "result" | "preview"): string =>
   `${PREFIX}/jobs/${jobId}/artifacts/${name}`;
+
+export const readPreview = (jobId: string): Promise<PreviewIndex> =>
+  request<PreviewIndex>(`/jobs/${jobId}/preview`);
+
+/** One layer's toolpaths. Only the selected layer is ever fetched. */
+export async function previewLayer(jobId: string, layer: number): Promise<ArrayBuffer> {
+  const response = await fetch(`${PREFIX}/jobs/${jobId}/preview/layers/${layer}`);
+  if (!response.ok) {
+    throw new ApiError("preview_unavailable", "That preview layer is unavailable.", response.status);
+  }
+  return response.arrayBuffer();
+}

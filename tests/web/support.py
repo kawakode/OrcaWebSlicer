@@ -6,16 +6,77 @@ from pathlib import Path
 
 
 # Slices the manifest the API actually wrote, so the tests exercise the real
-# envelope. The mode argument selects a terminal outcome.
+# envelope. The mode argument selects a terminal outcome. The engine-metadata
+# commands answer in the same shape the C++ worker uses, with a deliberately
+# small catalog: the real definitions are covered by the worker's own tests.
 FAKE_WORKER = r'''#!/usr/bin/env python3
 import hashlib
 import json
 import signal
+import struct
 import sys
 import time
 from pathlib import Path
 
+SETTINGS_CATALOG = {
+    "catalog_version": 1,
+    "engine_version": "0.0.0-test",
+    "groups": [{"id": "quality", "label": "Quality"}, {"id": "support", "label": "Support"}],
+    "settings": [
+        {"key": "layer_height", "group": "quality", "scope": "process", "type": "float",
+         "vector": False, "nullable": False, "mode": "simple", "label": "Layer height",
+         "category": "Quality", "tooltip": "", "unit": "mm", "min": 0.01, "max": 0.6,
+         "default": "0.2"},
+        {"key": "wall_loops", "group": "quality", "scope": "process", "type": "int",
+         "vector": False, "nullable": False, "mode": "simple", "label": "Wall loops",
+         "category": "Quality", "tooltip": "", "unit": "", "min": 0, "max": 1000,
+         "default": "2"},
+        {"key": "enable_support", "group": "support", "scope": "process", "type": "bool",
+         "vector": False, "nullable": False, "mode": "simple", "label": "Enable support",
+         "category": "Support", "tooltip": "", "unit": "", "default": "0"},
+        {"key": "support_type", "group": "support", "scope": "process", "type": "enum",
+         "vector": False, "nullable": False, "mode": "simple", "label": "Support type",
+         "category": "Support", "tooltip": "", "unit": "", "enabled_by": "enable_support",
+         "enum": [{"value": "normal(auto)", "label": "Normal (auto)"},
+                  {"value": "tree(auto)", "label": "Tree (auto)"}],
+         "default": "normal(auto)"},
+        {"key": "nozzle_temperature", "group": "quality", "scope": "filament", "type": "ints",
+         "vector": True, "nullable": False, "mode": "simple", "label": "Nozzle temperature",
+         "category": "Filament", "tooltip": "", "unit": "℃", "min": 0, "max": 500,
+         "default": "220"},
+    ],
+}
+
 mode = sys.argv[1]
+command = sys.argv[2]
+
+if command == "--export-settings-catalog":
+    if mode == "no-metadata":
+        print("the engine could not describe its settings", file=sys.stderr)
+        raise SystemExit(8)
+    print(json.dumps(SETTINGS_CATALOG), flush=True)
+    raise SystemExit(0)
+
+if command == "--evaluate-compatibility":
+    # Stands in for the placeholder parser: a condition matches every printer
+    # whose name contains it, which is enough to prove the wiring.
+    query = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+    assert query["catalog_version"] == 1, "unexpected compatibility request version"
+    for printer in query["printers"]:
+        assert (Path(sys.argv[3]).parent / printer["profile"]).is_file(), "printer profile was not staged"
+    print(json.dumps({
+        "catalog_version": 1,
+        "compatibility": {
+            candidate["id"]: [
+                printer["id"] for printer in query["printers"]
+                if candidate["condition"] in printer["name"]
+            ]
+            for candidate in query["candidates"]
+        },
+        "unevaluated": [],
+    }), flush=True)
+    raise SystemExit(0)
+
 manifest = Path(sys.argv[3])
 request = json.loads(manifest.read_text(encoding="utf-8"))
 job_id = request["job_id"]
@@ -54,6 +115,45 @@ for name in ("machine", "process", "filament"):
 event("state", state="accepted")
 event("state", state="running")
 
+def describe(path):
+    return {
+        "path": str(path.relative_to(job_root).as_posix()),
+        "size_bytes": path.stat().st_size,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def write_preview(relative):
+    """Two one-batch layers, in the format docs/web/preview-format.md defines."""
+    index_path = job_root / relative
+    data_path = index_path.with_suffix(".bin")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    layers = []
+    blob = b""
+    for position, z in enumerate((0.2, 0.4)):
+        points = [(0, 0, int(z * 1000)), (20000, 0, int(z * 1000)), (20000, 20000, int(z * 1000))]
+        batch = struct.pack("<BBBBIff", 0, 2, 0, 0, len(points), 0.42, 0.2)
+        batch += b"".join(struct.pack("<iii", *point) for point in points)
+        layers.append({"index": position, "z": z, "offset": len(blob), "length": len(batch),
+                       "segments": len(points) - 1, "roles": ["outer_wall"], "tools": [0]})
+        blob += batch
+    data_path.write_bytes(blob)
+    index_path.write_text(json.dumps({
+        "preview_version": 1,
+        "units": "mm",
+        "quantum_mm": 0.001,
+        "data": str(data_path.relative_to(job_root).as_posix()),
+        "data_bytes": len(blob),
+        "segment_count": sum(layer["segments"] for layer in layers),
+        "tools": [0],
+        "roles": [{"id": "none", "label": "Undefined"}, {"id": "inner_wall", "label": "Inner wall"},
+                  {"id": "outer_wall", "label": "Outer wall"}],
+        "bounding_box": {"min": [0, 0, 0.2], "max": [20, 20, 0.4]},
+        "layers": layers,
+    }), encoding="utf-8")
+    return [dict(describe(index_path), kind="preview"), dict(describe(data_path), kind="preview_data")]
+
+
 if mode == "success":
     warnings = [{"code": "thin_wall", "message": "A thin wall was detected."}]
     event("progress", progress={"stage": "slicing", "percent": 50, "message": "Slicing"})
@@ -62,14 +162,12 @@ if mode == "success":
     target.parent.mkdir(parents=True, exist_ok=True)
     contents = ("; layer_height = " + payload["settings"].get("layer_height", "default") + "\nG1 X1\n")
     target.write_text(contents, encoding="utf-8")
-    artifact = {
-        "kind": "gcode",
-        "path": payload["output_gcode"],
-        "size_bytes": target.stat().st_size,
-        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-    }
-    publish("succeeded", [artifact], warnings=warnings)
-    event("artifact", artifact=artifact)
+    artifacts = [dict(describe(target), kind="gcode")]
+    if payload.get("output_preview"):
+        artifacts += write_preview(payload["output_preview"])
+    publish("succeeded", artifacts, warnings=warnings)
+    for artifact in artifacts:
+        event("artifact", artifact=artifact)
     event("state", state="succeeded")
 elif mode == "fail":
     error = {"category": "slicing", "code": "slicing_failed", "message": "The model could not be sliced."}
@@ -123,6 +221,9 @@ OTHER_MACHINE_ID = f"{VENDOR}/machine/Other Printer 0.4 nozzle"
 PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Test"
 FILAMENT_ID = f"{VENDOR}/filament/Test Generic PLA"
 OTHER_PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Other"
+# Declares only an expression, so its compatibility needs the engine.
+CONDITIONAL_PROCESS_ID = f"{VENDOR}/process/0.20mm Conditional @Test"
+CONDITIONAL_EXPRESSION = "Test Printer"
 
 
 def write_profile_tree(repo_root: Path) -> Path:
@@ -186,6 +287,16 @@ def write_profile_tree(repo_root: Path) -> Path:
         "from": "system",
         "instantiation": "true",
         "compatible_printers": ["Other Printer 0.4 nozzle"],
+    })
+    # No declared list, so only the engine's expression evaluator can say which
+    # printers this one suits.
+    publish("process", {
+        "type": "process",
+        "name": "0.20mm Conditional @Test",
+        "inherits": "fdm_process_common",
+        "from": "system",
+        "instantiation": "true",
+        "compatible_printers_condition": CONDITIONAL_EXPRESSION,
     })
     # Branded filaments sit in a subdirectory while their base stays one level
     # up, exactly as the bundled vendors ship them.

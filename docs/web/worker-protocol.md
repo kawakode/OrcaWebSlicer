@@ -1,11 +1,27 @@
 # Worker protocol version 1
 
-Status: Active contract for G3
+Status: Active contract for G5
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
 `result.json` in the job directory. Consumers must ignore unknown object fields
 so compatible records can gain optional data without a protocol version bump.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `--version` | The worker and protocol versions |
+| `--validate-manifest <path>` | Check one envelope without running it |
+| `--slice-manifest <path>` | Run one slice job in the manifest's directory |
+| `--export-settings-catalog` | Serialize `PrintConfigDef` for the curated settings |
+| `--evaluate-compatibility <path>` | Resolve `compatible_printers_condition` expressions |
+
+The first three carry untrusted job input and are what a deployment isolates.
+The last two are engine metadata: they take no model, produce no artifact, and
+are read once by the API at startup from the trusted worker executable. They are
+described in [the API contract](api.md); both answer on stdout, report a stable
+error document on stderr, and use the exit codes below.
 
 ## Request envelope
 
@@ -22,6 +38,7 @@ operation-specific fields live inside `operation.payload`.
     "payload": {
       "input_model": "input/model.stl",
       "output_gcode": "output/model.gcode",
+      "output_preview": "output/preview.json",
       "profiles": {
         "machine": "profiles/machine.json",
         "process": "profiles/process.json",
@@ -47,9 +64,16 @@ STL, OBJ, and 3MF before invoking an importer.
 `plate_index` is the optional 1-based plate to slice from a project archive. It
 defaults to 1 and is ignored for meshes, which always describe one plate.
 
+`output_preview` is optional. When present it names the JSON index of the
+[layer preview](preview-format.md); the binary companion is the same path with a
+`.bin` extension, so one field names both files. A preview is auxiliary: if it
+would exceed its size limit, or the G-code has no extrusion, the job still
+succeeds with its G-code and carries a warning instead.
+
 The optional `operation.payload.limits` object accepts positive unsigned
 integers for `max_input_bytes`, `max_triangles`, `max_wall_time_ms`,
-`max_memory_bytes`, `max_output_bytes`, and `max_extracted_bytes`. A request may
+`max_memory_bytes`, `max_output_bytes`, `max_extracted_bytes`, and
+`max_preview_bytes`. A request may
 tighten, but never raise, the server-configured ceiling. The worker applies these
 defaults when a field is omitted:
 
@@ -61,6 +85,7 @@ defaults when a field is omitted:
 | `ORCA_WEB_MAX_MEMORY_BYTES` | 4 GiB | `memory_limit_exceeded` |
 | `ORCA_WEB_MAX_OUTPUT_BYTES` | 1 GiB | `output_size_limit_exceeded` |
 | `ORCA_WEB_MAX_EXTRACTED_BYTES` | 1 GiB | `archive_extracted_size_limit_exceeded` |
+| `ORCA_WEB_MAX_PREVIEW_BYTES` | 256 MiB | warning, not a failure |
 
 Input size is checked before import and triangle count immediately after import.
 Wall time and memory are checked between stages and monitored during slicing and
@@ -172,8 +197,14 @@ validation, slicing, export, cancellation, and output-limit failures remove the
 temporary file. Before rerunning an accepted job ID, the worker removes that
 job's abandoned `.partial` files from earlier crashes. The executor remains
 responsible for deleting the complete job directory after a forced termination
-or process crash. `result.json` uses the same write-then-rename publication
-rule.
+or process crash. `result.json` and both layer-preview files use the same
+write-then-rename publication rule.
+
+Each published artifact declares a `kind`: `gcode`, and, when a preview was
+requested and produced, `preview` for its JSON index and `preview_data` for the
+binary blob it indexes. A cancellation or a hashing failure discards every
+artifact the run committed, not only the G-code, so an abandoned job leaves none
+of them behind.
 
 ## Terminal result
 

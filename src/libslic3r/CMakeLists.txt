@@ -488,6 +488,8 @@ set(lisbslic3r_sources
     VariableWidth.hpp
     Web/ArtifactTransaction.cpp
     Web/ArtifactTransaction.hpp
+    Web/LayerPreview.cpp
+    Web/LayerPreview.hpp
     Web/ProfileCompatibility.cpp
     Web/ProfileCompatibility.hpp
     Web/ProjectArchive.cpp

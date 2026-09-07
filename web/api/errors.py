@@ -6,6 +6,7 @@ from typing import Dict
 
 from web_job_directory import JobDirectoryError
 from web_profile_catalog import ProfileCatalogError
+from web_settings_catalog import SettingsCatalogError
 
 
 class ApiError(RuntimeError):
@@ -36,6 +37,20 @@ _CATALOG_STATUS: Dict[str, int] = {
     "incompatible_profile": 409,
     "unreadable_profile": 500,
     "duplicate_profile_id": 500,
+    "unreadable_compatibility_result": 500,
+}
+
+# A catalog the worker could not produce is a service-side gap, not a bad
+# request, so it is reported as unavailable rather than blamed on the caller.
+_SETTINGS_STATUS: Dict[str, int] = {
+    "unknown_setting": 422,
+    "unavailable_setting": 422,
+    "invalid_setting_value": 422,
+    "settings_catalog_unavailable": 503,
+    "compatibility_unavailable": 503,
+    "unreadable_settings_catalog": 500,
+    "unsupported_settings_catalog_version": 500,
+    "unreadable_compatibility_result": 500,
 }
 
 
@@ -45,3 +60,7 @@ def from_job_directory_error(error: JobDirectoryError) -> ApiError:
 
 def from_catalog_error(error: ProfileCatalogError) -> ApiError:
     return ApiError(error.code, str(error), _CATALOG_STATUS.get(error.code, 400))
+
+
+def from_settings_error(error: SettingsCatalogError) -> ApiError:
+    return ApiError(error.code, str(error), _SETTINGS_STATUS.get(error.code, 400))

@@ -18,6 +18,9 @@ struct SinglePlateSliceRequest
     WorkerManifest envelope;
     std::string input_model;
     std::string output_gcode;
+    // Empty when no layer preview is wanted. The binary companion is this path
+    // with a `.bin` extension, so one request field names both files.
+    std::string output_preview;
     std::string machine_profile;
     std::string process_profile;
     std::string filament_profile;
@@ -31,6 +34,7 @@ struct SinglePlateSliceRequest
     std::optional<std::uintmax_t> max_memory_bytes;
     std::optional<std::uintmax_t> max_output_bytes;
     std::optional<std::uintmax_t> max_extracted_bytes;
+    std::optional<std::uintmax_t> max_preview_bytes;
 };
 
 struct SinglePlateSliceRequestValidation
@@ -41,12 +45,21 @@ struct SinglePlateSliceRequestValidation
     bool is_valid() const { return request.has_value() && errors.empty(); }
 };
 
+struct SinglePlateSliceArtifact
+{
+    std::string kind;
+    std::string path;
+};
+
 struct SinglePlateSliceResult
 {
     bool success {false};
     std::string code;
     std::string message;
     WorkerErrorCategory category {WorkerErrorCategory::Slicing};
+    // Every file this run committed, in publication order. The caller hashes
+    // and records them, and removes exactly these if the job is abandoned.
+    std::vector<SinglePlateSliceArtifact> artifacts;
 };
 
 struct SinglePlateSliceProgress

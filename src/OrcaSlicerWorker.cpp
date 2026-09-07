@@ -53,6 +53,7 @@ constexpr std::uint64_t DEFAULT_MAX_WALL_TIME_MS = 300'000;
 constexpr std::uintmax_t DEFAULT_MAX_MEMORY_BYTES = 4ull * 1024 * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_OUTPUT_BYTES = 1024ull * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_EXTRACTED_BYTES = 1024ull * 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_PREVIEW_BYTES = 256ull * 1024 * 1024;
 
 enum class ExitCode : int {
     Success         = 0,
@@ -370,7 +371,9 @@ bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::st
     std::uintmax_t max_memory_bytes = 0;
     std::uintmax_t max_output_bytes = 0;
     std::uintmax_t max_extracted_bytes = 0;
-    if (!read_configured_limit("ORCA_WEB_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES, max_input_bytes, error) ||
+    std::uintmax_t max_preview_bytes = 0;
+    if (!read_configured_limit("ORCA_WEB_MAX_PREVIEW_BYTES", DEFAULT_MAX_PREVIEW_BYTES, max_preview_bytes, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES, max_input_bytes, error) ||
         !read_configured_limit("ORCA_WEB_MAX_TRIANGLES", DEFAULT_MAX_TRIANGLES, max_triangles, error) ||
         !read_configured_limit("ORCA_WEB_MAX_WALL_TIME_MS", DEFAULT_MAX_WALL_TIME_MS, max_wall_time_ms, error) ||
         !read_configured_limit("ORCA_WEB_MAX_MEMORY_BYTES", DEFAULT_MAX_MEMORY_BYTES, max_memory_bytes, error) ||
@@ -385,6 +388,7 @@ bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::st
     tighten_limit(request.max_memory_bytes, max_memory_bytes);
     tighten_limit(request.max_output_bytes, max_output_bytes);
     tighten_limit(request.max_extracted_bytes, max_extracted_bytes);
+    tighten_limit(request.max_preview_bytes, max_preview_bytes);
     return true;
 }
 
@@ -656,23 +660,35 @@ int main(int argc, char **argv)
         const Slic3r::Web::SinglePlateSliceResult result =
             Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);
-        if (result.success) {
-            const std::filesystem::path artifact_path = job_root / validation.request->output_gcode;
-            std::string sha256;
-            if (!cancellation_requested())
-                sha256 = sha256_file(artifact_path, error);
-            if (cancellation_requested()) {
+        // Every artifact this run committed, so an abandoned job leaves none of
+        // them behind and a successful one records all of them.
+        const auto discard_artifacts = [&job_root, &result]() {
+            for (const Slic3r::Web::SinglePlateSliceArtifact &artifact : result.artifacts) {
                 std::error_code ignored;
-                std::filesystem::remove(artifact_path, ignored);
+                std::filesystem::remove(job_root / artifact.path, ignored);
+            }
+        };
+        if (result.success) {
+            std::vector<Slic3r::Web::WorkerArtifact> hashed;
+            for (const Slic3r::Web::SinglePlateSliceArtifact &artifact : result.artifacts) {
+                if (cancellation_requested())
+                    break;
+                const std::filesystem::path path = job_root / artifact.path;
+                const std::string sha256 = sha256_file(path, error);
+                if (sha256.empty())
+                    break;
+                hashed.push_back({artifact.kind, artifact.path, std::filesystem::file_size(path), sha256});
+            }
+            if (cancellation_requested()) {
+                discard_artifacts();
                 const Slic3r::Web::WorkerManifestError cancellation_error {
                     "job_canceled", "The slicing job was canceled.", Slic3r::Web::WorkerErrorCategory::Cancellation
                 };
                 emitter.error(cancellation_error);
                 final_result.outcome = Slic3r::Web::WorkerJobState::Canceled;
                 final_result.error = cancellation_error;
-            } else if (sha256.empty()) {
-                std::error_code ignored;
-                std::filesystem::remove(artifact_path, ignored);
+            } else if (hashed.size() != result.artifacts.size()) {
+                discard_artifacts();
                 const Slic3r::Web::WorkerManifestError hash_error {
                     "artifact_hash_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
                 };
@@ -680,12 +696,11 @@ int main(int argc, char **argv)
                 final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
                 final_result.error = hash_error;
             } else {
-                Slic3r::Web::WorkerArtifact artifact {
-                    "gcode", validation.request->output_gcode, std::filesystem::file_size(artifact_path), sha256
-                };
                 final_result.outcome = Slic3r::Web::WorkerJobState::Succeeded;
-                final_result.artifacts.push_back(artifact);
-                emitter.artifact(artifact);
+                for (const Slic3r::Web::WorkerArtifact &artifact : hashed) {
+                    final_result.artifacts.push_back(artifact);
+                    emitter.artifact(artifact);
+                }
             }
         } else {
             const Slic3r::Web::WorkerManifestError slice_error {
@@ -699,10 +714,9 @@ int main(int argc, char **argv)
 
         finish_timing(final_result, started, cpu_started);
         if (!write_result(job_root, final_result, error)) {
-            if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded) {
-                std::error_code ignored;
-                std::filesystem::remove(job_root / validation.request->output_gcode, ignored);
-            }
+            // Nothing is downloadable without the report that validates it.
+            if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded)
+                discard_artifacts();
             const Slic3r::Web::WorkerManifestError result_error {
                 "result_publish_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
             };

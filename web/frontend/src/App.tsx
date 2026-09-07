@@ -4,29 +4,25 @@ import {
   artifactUrl,
   cancelJob,
   listProfiles,
+  listSettings,
   readJob,
   retryJob,
   submitJob,
   uploadModel,
 } from "./api";
+import { LayerPreviewPanel } from "./LayerPreview";
+import { SettingsForm } from "./SettingsForm";
 import {
   ApiError,
   TERMINAL_STATES,
   type Job,
   type ProfileCatalog,
   type ProfileEntry,
+  type SettingsCatalog,
   type Upload,
 } from "./types";
 
 const POLL_INTERVAL_MS = 400;
-
-/** The curated overrides G4 exposes. G5 generates these from engine metadata. */
-const CURATED_SETTINGS = [
-  { key: "layer_height", label: "Layer height (mm)", placeholder: "profile default" },
-  { key: "sparse_infill_density", label: "Infill density", placeholder: "e.g. 15%" },
-  { key: "wall_loops", label: "Wall loops", placeholder: "e.g. 2" },
-  { key: "enable_support", label: "Supports (0 or 1)", placeholder: "0" },
-] as const;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 
@@ -42,6 +38,7 @@ function firstId(entries: ProfileEntry[], preferred?: string): string {
 
 export default function App() {
   const [catalog, setCatalog] = useState<ProfileCatalog>(EMPTY_CATALOG);
+  const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
   const [printers, setPrinters] = useState<ProfileEntry[]>([]);
   const [machine, setMachine] = useState("");
   const [process, setProcess] = useState("");
@@ -61,6 +58,13 @@ export default function App() {
         setMachine((current) => current || firstId(loaded.machine));
       })
       .catch((error) => setFailure(describe(error)));
+  }, []);
+
+  // The overrides form is generated from the engine's own definitions. A
+  // deployment whose worker cannot describe them still slices; it just offers
+  // no overrides, so this failure is reported without blocking the screen.
+  useEffect(() => {
+    listSettings().then(setSettingsCatalog).catch(() => setSettingsCatalog(null));
   }, []);
 
   useEffect(() => {
@@ -190,20 +194,19 @@ export default function App() {
 
       <section>
         <h2>Overrides</h2>
-        {CURATED_SETTINGS.map(({ key, label, placeholder }) => (
-          <label key={key}>
-            <span>{label}</span>
-            <input
-              type="text"
-              data-testid={`setting-${key}`}
-              placeholder={placeholder}
-              value={settings[key] ?? ""}
-              onChange={(event) =>
-                setSettings((current) => ({ ...current, [key]: event.target.value }))
-              }
-            />
-          </label>
-        ))}
+        {settingsCatalog ? (
+          <SettingsForm
+            catalog={settingsCatalog}
+            values={settings}
+            disabled={active}
+            onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
+          />
+        ) : (
+          <p data-testid="settings-unavailable">
+            This deployment&rsquo;s slicing engine did not describe its settings, so the selected
+            profiles are used unchanged.
+          </p>
+        )}
       </section>
 
       <section className="actions">
@@ -245,6 +248,13 @@ export default function App() {
       )}
 
       {job && <JobPanel job={job} />}
+
+      {job?.artifacts.some((artifact) => artifact.name === "preview") && (
+        <section>
+          <h2>Layer preview</h2>
+          <LayerPreviewPanel jobId={job.job_id} />
+        </section>
+      )}
     </main>
   );
 }
@@ -311,6 +321,46 @@ function JobPanel({ job }: { job: Job }) {
       {job.timing && (
         <p data-testid="job-timing">Sliced in {job.timing.duration_ms} ms</p>
       )}
+      <JobReport job={job} />
     </section>
+  );
+}
+
+/** What was actually sliced: the flattened profile chain and what displaced it. */
+function JobReport({ job }: { job: Job }) {
+  const kinds = ["machine", "process", "filament"] as const;
+  return (
+    <details data-testid="job-report">
+      <summary>Effective configuration</summary>
+      <dl>
+        {kinds.map((kind) => {
+          const profile = job.profiles[kind];
+          if (!profile) return null;
+          return (
+            <div key={kind}>
+              <dt>{kind}</dt>
+              <dd data-testid={`job-profile-${kind}`}>
+                {profile.name}
+                {profile.inherits_chain.length > 1 && (
+                  <span className="chain"> — {profile.inherits_chain.join(" → ")}</span>
+                )}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
+      {job.overrides.length > 0 ? (
+        <ul data-testid="job-overrides">
+          {job.overrides.map((override) => (
+            <li key={override.key}>
+              {override.label || override.key}: {override.value}
+              {override.unit} {override.scope && <em>({override.scope})</em>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p data-testid="job-overrides-none">No settings were overridden.</p>
+      )}
+    </details>
   );
 }

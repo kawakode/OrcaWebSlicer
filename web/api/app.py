@@ -13,12 +13,13 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from web_job_directory import JOB_ID_PATTERN
 from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
+from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
 
 from . import API_VERSION, PROTOCOL_VERSION
 from .config import ApiConfig, from_environment
@@ -30,8 +31,25 @@ from .uploads import UploadStore
 CORRELATION_HEADER = "X-Correlation-Id"
 CORRELATION_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 PREFIX = f"/api/{API_VERSION}"
+# A print taller than this has no browsable preview anyway, and the bound keeps
+# an absurd path parameter from reaching the job service at all.
+MAX_PREVIEW_LAYER = 1_000_000
+PREVIEW_CHUNK_BYTES = 256 * 1024
 
 logger = logging.getLogger("orca.web.api")
+
+
+def _read_range(path, offset: int, length: int):
+    """Yield one byte range of a file without holding the whole file."""
+    with open(path, "rb") as stream:
+        stream.seek(offset)
+        remaining = length
+        while remaining > 0:
+            chunk = stream.read(min(PREVIEW_CHUNK_BYTES, remaining))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+            yield chunk
 
 
 class SliceSubmission(BaseModel):
@@ -67,6 +85,26 @@ def _job_id(job_id: str = PathParam(max_length=128)) -> str:
     return job_id
 
 
+def _load_engine_metadata(config: ApiConfig, catalog):
+    """Ask the worker for the engine's setting metadata and compatibility rules.
+
+    Both are engine facts rather than job work, so they are read once at startup
+    from the trusted worker executable. A worker that cannot answer leaves the
+    API serving jobs with the worker as the sole authority on a setting's
+    validity, which is what it was before this catalog existed.
+    """
+    try:
+        settings = load_settings_catalog(config.worker_command)
+        resolved = catalog.resolve_conditions(
+            lambda request: evaluate_compatibility(config.worker_command, str(request))
+        )
+    except (SettingsCatalogError, ProfileCatalogError) as error:
+        logger.warning("engine metadata unavailable code=%s", getattr(error, "code", "unknown"))
+        return None
+    logger.info("engine metadata loaded settings=%d conditional_profiles=%d", len(settings), resolved)
+    return settings
+
+
 def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     resolved = config or from_environment()
     resolved.validate()
@@ -74,15 +112,22 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         catalog = load_catalog(resolved.repo_root, resolved.profile_vendors)
+        settings = _load_engine_metadata(resolved, catalog)
         uploads = UploadStore(resolved.uploads_root, resolved.job_limits.max_input_bytes)
-        service = JobService(resolved, catalog, uploads)
+        service = JobService(resolved, catalog, uploads, settings_catalog=settings)
         app.state.config = resolved
         app.state.catalog = catalog
+        app.state.settings = settings
         app.state.uploads = uploads
         app.state.jobs = service
         # Reclaim whatever an earlier process left behind before serving.
         service.sweep()
-        logger.info("api ready profiles=%d state_root=%s", len(catalog), resolved.state_root)
+        logger.info(
+            "api ready profiles=%d settings=%d state_root=%s",
+            len(catalog),
+            len(settings) if settings else 0,
+            resolved.state_root,
+        )
         try:
             yield
         finally:
@@ -137,6 +182,18 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         except ProfileCatalogError as error:
             raise from_catalog_error(error) from error
 
+    @app.get(f"{PREFIX}/settings", tags=["profiles"])
+    def settings(request: Request) -> Dict[str, Any]:
+        """Serve the engine's own definition of every curated setting."""
+        catalog = request.app.state.settings
+        if catalog is None:
+            raise ApiError(
+                "settings_catalog_unavailable",
+                "The slicing engine could not describe its settings.",
+                503,
+            )
+        return catalog.describe()
+
     @app.post(f"{PREFIX}/uploads", status_code=201, tags=["uploads"])
     def create_upload(request: Request, file: UploadFile = File()) -> Dict[str, Any]:
         """Store one model. The bytes are never parsed in this process."""
@@ -178,6 +235,29 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     ) -> Response:
         path, media_type, filename = request.app.state.jobs.artifact(job_id, name)
         return FileResponse(path, media_type=media_type, filename=filename)
+
+    @app.get(f"{PREFIX}/jobs/{{job_id}}/preview", tags=["preview"])
+    def read_preview(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
+        """The layer index: z heights, roles, tools, and each layer's byte range."""
+        return request.app.state.jobs.preview(job_id)
+
+    @app.get(f"{PREFIX}/jobs/{{job_id}}/preview/layers/{{layer}}", tags=["preview"])
+    def read_preview_layer(
+        request: Request,
+        job_id: str = Depends(_job_id),
+        layer: int = PathParam(ge=0, le=MAX_PREVIEW_LAYER),
+    ) -> Response:
+        """One layer's toolpaths, read from the blob by seeking to its range.
+
+        The whole preview is never loaded: the response streams the layer's
+        bytes straight off disk, which is what keeps a large print servable.
+        """
+        path, offset, length = request.app.state.jobs.preview_layer(job_id, layer)
+        return StreamingResponse(
+            _read_range(path, offset, length),
+            media_type="application/octet-stream",
+            headers={"Content-Length": str(length), "Cache-Control": "no-store"},
+        )
 
     # Mounted last so every API route is matched before the catch-all, and only
     # when a build exists; `html=True` serves index.html for unknown paths.

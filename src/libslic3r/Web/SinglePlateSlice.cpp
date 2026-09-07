@@ -1,8 +1,10 @@
 #include "SinglePlateSlice.hpp"
 
 #include "ArtifactTransaction.hpp"
+#include "LayerPreview.hpp"
 #include "ProjectArchive.hpp"
 
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -329,6 +331,17 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         request.output_gcode = output_gcode->get<std::string>();
     }
 
+    const auto output_preview = payload.find("output_preview");
+    if (output_preview != payload.end() && !output_preview->is_null()) {
+        if (!output_preview->is_string() || !is_safe_relative_path(output_preview->get_ref<const std::string &>())) {
+            add_error(result, "invalid_output_preview", "output_preview must be a safe relative path.");
+        } else if (lowercase_extension(output_preview->get_ref<const std::string &>()) != ".json") {
+            add_error(result, "unsupported_preview_format", "output_preview must use the .json extension.");
+        } else {
+            request.output_preview = output_preview->get<std::string>();
+        }
+    }
+
     const auto settings = payload.find("settings");
     if (settings != payload.end()) {
         if (!settings->is_object() || settings->size() > 256) {
@@ -355,6 +368,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
             read_positive_limit(*limits, "max_memory_bytes", request.max_memory_bytes, "invalid_memory_limit", result);
             read_positive_limit(*limits, "max_output_bytes", request.max_output_bytes, "invalid_output_limit", result);
             read_positive_limit(*limits, "max_extracted_bytes", request.max_extracted_bytes, "invalid_extracted_limit",
+                                result);
+            read_positive_limit(*limits, "max_preview_bytes", request.max_preview_bytes, "invalid_preview_limit",
                                 result);
         }
     }
@@ -534,7 +549,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         throw_if_canceled();
         exporting = true;
         progress("export", 90, "Exporting G-code");
-        print.export_gcode(artifact->temporary_path().string(), nullptr, nullptr);
+        // The exporter already runs the G-code processor, so taking its result
+        // here is what makes the layer preview free of a second parse.
+        GCodeProcessorResult processed;
+        print.export_gcode(artifact->temporary_path().string(), &processed, nullptr);
         if (!std::filesystem::is_regular_file(artifact->temporary_path()))
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
         const std::uintmax_t output_size = std::filesystem::file_size(artifact->temporary_path());
@@ -547,7 +565,27 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         progress("finalize", 99, "Validating artifact");
         if (!artifact->commit(path_error))
             return failure(path_error.code, path_error.message, path_error.category);
-        return {true, {}, {}, WorkerErrorCategory::Slicing};
+
+        SinglePlateSliceResult published {true, {}, {}, WorkerErrorCategory::Slicing};
+        published.artifacts.push_back({"gcode", request.output_gcode});
+        if (!request.output_preview.empty()) {
+            progress("finalize", 99, "Writing layer preview");
+            const std::string preview_data =
+                std::filesystem::path(request.output_preview).replace_extension(".bin").generic_string();
+            LayerPreviewResult preview;
+            if (!write_layer_preview(processed, job_root, request.output_preview, preview_data,
+                                     request.envelope.job_id, request.max_preview_bytes, preview, path_error))
+                return failure(path_error.code, path_error.message, path_error.category);
+            if (preview.written) {
+                published.artifacts.push_back({"preview", request.output_preview});
+                published.artifacts.push_back({"preview_data", preview_data});
+            } else if (callbacks.warning && !preview.omitted_reason.empty()) {
+                // A missing preview never invalidates good G-code, so this is a
+                // warning on the job rather than a failed slice.
+                callbacks.warning(preview.omitted_reason);
+            }
+        }
+        return published;
     } catch (const CanceledException &) {
         if (const ResourceLimitExceeded limit = limit_exceeded.load(); limit != ResourceLimitExceeded::None)
             return resource_limit_failure(limit);
