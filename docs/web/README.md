@@ -11,6 +11,8 @@ This directory is the source of truth for the web effort:
 - [Headless extraction audit](headless-audit.md)
 - [Worker protocol version 1](worker-protocol.md)
 - [Isolated worker executor and job directories](executor.md)
+- [Minimum API](api.md)
+- [First browser screen](frontend.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 
@@ -26,7 +28,7 @@ prerequisites pass.
 | G1 | Native baseline | Representative fixtures pass with recorded semantic output, wall time, and peak memory | Complete (initial matrix) |
 | G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
-| G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | In progress |
+| G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
 | G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Not started |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
 
@@ -47,15 +49,13 @@ prerequisites pass.
 
 Transactional publication, path containment, cooperative worker limits, the
 isolated executor boundary, guarded single-plate 3MF import, the web-stack ADR,
-and the disposable job-directory lifecycle are now in place. The remaining
-sequence is:
+the disposable job-directory lifecycle, the [minimum API](api.md), and the
+[first browser screen](frontend.md) are now in place, so G4 is complete: a
+browser upload produces semantically baseline-equivalent G-code through a
+disposable worker.
 
-1. Build the minimum FastAPI service over the existing executor and
-   job-directory modules: upload, profile catalog, slice, status, cancel, retry,
-   and authorized artifact download.
-2. Add the first React screen over that API.
-
-The plater, generated settings UI, and layer preview stay in G5.
+G5 is next, starting with the single-plate plater, the settings UI generated
+from engine metadata, and the browser layer preview.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).

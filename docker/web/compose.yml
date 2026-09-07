@@ -24,6 +24,11 @@ x-build-environment: &build-environment
     ORCA_WEB_MAX_TOTAL_INPUT_BYTES: ${ORCA_WEB_MAX_TOTAL_INPUT_BYTES:-536870912}
     ORCA_WEB_MAX_JOB_INPUTS: ${ORCA_WEB_MAX_JOB_INPUTS:-16}
     ORCA_WEB_JOB_RETENTION_SECONDS: ${ORCA_WEB_JOB_RETENTION_SECONDS:-86400}
+    ORCA_WEB_API_URL: ${ORCA_WEB_API_URL:-http://api:8000}
+    ORCA_WEB_MAX_CONCURRENT_JOBS: ${ORCA_WEB_MAX_CONCURRENT_JOBS:-2}
+    ORCA_WEB_PROFILE_VENDORS: ${ORCA_WEB_PROFILE_VENDORS:-Anycubic}
+    ORCA_WEB_STATE_ROOT: ${ORCA_WEB_STATE_ROOT:-/workspace/build/web-state}
+    ORCA_WEB_WORKER: ${ORCA_WEB_WORKER:-/workspace/build-worker/src/Release/orca-slicer-worker}
     ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
     ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
     ORCA_WEB_MAX_EVENT_BYTES: ${ORCA_WEB_MAX_EVENT_BYTES:-1048576}
@@ -37,7 +42,9 @@ x-build-environment: &build-environment
     ORCA_WEB_MAX_WALL_TIME_MS: ${ORCA_WEB_MAX_WALL_TIME_MS:-300000}
     ORCA_WEB_TERMINATION_GRACE_MS: ${ORCA_WEB_TERMINATION_GRACE_MS:-5000}
     ORCA_SLICER_RESOURCES: /workspace/resources
+    PLAYWRIGHT_BROWSERS_PATH: /cache/playwright
     PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONPATH: /workspace
     RUNNER_OS: Linux
     RUNNER_TEMP: /tmp
   volumes:
@@ -46,6 +53,10 @@ x-build-environment: &build-environment
     - orca-app-build:/workspace/build
     - orca-worker-build:/workspace/build-worker
     - orca-ccache:/cache/ccache
+    # Named volumes keep npm and Playwright off the host bind mount, which is
+    # where their many small files would otherwise be unusably slow.
+    - orca-frontend-modules:/workspace/web/frontend/node_modules
+    - orca-playwright:/cache/playwright
 
 services:
   build:
@@ -262,6 +273,70 @@ services:
         --worker build-worker/src/Release/orca-slicer-worker
         --model tests/data/20mm_cube.obj
 
+  api:
+    <<: *build-environment
+    ports:
+      - "${ORCA_WEB_API_PORT:-8000}:8000"
+    command:
+      - python3
+      - -m
+      - uvicorn
+      - web.api.app:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+  api-baseline:
+    <<: *build-environment
+    network_mode: none
+    command:
+      - python3
+      - scripts/test_web_api_baseline.py
+      - --manifest
+      - docs/web/baseline-cases.json
+      - --worker
+      - build-worker/src/Release/orca-slicer-worker
+      - --native-baselines
+      - build/web-baseline
+
+  frontend-build:
+    <<: *build-environment
+    working_dir: /workspace/web/frontend
+    command:
+      - bash
+      - -lc
+      - >-
+        npm ci --no-audit --no-fund
+        && npm run build
+
+  frontend:
+    <<: *build-environment
+    working_dir: /workspace/web/frontend
+    ports:
+      - "${ORCA_WEB_FRONTEND_PORT:-5173}:5173"
+    command:
+      - bash
+      - -lc
+      - >-
+        npm ci --no-audit --no-fund
+        && npm run dev
+
+  frontend-e2e:
+    <<: *build-environment
+    working_dir: /workspace/web/frontend
+    # Playwright needs a browser and its system libraries; the cache volume
+    # keeps that download out of every later run.
+    command:
+      - bash
+      - -lc
+      - >-
+        npm ci --no-audit --no-fund
+        && npm run build
+        && npx playwright install --with-deps chromium
+        && npm run e2e
+
   baseline:
     <<: *build-environment
     command:
@@ -278,3 +353,5 @@ volumes:
   orca-app-build:
   orca-worker-build:
   orca-ccache:
+  orca-frontend-modules:
+  orca-playwright:

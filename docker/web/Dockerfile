@@ -53,6 +53,39 @@ RUN case "$(uname -m)" in \
     && rm "/tmp/${cmake_archive}" \
     && cmake --version
 
+# The API service and its integration tests are the project's only Python
+# dependencies. They are installed for the image's own interpreter so the API,
+# the smoke services, and the baseline tooling all share one environment. This
+# layer stays last so a dependency bump never rebuilds the C++ toolchain.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-pip \
+    && pip3 install --break-system-packages --no-cache-dir \
+        "fastapi==0.115.6" \
+        "uvicorn==0.34.0" \
+        "httpx==0.28.1" \
+        "python-multipart==0.0.20" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node builds and tests the browser screen only. It is pinned and installed from
+# the official tarball for the same reason CMake is: the distribution package
+# would drift from what CI uses. Declared here, not at the top, so bumping it
+# never invalidates the C++ toolchain layers.
+ARG NODE_VERSION=22.14.0
+
+RUN case "$(uname -m)" in \
+        x86_64|amd64) node_arch="x64" ;; \
+        aarch64|arm64) node_arch="arm64" ;; \
+        *) echo "Unsupported Node architecture: $(uname -m)"; exit 1 ;; \
+    esac \
+    && node_archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${node_archive}" \
+        -o "/tmp/${node_archive}" \
+    && tar -xzf "/tmp/${node_archive}" -C /opt \
+    && ln -sf "/opt/node-v${NODE_VERSION}-linux-${node_arch}/bin/"* /usr/local/bin/ \
+    && rm "/tmp/${node_archive}" \
+    && node --version \
+    && npm --version
+
 RUN rm -rf /tmp/orcaslicer /var/lib/apt/lists/* \
     && mkdir -p /workspace /cache/ccache
 

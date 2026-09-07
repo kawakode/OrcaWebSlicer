@@ -39,6 +39,11 @@ event count, or log volume exceeds its configured ceiling. It continues draining
 both pipes during shutdown, so a noisy worker cannot deadlock on a full pipe.
 Only the bounded stderr prefix is retained.
 
+A caller may pass an event observer to `execute_worker` to receive each parsed
+event as it arrives, which is how the API reports live progress. It runs on the
+reader thread, so it must not block; an observer that raises fails the job
+rather than stalling the pipe it is draining.
+
 After a normal exit, the executor requires contiguous event sequences, one last
 terminal state, a matching bounded `result.json`, the documented exit code, and
 safe regular files for every declared artifact. Malformed output, crashes,
@@ -103,6 +108,6 @@ limits are milliseconds.
 | `ORCA_WEB_MAX_EVENTS` | 4096 | Parsed record count |
 | `ORCA_WEB_MAX_LOG_BYTES` | 1048576 | Total worker stderr |
 
-The command-line wrapper prints one compact executor summary. A future API may
-import `execute_worker` to receive the validated events and terminal result
-without coupling this boundary to an API framework.
+The command-line wrapper prints one compact executor summary. The
+[API](api.md) imports `execute_worker` directly and receives the validated
+events and terminal result, so this boundary stays free of any API framework.

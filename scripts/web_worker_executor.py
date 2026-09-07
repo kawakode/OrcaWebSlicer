@@ -94,8 +94,11 @@ class ExecutionResult:
 
 
 class _ProtocolCollector:
-    def __init__(self, limits: ExecutorLimits) -> None:
+    def __init__(
+        self, limits: ExecutorLimits, observer: Optional[Callable[[Dict[str, Any]], None]] = None
+    ) -> None:
         self._limits = limits
+        self._observer = observer
         self._line = bytearray()
         self._discard_line = False
         self.events: List[Dict[str, Any]] = []
@@ -105,7 +108,9 @@ class _ProtocolCollector:
 
     def consume(self, stream: Any) -> None:
         while True:
-            chunk = stream.read(64 * 1024)
+            # read1 returns whatever has arrived; a plain read would block until
+            # the buffer filled, delaying every event until the worker exited.
+            chunk = stream.read1(64 * 1024)
             if not chunk:
                 break
             self.total_bytes += len(chunk)
@@ -152,6 +157,14 @@ class _ProtocolCollector:
             self._fail("malformed_worker_output", "Each worker event must be a JSON object.")
             return
         self.events.append(event)
+        if self._observer is not None:
+            # The observer runs on the reader thread, so a raising observer would
+            # otherwise stall the pipe it is draining.
+            try:
+                self._observer(event)
+            except Exception:
+                self._observer = None
+                self._fail("event_observer_failed", "The executor event observer raised.")
 
     def _fail(self, code: str, message: str) -> None:
         if self.error is None:
@@ -168,7 +181,7 @@ class _LogCollector:
 
     def consume(self, stream: Any) -> None:
         while True:
-            chunk = stream.read(64 * 1024)
+            chunk = stream.read1(64 * 1024)
             if not chunk:
                 break
             self.total_bytes += len(chunk)
@@ -288,7 +301,8 @@ def _kill_remaining_process_group(process: subprocess.Popen[bytes]) -> bool:
     return True
 
 
-def _artifact_path(job_root: Path, relative: Any) -> Optional[Path]:
+def resolve_artifact_path(job_root: Path, relative: Any) -> Optional[Path]:
+    """Resolve a declared artifact inside its job, or None when it escapes it."""
     if not isinstance(relative, str) or not relative:
         return None
     candidate = Path(relative)
@@ -359,7 +373,7 @@ def _validate_completion(
     if result.get("outcome") != "succeeded" and artifacts:
         raise ExecutorError("worker_result_mismatch", "A non-successful worker result published artifacts.")
     for artifact in artifacts:
-        path = _artifact_path(job_root, artifact.get("path") if isinstance(artifact, dict) else None)
+        path = resolve_artifact_path(job_root, artifact.get("path") if isinstance(artifact, dict) else None)
         if path is None or not path.is_file() or path.is_symlink():
             raise ExecutorError("missing_worker_artifact", "A declared worker artifact is missing or unsafe.")
         if artifact.get("size_bytes") != path.stat().st_size:
@@ -381,7 +395,15 @@ def execute_worker(
     manifest_path: Path,
     limits: ExecutorLimits,
     cancellation_requested: Optional[threading.Event] = None,
+    event_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> ExecutionResult:
+    """Run one worker to completion and return its validated terminal contract.
+
+    `event_observer` receives each parsed event as it arrives, which is how a
+    caller reports live progress. It runs on the stdout reader thread, must not
+    block, and must not raise; a raising observer fails the job rather than
+    stalling the pipe.
+    """
     limits.validate()
     if not worker_command:
         raise ExecutorError("invalid_worker_command", "Worker command cannot be empty.")
@@ -409,7 +431,7 @@ def execute_worker(
 
     assert process.stdout is not None
     assert process.stderr is not None
-    protocol = _ProtocolCollector(limits)
+    protocol = _ProtocolCollector(limits, event_observer)
     logs = _LogCollector(limits.log_bytes)
     stdout_thread = threading.Thread(target=protocol.consume, args=(process.stdout,), daemon=True)
     stderr_thread = threading.Thread(target=logs.consume, args=(process.stderr,), daemon=True)

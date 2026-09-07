@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-06
+Last updated: 2026-09-07
 
 ## Objective
 
@@ -22,8 +22,11 @@ The foundation is complete:
 - [x] G3: the versioned worker contract, transactional artifacts, cancellation,
   safety limits, and guarded single-plate 3MF import are complete.
 
-The active gate is G4. The web stack is chosen and the job-directory lifecycle
-around the isolated executor is complete, so the next work is the API itself.
+- [x] G4: the minimum API and the first browser screen turn a browser upload
+  into downloadable, baseline-equivalent G-code through a disposable worker.
+
+The active gate is G5, the browser MVP: the single-plate plater, settings
+generated from engine metadata, and the browser layer preview.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -130,29 +133,29 @@ around the isolated executor is complete, so the next work is the API itself.
 
 ### 8. Add the minimum API
 
-- [ ] Upload an STL, OBJ, or supported 3MF file.
-- [ ] List bundled printer, process, and filament profiles.
-- [ ] Submit one slice request with curated setting overrides.
-- [ ] Read job status and progress.
-- [ ] Cancel and retry a job.
-- [ ] Download G-code and `result.json` only after successful publication.
-- [ ] Add API schema validation, correlation IDs, and integration tests.
+- [x] Upload an STL, OBJ, or supported 3MF file.
+- [x] List bundled printer, process, and filament profiles.
+- [x] Submit one slice request with curated setting overrides.
+- [x] Read job status and progress.
+- [x] Cancel and retry a job.
+- [x] Download G-code and `result.json` only after successful publication.
+- [x] Add API schema validation, correlation IDs, and integration tests.
 
 ### 9. Add the first browser screen
 
-- [ ] Provide file upload and bundled profile selection.
-- [ ] Show selected file, profiles, validation errors, progress, and warnings.
-- [ ] Provide Slice, Cancel, Retry, and Download actions.
-- [ ] Keep this screen intentionally simple; do not build the full plater yet.
-- [ ] Add an end-to-end test proving browser upload to downloadable G-code.
+- [x] Provide file upload and bundled profile selection.
+- [x] Show selected file, profiles, validation errors, progress, and warnings.
+- [x] Provide Slice, Cancel, Retry, and Download actions.
+- [x] Keep this screen intentionally simple; do not build the full plater yet.
+- [x] Add an end-to-end test proving browser upload to downloadable G-code.
 
 ### G4 exit criteria
 
-- [ ] A browser upload produces semantically baseline-equivalent G-code through
+- [x] A browser upload produces semantically baseline-equivalent G-code through
   a disposable worker.
-- [ ] Cancellation, worker crash, invalid input, and timeout behavior are covered
+- [x] Cancellation, worker crash, invalid input, and timeout behavior are covered
   end to end.
-- [ ] The API process remains healthy after every worker failure scenario.
+- [x] The API process remains healthy after every worker failure scenario.
 
 ## Phase 3: Complete the browser MVP (G5, priority P2)
 

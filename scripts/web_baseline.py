@@ -267,9 +267,18 @@ def expand(value, variables):
     return value
 
 
-def resolve_profile(path, stack=None):
+def resolve_profile(path, stack=None, lookup=None, cache=None):
+    """Flatten one profile's inheritance chain into a single settings dict.
+
+    A vendor bundle may keep a parent outside its children's directory, so
+    `lookup(parent_name, child_path)` overrides the default sibling rule.
+    `cache` memoizes resolved paths across one traversal; a cached result is
+    shared, so callers must not mutate what they receive.
+    """
     path = path.resolve()
     stack = [] if stack is None else stack
+    if cache is not None and path in cache:
+        return cache[path]
     if path in stack:
         chain = " -> ".join(str(item) for item in stack + [path])
         raise ValueError("profile inheritance cycle: {}".format(chain))
@@ -284,14 +293,20 @@ def resolve_profile(path, stack=None):
     sources = []
     parent_name = profile.get("inherits")
     if parent_name:
-        parent_path = path.parent / "{}.json".format(parent_name)
-        parent, sources = resolve_profile(parent_path, stack + [path])
+        if lookup is None:
+            parent_path = path.parent / "{}.json".format(parent_name)
+        else:
+            parent_path = lookup(parent_name, path)
+        parent, sources = resolve_profile(parent_path, stack + [path], lookup, cache)
         merged = dict(parent)
         merged.update(profile)
         profile = merged
 
     profile.pop("inherits", None)
-    return profile, sources + [path]
+    resolved = (profile, sources + [path])
+    if cache is not None:
+        cache[path] = resolved
+    return resolved
 
 
 def materialize_profiles(manifest, repo, output_root):

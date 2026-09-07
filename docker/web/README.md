@@ -50,8 +50,37 @@ a project archive. Override them with `ORCA_WEB_MAX_INPUT_BYTES`,
 `ORCA_WEB_MAX_EXTRACTED_BYTES`. Values are byte counts except wall time, which
 is milliseconds. Manifest limits can only tighten these server ceilings.
 
-`executor-smoke` verifies the framework-neutral process boundary against fake
-failure workers and the real C++ worker. The executor applies hard Linux CPU,
+## Run the API and the browser screen
+
+```powershell
+docker compose -f docker/web/compose.yml run --rm frontend-build
+docker compose -f docker/web/compose.yml up api
+docker compose -f docker/web/compose.yml run --rm frontend-e2e
+docker compose -f docker/web/compose.yml run --rm api-baseline
+```
+
+`api` serves the FastAPI service documented in [docs/web/api.md](../../docs/web/api.md)
+on `http://localhost:8000`, driving the worker built by `worker-build`. Once
+`frontend-build` has produced `web/frontend/dist`, the same origin also serves
+the [browser screen](../../docs/web/frontend.md). Set `ORCA_WEB_API_PORT` to
+publish it elsewhere. `ORCA_WEB_STATE_ROOT`, `ORCA_WEB_WORKER`,
+`ORCA_WEB_PROFILE_VENDORS`, `ORCA_WEB_MAX_CONCURRENT_JOBS`, and
+`ORCA_WEB_FRONTEND_DIST` configure it.
+
+`frontend` runs the Vite dev server with hot reload on port 5173 and proxies
+`/api` to `ORCA_WEB_API_URL`. `frontend-e2e` builds the bundle, installs
+Chromium, and runs the Playwright suite against the API and the real worker.
+`api-baseline` slices the recorded baseline fixtures through the HTTP API and
+compares the downloaded G-code with the native baseline run.
+
+Node and the browser cache follow the same rule as the C++ build: `node_modules`
+and `/cache/playwright` are named volumes, so their many small files never touch
+the host bind mount.
+
+`executor-smoke` runs the whole `tests/web` suite: the profile catalog, the job
+service against fake workers, and the HTTP surface, in addition to verifying the
+framework-neutral process boundary against fake failure workers and the real C++
+worker. The executor applies hard Linux CPU,
 address-space, file-size, process-count, and file-descriptor limits; bounds
 NDJSON events and stderr; and escalates from `SIGTERM` to `SIGKILL` after a
 configurable grace period. Its additional settings are

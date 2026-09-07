@@ -1,5 +1,7 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
+#include "libslic3r/Web/ProfileCompatibility.hpp"
+#include "libslic3r/Web/SettingsCatalog.hpp"
 #include "libslic3r/Web/WorkerManifest.hpp"
 #include "libslic3r/Web/WorkerProtocol.hpp"
 #include "libslic3r/Utils.hpp"
@@ -42,6 +44,9 @@
 namespace {
 
 constexpr std::uintmax_t MAX_MANIFEST_SIZE = 1024 * 1024;
+// A compatibility request names every bundled profile of one deployment at
+// once, so it is allowed more room than a single job's manifest.
+constexpr std::uintmax_t MAX_COMPATIBILITY_REQUEST_SIZE = 8ull * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_INPUT_BYTES = 250ull * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_TRIANGLES = 1'000'000;
 constexpr std::uint64_t DEFAULT_MAX_WALL_TIME_MS = 300'000;
@@ -222,7 +227,9 @@ void print_usage(std::ostream &output)
     output << "Usage:\n"
            << "  orca-slicer-worker --version\n"
            << "  orca-slicer-worker --validate-manifest <path>\n"
-           << "  orca-slicer-worker --slice-manifest <path>\n";
+           << "  orca-slicer-worker --slice-manifest <path>\n"
+           << "  orca-slicer-worker --export-settings-catalog\n"
+           << "  orca-slicer-worker --evaluate-compatibility <path>\n";
 }
 
 nlohmann::json request_validation_response(const Slic3r::Web::SinglePlateSliceRequestValidation &validation)
@@ -264,7 +271,8 @@ bool initialize_resources(const char *executable, std::string &error)
     return false;
 }
 
-bool read_manifest(const std::string &path, std::string &contents, std::string &error)
+bool read_manifest(const std::string &path, std::string &contents, std::string &error,
+                   std::uintmax_t max_size = MAX_MANIFEST_SIZE)
 {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) {
@@ -277,8 +285,8 @@ bool read_manifest(const std::string &path, std::string &contents, std::string &
         error = "Unable to determine manifest size.";
         return false;
     }
-    if (static_cast<std::uintmax_t>(end) > MAX_MANIFEST_SIZE) {
-        error = "Manifest exceeds the 1 MiB limit.";
+    if (static_cast<std::uintmax_t>(end) > max_size) {
+        error = "Manifest exceeds its size limit.";
         return false;
     }
 
@@ -487,6 +495,47 @@ int main(int argc, char **argv)
             Slic3r::Web::validate_worker_manifest(contents);
         std::cout << validation_response(validation).dump() << '\n';
         return static_cast<int>(validation.is_valid() ? ExitCode::Success : ExitCode::InvalidManifest);
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "--export-settings-catalog") {
+        std::cout << Slic3r::Web::serialize_settings_catalog() << '\n';
+        return static_cast<int>(ExitCode::Success);
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "--evaluate-compatibility") {
+        std::string contents;
+        std::string error;
+        if (!read_manifest(argv[2], contents, error, MAX_COMPATIBILITY_REQUEST_SIZE)) {
+            std::cerr << error << '\n';
+            return static_cast<int>(ExitCode::ManifestIoError);
+        }
+
+        // Printer profiles are named relative to the request file, so the same
+        // containment rules that guard a job directory guard this one.
+        std::filesystem::path root;
+        Slic3r::Web::WorkerManifestError request_error;
+        if (!Slic3r::Web::canonicalize_job_root(std::filesystem::absolute(argv[2]).parent_path(), root, request_error)) {
+            std::cerr << nlohmann::json{{"valid", false},
+                                        {"error", {{"category", Slic3r::Web::worker_error_category_name(request_error.category)},
+                                                   {"code", request_error.code},
+                                                   {"message", request_error.message}}}}
+                             .dump()
+                      << '\n';
+            return static_cast<int>(ExitCode::InternalError);
+        }
+
+        std::string response;
+        if (!Slic3r::Web::evaluate_profile_compatibility(contents, root, response, request_error)) {
+            std::cerr << nlohmann::json{{"valid", false},
+                                        {"error", {{"category", Slic3r::Web::worker_error_category_name(request_error.category)},
+                                                   {"code", request_error.code},
+                                                   {"message", request_error.message}}}}
+                             .dump()
+                      << '\n';
+            return static_cast<int>(ExitCode::InvalidManifest);
+        }
+        std::cout << response << '\n';
+        return static_cast<int>(ExitCode::Success);
     }
 
     if (argc == 3 && std::string(argv[1]) == "--slice-manifest") {
