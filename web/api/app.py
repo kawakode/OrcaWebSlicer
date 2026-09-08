@@ -10,7 +10,7 @@ import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -24,7 +24,15 @@ from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, l
 from . import API_VERSION, PROTOCOL_VERSION
 from .config import ApiConfig, from_environment
 from .errors import ApiError, from_catalog_error
-from .jobs import ARTIFACT_NAMES, MAX_SETTINGS, JobService, SliceRequest
+from .jobs import (
+    ARTIFACT_NAMES,
+    MAX_OBJECT_TRANSFORMS,
+    MAX_SETTINGS,
+    TRANSFORM_LENGTH,
+    JobService,
+    SceneRequest,
+    SliceRequest,
+)
 from .uploads import UploadStore
 
 
@@ -34,6 +42,9 @@ PREFIX = f"/api/{API_VERSION}"
 # A print taller than this has no browsable preview anyway, and the bound keeps
 # an absurd path parameter from reaching the job service at all.
 MAX_PREVIEW_LAYER = 1_000_000
+# A scene's own object count is not capped by the API (a model may have many
+# parts); this only keeps an absurd path parameter from reaching the service.
+MAX_SCENE_OBJECT_INDEX = 1_000_000
 PREVIEW_CHUNK_BYTES = 256 * 1024
 
 logger = logging.getLogger("orca.web.api")
@@ -52,6 +63,20 @@ def _read_range(path, offset: int, length: int):
             yield chunk
 
 
+class ObjectPlacement(BaseModel):
+    """One explicit per-object transform, indexing into an inspected scene.
+
+    Structural shape is checked here (count, exactly 16 entries); finiteness
+    and the non-negative bound on `source_object` are checked again in
+    `JobService`, which is reached by a retry as well as a fresh submission.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_object: int = Field(ge=0)
+    transform: List[float] = Field(min_length=TRANSFORM_LENGTH, max_length=TRANSFORM_LENGTH)
+
+
 class SliceSubmission(BaseModel):
     """One slice request. Unknown fields are refused rather than ignored."""
 
@@ -63,6 +88,9 @@ class SliceSubmission(BaseModel):
     filament_profile: str = Field(min_length=1, max_length=512)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
     plate_index: int = Field(default=1, ge=1)
+    # Explicit per-object placement; empty keeps the worker's existing default
+    # placement. See docs/web/scene-format.md for what `source_object` indexes.
+    objects: List[ObjectPlacement] = Field(default_factory=list, max_length=MAX_OBJECT_TRANSFORMS)
 
     def to_request(self) -> SliceRequest:
         return SliceRequest(
@@ -71,6 +99,36 @@ class SliceSubmission(BaseModel):
             process_profile=self.process_profile,
             filament_profile=self.filament_profile,
             settings=dict(self.settings),
+            plate_index=self.plate_index,
+            objects=[
+                {"source_object": entry.source_object, "transform": list(entry.transform)}
+                for entry in self.objects
+            ],
+        )
+
+
+class SceneSubmission(BaseModel):
+    """One inspect request. Unknown fields are refused rather than ignored.
+
+    It names the same profile chain a slice of this upload would, because that
+    chain is what the API flattens into the machine profile the inspect
+    manifest carries; see `SceneRequest` for why process and filament are
+    required even though only the machine reaches the worker.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    machine_profile: str = Field(min_length=1, max_length=512)
+    process_profile: str = Field(min_length=1, max_length=512)
+    filament_profile: str = Field(min_length=1, max_length=512)
+    plate_index: int = Field(default=1, ge=1)
+
+    def to_request(self, upload_id: str) -> SceneRequest:
+        return SceneRequest(
+            upload_id=upload_id,
+            machine_profile=self.machine_profile,
+            process_profile=self.process_profile,
+            filament_profile=self.filament_profile,
             plate_index=self.plate_index,
         )
 
@@ -207,6 +265,15 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         )
         return record.describe()
 
+    @app.post(f"{PREFIX}/uploads/{{upload_id}}/scene", status_code=202, tags=["scenes"])
+    def submit_scene(
+        request: Request,
+        submission: SceneSubmission,
+        upload_id: str = PathParam(min_length=1, max_length=64),
+    ) -> Dict[str, Any]:
+        """Start (or return) the inspect job that turns this upload into a scene."""
+        return request.app.state.jobs.submit_scene(submission.to_request(upload_id), correlation_id(request))
+
     @app.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
     def submit_job(request: Request, submission: SliceSubmission) -> Dict[str, Any]:
         return request.app.state.jobs.submit(submission.to_request(), correlation_id(request))
@@ -253,6 +320,29 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         bytes straight off disk, which is what keeps a large print servable.
         """
         path, offset, length = request.app.state.jobs.preview_layer(job_id, layer)
+        return StreamingResponse(
+            _read_range(path, offset, length),
+            media_type="application/octet-stream",
+            headers={"Content-Length": str(length), "Cache-Control": "no-store"},
+        )
+
+    @app.get(f"{PREFIX}/scenes/{{job_id}}", tags=["scenes"])
+    def read_scene(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
+        """The scene index: the bed shape and each object's geometry range."""
+        return request.app.state.jobs.scene(job_id)
+
+    @app.get(f"{PREFIX}/scenes/{{job_id}}/objects/{{index}}", tags=["scenes"])
+    def read_scene_object(
+        request: Request,
+        job_id: str = Depends(_job_id),
+        index: int = PathParam(ge=0, le=MAX_SCENE_OBJECT_INDEX),
+    ) -> Response:
+        """One object's triangle soup, read from the blob by seeking to its range.
+
+        The whole scene is never loaded: the response streams the object's
+        bytes straight off disk, the same way a preview layer is served.
+        """
+        path, offset, length = request.app.state.jobs.scene_object(job_id, index)
         return StreamingResponse(
             _read_range(path, offset, length),
             media_type="application/octet-stream",

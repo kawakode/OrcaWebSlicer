@@ -396,6 +396,7 @@ def execute_worker(
     limits: ExecutorLimits,
     cancellation_requested: Optional[threading.Event] = None,
     event_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
+    manifest_flag: str = "--slice-manifest",
 ) -> ExecutionResult:
     """Run one worker to completion and return its validated terminal contract.
 
@@ -403,6 +404,11 @@ def execute_worker(
     caller reports live progress. It runs on the stdout reader thread, must not
     block, and must not raise; a raising observer fails the job rather than
     stalling the pipe.
+
+    `manifest_flag` selects which worker operation the manifest belongs to
+    (`--slice-manifest` or `--inspect-manifest`); the envelope, event stream,
+    result.json, and exit-code contract validated below are identical either
+    way, so only the flag passed to the worker process changes.
     """
     limits.validate()
     if not worker_command:
@@ -418,7 +424,7 @@ def execute_worker(
 
     try:
         process = subprocess.Popen(
-            [*worker_command, "--slice-manifest", str(manifest_path)],
+            [*worker_command, manifest_flag, str(manifest_path)],
             cwd=job_root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import sys
 import tempfile
@@ -27,7 +28,7 @@ from web_worker_executor import ExecutorLimits  # noqa: E402
 
 from web.api.config import ApiConfig  # noqa: E402
 from web.api.errors import ApiError  # noqa: E402
-from web.api.jobs import TERMINAL_STATES, JobService, SliceRequest  # noqa: E402
+from web.api.jobs import TERMINAL_STATES, JobService, SceneRequest, SliceRequest  # noqa: E402
 from web.api.uploads import UploadStore  # noqa: E402
 
 
@@ -94,6 +95,16 @@ class JobServiceTests(unittest.TestCase):
         }
         fields.update(overrides)
         return SliceRequest(**fields)
+
+    def scene_request(self, upload_id, **overrides):
+        fields = {
+            "upload_id": upload_id,
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        fields.update(overrides)
+        return SceneRequest(**fields)
 
     def wait(self, service, job_id, timeout=30):
         deadline = time.monotonic() + timeout
@@ -224,6 +235,7 @@ class JobServiceTests(unittest.TestCase):
     def test_rejects_requests_that_cannot_produce_a_job(self):
         service = self.service()
         upload = self.upload()
+        valid_transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         for overrides, code, status in (
             ({"upload_id": "0" * 32}, "unknown_upload", 404),
             ({"process_profile": f"{VENDOR}/process/Nonexistent"}, "unknown_profile", 404),
@@ -232,6 +244,31 @@ class JobServiceTests(unittest.TestCase):
             ({"settings": {"layer height": "0.2"}}, "invalid_settings", 400),
             ({"settings": {"layer_height": "x" * 5000}}, "invalid_settings", 400),
             ({"plate_index": 0}, "invalid_plate_index", 400),
+            (
+                {"objects": [{"source_object": 0, "transform": valid_transform}] * 65},
+                "invalid_objects",
+                400,
+            ),
+            (
+                {"objects": [{"source_object": -1, "transform": valid_transform}]},
+                "invalid_objects",
+                400,
+            ),
+            (
+                {"objects": [{"source_object": 0, "transform": valid_transform[:-1]}]},
+                "invalid_objects",
+                400,
+            ),
+            (
+                {"objects": [{"source_object": 0, "transform": [float("inf")] + valid_transform[1:]}]},
+                "invalid_objects",
+                400,
+            ),
+            (
+                {"objects": [{"source_object": 0, "transform": [float("nan")] + valid_transform[1:]}]},
+                "invalid_objects",
+                400,
+            ),
         ):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ApiError) as raised:
@@ -240,6 +277,73 @@ class JobServiceTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, code)
                 self.assertEqual(raised.exception.status, status)
         self.assertEqual(service.list(), [])
+
+    def test_places_explicit_object_transforms_and_preserves_them_on_retry(self):
+        service = self.service()
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 2.0, 0.0, 1.0]
+        # A source_object may repeat: this places the same source twice, once
+        # as a duplicate.
+        objects = [{"source_object": 0, "transform": transform}, {"source_object": 0, "transform": transform}]
+        accepted = self.submit(service, objects=objects)
+        self.assertEqual(accepted["request"]["objects"], objects)
+
+        job = self.wait(service, accepted["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        self.assertEqual(job["request"]["objects"], objects)
+        path, _, _ = service.artifact(job["job_id"], "gcode")
+        # The manifest carried the placement through to the worker intact.
+        self.assertIn(json.dumps(objects, separators=(",", ":")), path.read_text(encoding="utf-8"))
+
+        retried = service.retry(job["job_id"], "correlation-objects-retry")
+        self.assertEqual(retried["request"]["objects"], objects)
+        self.assertEqual(self.wait(service, retried["job_id"])["state"], "succeeded")
+
+    def test_produces_a_scene_for_an_upload_and_serves_its_objects(self):
+        service = self.service()
+        upload = self.upload()
+        accepted = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1")
+        self.assertEqual(accepted["state"], "queued")
+
+        job = self.wait(service, accepted["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+
+        index = service.scene(job["job_id"])
+        self.assertEqual(index["scene_version"], 1)
+        self.assertEqual(len(index["objects"]), 2)
+
+        for described in index["objects"]:
+            with self.subTest(index=described["index"]):
+                path, offset, length = service.scene_object(job["job_id"], described["index"])
+                self.assertEqual(length, described["length"])
+                # Never the whole blob: each object is a strict slice of it.
+                self.assertLess(length, index["data_bytes"])
+                with open(path, "rb") as stream:
+                    stream.seek(offset)
+                    self.assertEqual(len(stream.read(length)), length)
+
+        with self.assertRaises(ApiError) as raised:
+            service.scene_object(job["job_id"], 99)
+        self.assertEqual(raised.exception.code, "unknown_scene_object")
+        self.assertEqual(raised.exception.status, 404)
+
+    def test_returns_the_existing_scene_job_for_a_repeated_request(self):
+        service = self.service()
+        upload = self.upload()
+        first = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1")
+        second = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-2")
+        self.assertEqual(second["job_id"], first["job_id"])
+        # The correlation id recorded is the one that actually created the job.
+        self.assertEqual(second["correlation_id"], "correlation-scene-1")
+        self.assertEqual(self.wait(service, first["job_id"])["state"], "succeeded")
+
+    def test_retries_a_failed_scene_job_as_a_fresh_one(self):
+        service = self.service("fail")
+        first = self.wait(service, service.submit_scene(self.scene_request(self.upload().upload_id), "c-1")["job_id"])
+        self.assertEqual(first["state"], "failed")
+        retried = service.retry(first["job_id"], "correlation-scene-retry")
+        self.assertNotEqual(retried["job_id"], first["job_id"])
+        self.assertEqual(retried["retry_of"], first["job_id"])
+        self.assertEqual(self.wait(service, retried["job_id"])["state"], "failed")
 
     def test_reclaims_expired_jobs_and_uploads(self):
         service = self.service(retention_seconds=1)

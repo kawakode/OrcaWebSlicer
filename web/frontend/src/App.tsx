@@ -138,6 +138,31 @@ export default function App() {
   const ready = Boolean(file && machine && process && filament) && !busy && !active;
   const succeeded = job?.state === "succeeded";
 
+  // Each disabled action button is explained, not just dimmed: the reason
+  // covers exactly the button's own disabled condition, so the two can never
+  // drift apart, and each is only true while its button is actually disabled.
+  const sliceHint = busy
+    ? "A request is already in progress."
+    : active
+      ? "A job is already running."
+      : !file
+        ? "Choose a model file first."
+        : !machine || !process || !filament
+          ? "Choose a printer, process, and filament first."
+          : undefined;
+  const cancelHint = busy
+    ? "A request is already in progress."
+    : !active
+      ? "No job is currently running."
+      : undefined;
+  const retryHint = busy
+    ? "A request is already in progress."
+    : !job
+      ? "There is no job to retry yet."
+      : active
+        ? "Wait for the current job to finish before retrying."
+        : undefined;
+
   return (
     <main>
       <header>
@@ -149,17 +174,22 @@ export default function App() {
 
       <section>
         <h2>Model</h2>
-        <input
-          type="file"
-          accept=".stl,.obj,.3mf"
-          data-testid="file-input"
-          onChange={(event) => {
-            setFile(event.target.files?.[0] ?? null);
-            setUpload(null);
-            setJob(null);
-            setFailure(null);
-          }}
-        />
+        {/* Wrapped in its own label like every other control here: a bare file
+            input has no accessible name at all, which the axe pass flags. */}
+        <label>
+          <span>Model file</span>
+          <input
+            type="file"
+            accept=".stl,.obj,.3mf"
+            data-testid="file-input"
+            onChange={(event) => {
+              setFile(event.target.files?.[0] ?? null);
+              setUpload(null);
+              setJob(null);
+              setFailure(null);
+            }}
+          />
+        </label>
         {file && (
           <p data-testid="selected-file">
             {file.name} — {file.size.toLocaleString()} bytes
@@ -202,7 +232,7 @@ export default function App() {
             onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
           />
         ) : (
-          <p data-testid="settings-unavailable">
+          <p data-testid="settings-unavailable" role="status">
             This deployment&rsquo;s slicing engine did not describe its settings, so the selected
             profiles are used unchanged.
           </p>
@@ -210,13 +240,20 @@ export default function App() {
       </section>
 
       <section className="actions">
-        <button type="button" data-testid="slice" disabled={!ready} onClick={slice}>
+        <button
+          type="button"
+          data-testid="slice"
+          disabled={!ready}
+          aria-describedby={sliceHint ? "slice-hint" : undefined}
+          onClick={slice}
+        >
           Slice
         </button>
         <button
           type="button"
           data-testid="cancel"
           disabled={!active || busy}
+          aria-describedby={cancelHint ? "cancel-hint" : undefined}
           onClick={() => job && run(() => cancelJob(job.job_id))}
         >
           Cancel
@@ -225,6 +262,7 @@ export default function App() {
           type="button"
           data-testid="retry"
           disabled={!job || active || busy}
+          aria-describedby={retryHint ? "retry-hint" : undefined}
           onClick={() => job && run(() => retryJob(job.job_id))}
         >
           Retry
@@ -240,6 +278,21 @@ export default function App() {
           </a>
         )}
       </section>
+      {sliceHint && (
+        <p className="hint" id="slice-hint">
+          {sliceHint}
+        </p>
+      )}
+      {cancelHint && (
+        <p className="hint" id="cancel-hint">
+          {cancelHint}
+        </p>
+      )}
+      {retryHint && (
+        <p className="hint" id="retry-hint">
+          {retryHint}
+        </p>
+      )}
 
       {failure && (
         <p className="failure" data-testid="failure" role="alert">
@@ -266,13 +319,16 @@ function ProfileSelect(props: {
   entries: ProfileEntry[];
   onChange: (value: string) => void;
 }) {
+  const empty = props.entries.length === 0;
+  const hintId = empty ? `${props.testId}-hint` : undefined;
   return (
     <label>
       <span>{props.label}</span>
       <select
         data-testid={props.testId}
         value={props.value}
-        disabled={props.entries.length === 0}
+        disabled={empty}
+        aria-describedby={hintId}
         onChange={(event) => props.onChange(event.target.value)}
       >
         {props.entries.map((entry) => (
@@ -281,6 +337,11 @@ function ProfileSelect(props: {
           </option>
         ))}
       </select>
+      {hintId && (
+        <span className="hint" id={hintId}>
+          No {props.label.toLowerCase()} profiles are available yet.
+        </span>
+      )}
     </label>
   );
 }
@@ -295,13 +356,16 @@ function JobPanel({ job }: { job: Job }) {
   return (
     <section className="job">
       <h2>Job</h2>
-      <p>
+      {/* role="status" (implicit polite, atomic live region) is what lets a
+          screen reader hear "succeeded" — or "failed" or "canceled" — without
+          the user having to go looking for it once the job settles. */}
+      <p role="status">
         <code data-testid="job-id">{job.job_id}</code> —{" "}
         <strong data-testid="job-state">{job.state}</strong>
         {job.retry_of && <span data-testid="retry-of"> (retry of {job.retry_of})</span>}
       </p>
-      <progress data-testid="job-progress" value={peak.current} max={100} />
-      <p data-testid="job-stage">
+      <progress data-testid="job-progress" value={peak.current} max={100} aria-label="Job progress" />
+      <p data-testid="job-stage" role="status">
         {job.progress.stage} {peak.current}% {job.progress.message}
       </p>
       {job.error && (

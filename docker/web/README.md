@@ -71,8 +71,11 @@ publish it elsewhere. `ORCA_WEB_STATE_ROOT`, `ORCA_WEB_WORKER`,
 `ORCA_WEB_FRONTEND_DIST` configure it.
 
 `frontend` runs the Vite dev server with hot reload on port 5173 and proxies
-`/api` to `ORCA_WEB_API_URL`. `frontend-e2e` builds the bundle, installs
-Chromium, and runs the Playwright suite against the API and the real worker.
+`/api` to `ORCA_WEB_API_URL`. `frontend-e2e` builds the bundle, installs the
+browser matrix, and runs the Playwright suite against the API and the real
+worker. Chrome, Edge, and Firefox are release-blocking, so a failure in any of
+them fails the service; WebKit stands in for Safari and is reported without
+failing it. `npm run e2e` alone stays Chromium-only for a fast local loop.
 `api-baseline` slices the recorded baseline fixtures through the HTTP API and
 compares the downloaded G-code with the native baseline run.
 

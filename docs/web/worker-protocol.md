@@ -14,10 +14,11 @@ so compatible records can gain optional data without a protocol version bump.
 | `--version` | The worker and protocol versions |
 | `--validate-manifest <path>` | Check one envelope without running it |
 | `--slice-manifest <path>` | Run one slice job in the manifest's directory |
+| `--inspect-manifest <path>` | Publish one model's geometry and bed as a scene |
 | `--export-settings-catalog` | Serialize `PrintConfigDef` for the curated settings |
 | `--evaluate-compatibility <path>` | Resolve `compatible_printers_condition` expressions |
 
-The first three carry untrusted job input and are what a deployment isolates.
+The first four carry untrusted job input and are what a deployment isolates.
 The last two are engine metadata: they take no model, produce no artifact, and
 are read once by the API at startup from the trusted worker executable. They are
 described in [the API contract](api.md); both answer on stdout, report a stable
@@ -63,6 +64,14 @@ STL, OBJ, and 3MF before invoking an importer.
 
 `plate_index` is the optional 1-based plate to slice from a project archive. It
 defaults to 1 and is ignored for meshes, which always describe one plate.
+
+`objects` is optional. When present, each entry names a `source_object` index
+into the scene the `inspect` operation published and a 16-number column-major
+millimetre transform, and the worker slices exactly those placements instead of
+arranging; a repeated `source_object` is a duplicate. At most 64 entries are
+accepted. See [scene-format.md](scene-format.md), which also documents the
+`inspect` operation, its `scene.json` / `scene.bin` artifacts, and
+`ORCA_WEB_MAX_SCENE_BYTES`.
 
 `output_preview` is optional. When present it names the JSON index of the
 [layer preview](preview-format.md); the binary companion is the same path with a

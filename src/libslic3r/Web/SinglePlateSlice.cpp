@@ -8,6 +8,7 @@
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Geometry.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Preset.hpp"
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <exception>
 #include <filesystem>
@@ -29,13 +31,6 @@
 #include <nlohmann/json.hpp>
 
 namespace Slic3r::Web {
-namespace {
-
-void add_error(SinglePlateSliceRequestValidation &result, const char *code, const char *message,
-               WorkerErrorCategory category = WorkerErrorCategory::Request)
-{
-    result.errors.push_back({code, message, category});
-}
 
 bool is_safe_relative_path(const std::string &value)
 {
@@ -58,6 +53,49 @@ std::string lowercase_extension(const std::string &value)
         return static_cast<char>(std::tolower(c));
     });
     return extension;
+}
+
+bool count_model_triangles(const Model &model, std::optional<std::uintmax_t> max_triangles,
+                           std::uintmax_t &triangle_count, WorkerManifestError &error)
+{
+    triangle_count = 0;
+    for (const ModelObject *object : model.objects) {
+        const std::uintmax_t object_triangles = object->facets_count();
+        if (max_triangles && (triangle_count > *max_triangles || object_triangles > *max_triangles - triangle_count)) {
+            error = {"triangle_limit_exceeded", "The input model exceeds the configured triangle limit.",
+                    WorkerErrorCategory::ResourceLimit};
+            return false;
+        }
+        triangle_count += object_triangles;
+    }
+    return true;
+}
+
+bool apply_profile_file(const std::filesystem::path &job_root, const std::string &relative_path,
+                        WorkerErrorCategory category, DynamicPrintConfig &config, WorkerManifestError &error)
+{
+    std::filesystem::path resolved_profile;
+    if (!resolve_job_file(job_root, relative_path, category, resolved_profile, error))
+        return false;
+
+    DynamicPrintConfig profile;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    std::map<std::string, std::string> metadata;
+    std::string reason;
+    if (profile.load_from_json(resolved_profile.string(), substitutions, true, metadata, reason) != 0) {
+        error = {"profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason, category};
+        return false;
+    }
+    config.apply(profile);
+    return true;
+}
+
+namespace {
+
+void add_error(SinglePlateSliceRequestValidation &result, const char *code, const char *message,
+               WorkerErrorCategory category = WorkerErrorCategory::Request)
+{
+    result.errors.push_back({code, message, category});
 }
 
 SinglePlateSliceResult failure(std::string code, std::string message,
@@ -197,9 +235,10 @@ void read_positive_limit(const nlohmann::json &limits, const char *key, std::opt
     target = static_cast<T>(value->get<std::uint64_t>());
 }
 
-// Mirrors the desktop plate-count ceiling so an out-of-range selection is
-// rejected while parsing instead of after opening the archive.
-constexpr std::uint64_t MAX_PLATE_INDEX = 36;
+// An explicit placement per plated copy is small on the wire; this keeps a
+// pathological request from asking the worker to duplicate a heavy mesh an
+// unbounded number of times.
+constexpr std::size_t MAX_OBJECT_TRANSFORMS = 64;
 
 // Releases the owning collections load_bbs_3mf fills in, which the desktop
 // otherwise frees through the plater.
@@ -217,30 +256,21 @@ struct ProjectImportGuard
     }
 };
 
-struct ProjectPlate
-{
-    DynamicPrintConfig config;
-    // True only when the archive declares plates. A plain 3MF is a mesh
-    // container whose coordinates carry no plate placement, so it is arranged
-    // like a loose mesh instead.
-    bool declares_plate {false};
-};
-
 // Loads one plate of a project archive into the neutral worker model. The
 // importer streams the archive itself, so containment and extraction limits are
 // checked against the central directory before it is handed over.
-SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &input_path,
-                                          Model &model, ProjectPlate &project)
+bool load_project_plate(const std::filesystem::path &input_path, unsigned plate_index,
+                        std::optional<std::uintmax_t> max_extracted_bytes, Model &model, bool &declares_plate,
+                        DynamicPrintConfig *project_config, WorkerManifestError &error)
 {
     ProjectArchiveLimits archive_limits;
-    if (request.max_extracted_bytes) {
-        archive_limits.max_extracted_bytes = *request.max_extracted_bytes;
-        archive_limits.max_entry_bytes = std::min(archive_limits.max_entry_bytes, *request.max_extracted_bytes);
+    if (max_extracted_bytes) {
+        archive_limits.max_extracted_bytes = *max_extracted_bytes;
+        archive_limits.max_entry_bytes = std::min(archive_limits.max_entry_bytes, *max_extracted_bytes);
     }
     ProjectArchiveInspection inspection;
-    WorkerManifestError archive_error;
-    if (!inspect_project_archive(input_path, archive_limits, inspection, archive_error))
-        return failure(archive_error.code, archive_error.message, archive_error.category);
+    if (!inspect_project_archive(input_path, archive_limits, inspection, error))
+        return false;
 
     DynamicPrintConfig        loaded_config;
     ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
@@ -256,29 +286,36 @@ SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request
     const LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances;
     if (!load_bbs_3mf(input_path.string().c_str(), &loaded_config, &substitutions, &model, &plate_data_list,
                       &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr, strategy, nullptr,
-                      static_cast<int>(request.plate_index)))
-        return failure("project_load_failed", "The project archive could not be imported.", WorkerErrorCategory::Input);
+                      static_cast<int>(plate_index))) {
+        error = {"project_load_failed", "The project archive could not be imported.", WorkerErrorCategory::Input};
+        return false;
+    }
 
     // Slicing a plate other than the first requires the desktop plate-list
     // layout that offsets every plate on one shared coordinate system, which is
     // outside the declared single-plate scope.
-    if (plate_data_list.size() > 1)
-        return failure("multi_plate_project_unsupported",
-                       "The project contains more than one plate, which is outside the single-plate worker scope.",
-                       WorkerErrorCategory::Input);
-    if (request.plate_index != 1)
-        return failure("plate_index_out_of_range", "The project does not contain the requested plate.",
-                       WorkerErrorCategory::Input);
-
-    project.config = std::move(loaded_config);
-    project.declares_plate = !plate_data_list.empty();
-    if (project.declares_plate) {
-        const PlateData &plate = *plate_data_list.front();
-        project.config.apply(plate.config, true);
-        if (!plate.filament_maps.empty())
-            project.config.option<ConfigOptionInts>("filament_map", true)->values = plate.filament_maps;
+    if (plate_data_list.size() > 1) {
+        error = {"multi_plate_project_unsupported",
+                "The project contains more than one plate, which is outside the single-plate worker scope.",
+                WorkerErrorCategory::Input};
+        return false;
     }
-    return {true, {}, {}, WorkerErrorCategory::Input};
+    if (plate_index != 1) {
+        error = {"plate_index_out_of_range", "The project does not contain the requested plate.",
+                WorkerErrorCategory::Input};
+        return false;
+    }
+
+    declares_plate = !plate_data_list.empty();
+    if (declares_plate) {
+        const PlateData &plate = *plate_data_list.front();
+        loaded_config.apply(plate.config, true);
+        if (!plate.filament_maps.empty())
+            loaded_config.option<ConfigOptionInts>("filament_map", true)->values = plate.filament_maps;
+    }
+    if (project_config)
+        *project_config = std::move(loaded_config);
+    return true;
 }
 
 bool read_profile_path(const nlohmann::json &profiles, const char *key, std::string &target,
@@ -296,6 +333,42 @@ bool read_profile_path(const nlohmann::json &profiles, const char *key, std::str
 }
 
 } // namespace
+
+bool import_single_plate_model(const std::filesystem::path &input_path, const std::string &extension,
+                               unsigned plate_index, std::optional<std::uintmax_t> max_extracted_bytes,
+                               Model &model, bool &declares_plate, DynamicPrintConfig *project_config,
+                               WorkerManifestError &error)
+{
+    declares_plate = false;
+    if (extension == ".3mf") {
+        if (!load_project_plate(input_path, plate_index, max_extracted_bytes, model, declares_plate, project_config,
+                                error))
+            return false;
+        if (model.objects.empty()) {
+            error = {"empty_plate_selection", "The selected plate contains no printable objects.",
+                    WorkerErrorCategory::Input};
+            return false;
+        }
+    } else {
+        bool loaded = false;
+        if (extension == ".stl") {
+            loaded = load_stl(input_path.string().c_str(), &model);
+        } else {
+            ObjInfo obj_info;
+            std::string message;
+            loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
+        }
+        if (!loaded || model.objects.empty()) {
+            error = {"model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input};
+            return false;
+        }
+    }
+    // A mesh has no instance until one is added, and a project archive that
+    // declares no plate carries none either; every other caller (arrangement,
+    // scene export) needs at least one to place the object.
+    model.add_default_instances();
+    return true;
+}
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized)
 {
@@ -396,10 +469,87 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         }
     }
 
+    const auto objects = payload.find("objects");
+    if (objects != payload.end()) {
+        if (!objects->is_array() || objects->size() > MAX_OBJECT_TRANSFORMS) {
+            add_error(result, "invalid_objects", "objects must be an array with at most 64 entries.",
+                      WorkerErrorCategory::Input);
+        } else {
+            std::vector<SliceObjectTransform> parsed_objects;
+            bool objects_valid = true;
+            for (const nlohmann::json &entry : *objects) {
+                const auto source_object = entry.is_object() ? entry.find("source_object") : entry.end();
+                const auto transform = entry.is_object() ? entry.find("transform") : entry.end();
+                if (!entry.is_object() || source_object == entry.end() || !source_object->is_number_unsigned() ||
+                    transform == entry.end() || !transform->is_array() || transform->size() != 16) {
+                    objects_valid = false;
+                    break;
+                }
+                SliceObjectTransform parsed;
+                parsed.source_object = source_object->get<std::uint32_t>();
+                for (std::size_t index = 0; objects_valid && index < 16; ++index) {
+                    const nlohmann::json &scalar = (*transform)[index];
+                    if (!scalar.is_number() || !std::isfinite(scalar.get<double>()))
+                        objects_valid = false;
+                    else
+                        parsed.transform[index] = scalar.get<double>();
+                }
+                if (!objects_valid)
+                    break;
+                parsed_objects.push_back(parsed);
+            }
+            if (!objects_valid)
+                add_error(result, "invalid_object_transform",
+                          "Every objects entry needs an unsigned source_object and a 16-element finite transform.",
+                          WorkerErrorCategory::Input);
+            else
+                request.objects = std::move(parsed_objects);
+        }
+    }
+
     if (result.errors.empty())
         result.request = std::move(request);
     return result;
 }
+
+namespace {
+
+// Replaces every imported object with one explicitly placed copy per
+// `objects` entry. Each copy is a full clone rather than another instance of
+// the same ModelObject: the print engine assumes every instance of one object
+// shares sliced layer geometry, which does not hold once a duplicate's
+// transform differs from its source by more than a Z rotation and an XY
+// offset. Validates every source_object before mutating the model, so a
+// rejected request leaves it untouched.
+bool apply_explicit_object_transforms(Model &model, const std::vector<SliceObjectTransform> &objects,
+                                      WorkerManifestError &error)
+{
+    const std::size_t source_count = model.objects.size();
+    for (const SliceObjectTransform &entry : objects) {
+        if (entry.source_object >= source_count) {
+            error = {"invalid_source_object", "source_object is out of range for the imported model.",
+                    WorkerErrorCategory::Input};
+            return false;
+        }
+    }
+
+    for (const SliceObjectTransform &entry : objects) {
+        ModelObject *copy = model.add_object(*model.objects[entry.source_object]);
+        while (copy->instances.size() > 1)
+            copy->delete_instance(copy->instances.size() - 1);
+        if (copy->instances.empty())
+            copy->add_instance();
+        Transform3d matrix = Transform3d::Identity();
+        matrix.matrix() = Eigen::Map<const Eigen::Matrix<double, 4, 4>>(entry.transform.data());
+        copy->instances.front()->set_transformation(Geometry::Transformation(matrix));
+    }
+    // The originals are replaced, not duplicated alongside their copies.
+    for (std::size_t index = 0; index < source_count; ++index)
+        model.delete_object(std::size_t(0));
+    return true;
+}
+
+} // namespace
 
 SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                           const SinglePlateSliceCallbacks &callbacks)
@@ -438,70 +588,53 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         const std::string extension = lowercase_extension(request.input_model);
         const bool is_project = extension == ".3mf";
         Model model;
-        ProjectPlate project;
-        if (is_project) {
-            if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project);
-                !loaded.success)
-                return loaded;
-            if (model.objects.empty())
-                return failure("empty_plate_selection", "The selected plate contains no printable objects.",
-                               WorkerErrorCategory::Input);
-        } else {
-            bool loaded = false;
-            if (extension == ".stl") {
-                loaded = load_stl(input_path.string().c_str(), &model);
-            } else {
-                ObjInfo obj_info;
-                std::string message;
-                loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
-            }
-            if (!loaded || model.objects.empty())
-                return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
-        }
+        bool declares_plate = false;
+        DynamicPrintConfig project_config;
+        if (!import_single_plate_model(input_path, extension, request.plate_index, request.max_extracted_bytes, model,
+                                       declares_plate, &project_config, path_error))
+            return failure(path_error.code, path_error.message, path_error.category);
 
         std::uintmax_t triangle_count = 0;
-        for (const ModelObject *object : model.objects) {
-            const std::uintmax_t object_triangles = object->facets_count();
-            if (request.max_triangles && (triangle_count > *request.max_triangles ||
-                object_triangles > *request.max_triangles - triangle_count))
-                return failure("triangle_limit_exceeded", "The input model exceeds the configured triangle limit.",
-                               WorkerErrorCategory::ResourceLimit);
-            triangle_count += object_triangles;
-        }
+        if (!count_model_triangles(model, request.max_triangles, triangle_count, path_error))
+            return failure(path_error.code, path_error.message, path_error.category);
 
         throw_if_canceled();
         progress("input", 10, "Model loaded");
-        if (!is_project)
-            model.add_default_instances();
+
+        // Explicit transforms replace every imported object with one placed
+        // copy per entry, so the placement the browser displayed is exactly
+        // what gets sliced instead of whatever arrangement would choose.
+        const bool objects_explicit = !request.objects.empty();
+        if (objects_explicit) {
+            if (!apply_explicit_object_transforms(model, request.objects, path_error))
+                return failure(path_error.code, path_error.message, path_error.category);
+            // A duplicate multiplies triangle count, so the configured limit is
+            // enforced again against what will actually be sliced.
+            if (!count_model_triangles(model, request.max_triangles, triangle_count, path_error))
+                return failure(path_error.code, path_error.message, path_error.category);
+        }
+
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         progress("configuration", 12, "Loading profiles");
         // The embedded project configuration is the base for a project archive;
         // profiles resolved by the request and curated overrides still win.
         if (is_project)
-            config.apply(project.config, true);
+            config.apply(project_config, true);
         for (const std::string *profile_path : {&request.machine_profile, &request.process_profile, &request.filament_profile}) {
             if (profile_path->empty())
                 continue;
-
-            DynamicPrintConfig profile;
-            ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
-            std::map<std::string, std::string> metadata;
-            std::string reason;
-            std::filesystem::path resolved_profile;
-            if (!resolve_job_file(job_root, *profile_path, WorkerErrorCategory::Profile, resolved_profile, path_error))
+            if (!apply_profile_file(job_root, *profile_path, WorkerErrorCategory::Profile, config, path_error))
                 return failure(path_error.code, path_error.message, path_error.category);
-            if (profile.load_from_json(resolved_profile.string(), substitutions, true, metadata, reason) != 0)
-                return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason,
-                               WorkerErrorCategory::Profile);
-            config.apply(profile);
             throw_if_canceled();
         }
         for (const auto &[key, value] : request.settings)
             config.set_deserialize_strict(key, value);
 
-        // A plate carries the placement its author chose, so only loose meshes
-        // and plate-less archives are arranged.
-        if (project.declares_plate) {
+        // An explicit or plate-declared placement is the author's own choice,
+        // so only a loose, unplaced mesh is arranged.
+        if (objects_explicit) {
+            progress("arrangement", 20, "Applying explicit placement");
+        } else if (declares_plate) {
             progress("arrangement", 20, "Keeping project placement");
         } else {
             progress("arrangement", 20, "Arranging objects");
@@ -520,9 +653,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         PrintCancellationMonitor cancellation_monitor(print, request, callbacks, artifact->temporary_path(), started,
                                                        limit_exceeded);
         for (ModelObject *object : model.objects) {
-            // A plate may deliberately sink an object below the bed, so only
-            // fully buried objects are lifted, matching the desktop importer.
-            object->ensure_on_bed(project.declares_plate);
+            // A plate, or the browser's own placement, may deliberately sink an
+            // object below the bed, so only fully buried objects are lifted,
+            // matching the desktop importer.
+            object->ensure_on_bed(declares_plate || objects_explicit);
             print.auto_assign_extruders(object);
         }
         print.apply(model, config);

@@ -14,6 +14,7 @@ This directory is the source of truth for the web effort:
 - [Minimum API](api.md)
 - [Browser screen](frontend.md)
 - [Layer preview format version 1](preview-format.md)
+- [Scene format version 1](scene-format.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 

@@ -23,6 +23,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
 | `GET` | `/settings` | The engine's own definition of every curated setting |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model |
+| `POST` | `/uploads/{upload_id}/scene` | Start (or return) the inspect job for one upload |
 | `POST` | `/jobs` | Submit one slice request |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
@@ -31,11 +32,13 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/jobs/{job_id}/artifacts/{name}` | Download `gcode`, `result`, or `preview` |
 | `GET` | `/jobs/{job_id}/preview` | The layer preview index |
 | `GET` | `/jobs/{job_id}/preview/layers/{n}` | One layer's toolpaths |
+| `GET` | `/scenes/{job_id}` | The scene index: bed shape and per-object geometry |
+| `GET` | `/scenes/{job_id}/objects/{n}` | One object's triangle data |
 
 Request bodies are validated against the published schema before any handler
 runs, and unknown fields are refused rather than ignored. A slice request names
-an upload, one profile of each kind, optional curated setting overrides, and an
-optional 1-based `plate_index`:
+an upload, one profile of each kind, optional curated setting overrides, an
+optional 1-based `plate_index`, and optional explicit object placement:
 
 ```json
 {
@@ -44,9 +47,18 @@ optional 1-based `plate_index`:
   "process_profile": "Anycubic/process/0.20mm Standard @Anycubic Kobra",
   "filament_profile": "Anycubic/filament/Anycubic Generic PLA",
   "settings": {"layer_height": "0.28"},
-  "plate_index": 1
+  "plate_index": 1,
+  "objects": [
+    {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 5, 0, 1]}
+  ]
 }
 ```
+
+`objects` places the plate explicitly: each entry names a `source_object`
+index into a scene's `objects` array (below) and a 16-number column-major
+transform in millimetres. A `source_object` may repeat to place a duplicate,
+and at most 64 entries are accepted. Omitting `objects` keeps the worker's
+existing default placement.
 
 A failure is always the same shape, and always carries a stable code from the
 layer that produced it:

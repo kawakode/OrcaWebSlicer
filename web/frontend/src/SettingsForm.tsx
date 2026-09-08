@@ -24,24 +24,42 @@ export function SettingsForm(props: {
       .filter((group) => group.settings.length > 0);
   }, [catalog]);
 
+  // A gate's own label, so a disabled control can name what turned it off
+  // rather than leaving a screen reader (or a sighted user) to guess from a
+  // dimmed appearance alone.
+  const labelByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const setting of catalog.settings) map.set(setting.key, setting.label || setting.key);
+    return map;
+  }, [catalog]);
+
   return (
     <div className="settings">
       {grouped.map((group) => (
         <fieldset key={group.id} data-testid={`setting-group-${group.id}`}>
           <legend>{group.label}</legend>
-          {group.settings.map((setting) => (
-            <SettingControl
-              key={setting.key}
-              setting={setting}
-              value={values[setting.key] ?? ""}
-              // A setting the engine gates on another one is disabled only once
-              // the user has switched that other one off here. While it is
-              // unset the selected profile decides, and this app cannot know
-              // what the profile chose without slicing it.
-              disabled={disabled || isTurnedOff(setting.enabled_by, values)}
-              onChange={(next) => onChange(setting.key, next)}
-            />
-          ))}
+          {group.settings.map((setting) => {
+            // A setting the engine gates on another one is disabled only once
+            // the user has switched that other one off here. While it is
+            // unset the selected profile decides, and this app cannot know
+            // what the profile chose without slicing it.
+            const gatedOff = isTurnedOff(setting.enabled_by, values);
+            const disabledReason = gatedOff
+              ? `Disabled because ${labelByKey.get(setting.enabled_by ?? "") ?? setting.enabled_by} is turned off.`
+              : disabled
+                ? "Disabled while the job is running."
+                : undefined;
+            return (
+              <SettingControl
+                key={setting.key}
+                setting={setting}
+                value={values[setting.key] ?? ""}
+                disabled={disabled || gatedOff}
+                disabledReason={disabledReason}
+                onChange={(next) => onChange(setting.key, next)}
+              />
+            );
+          })}
         </fieldset>
       ))}
     </div>
@@ -66,11 +84,16 @@ function SettingControl(props: {
   setting: SettingDefinition;
   value: string;
   disabled: boolean;
+  disabledReason?: string;
   onChange: (value: string) => void;
 }) {
-  const { setting, value, disabled, onChange } = props;
+  const { setting, value, disabled, disabledReason, onChange } = props;
   const id = useId();
-  const describedBy = setting.tooltip ? `${id}-tooltip` : undefined;
+  const tooltipId = setting.tooltip ? `${id}-tooltip` : undefined;
+  // Only rendered while the control is actually disabled, so an enabled
+  // control never carries a stale explanation from a gate it no longer has.
+  const reasonId = disabled && disabledReason ? `${id}-disabled-reason` : undefined;
+  const describedBy = [tooltipId, reasonId].filter(Boolean).join(" ") || undefined;
   const testId = `setting-${setting.key}`;
 
   return (
@@ -81,8 +104,13 @@ function SettingControl(props: {
       </label>
       {renderControl()}
       {setting.tooltip && (
-        <p className="tooltip" id={describedBy}>
+        <p className="tooltip" id={tooltipId}>
           {setting.tooltip}
+        </p>
+      )}
+      {reasonId && (
+        <p className="tooltip" id={reasonId}>
+          {disabledReason}
         </p>
       )}
     </div>

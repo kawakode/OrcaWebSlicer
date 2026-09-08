@@ -1,6 +1,7 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/ProfileCompatibility.hpp"
+#include "libslic3r/Web/SceneExport.hpp"
 #include "libslic3r/Web/SettingsCatalog.hpp"
 #include "libslic3r/Web/WorkerManifest.hpp"
 #include "libslic3r/Web/WorkerProtocol.hpp"
@@ -54,6 +55,7 @@ constexpr std::uintmax_t DEFAULT_MAX_MEMORY_BYTES = 4ull * 1024 * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_OUTPUT_BYTES = 1024ull * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_EXTRACTED_BYTES = 1024ull * 1024 * 1024;
 constexpr std::uintmax_t DEFAULT_MAX_PREVIEW_BYTES = 256ull * 1024 * 1024;
+constexpr std::uintmax_t DEFAULT_MAX_SCENE_BYTES = 128ull * 1024 * 1024;
 
 enum class ExitCode : int {
     Success         = 0,
@@ -229,6 +231,7 @@ void print_usage(std::ostream &output)
            << "  orca-slicer-worker --version\n"
            << "  orca-slicer-worker --validate-manifest <path>\n"
            << "  orca-slicer-worker --slice-manifest <path>\n"
+           << "  orca-slicer-worker --inspect-manifest <path>\n"
            << "  orca-slicer-worker --export-settings-catalog\n"
            << "  orca-slicer-worker --evaluate-compatibility <path>\n";
 }
@@ -392,6 +395,24 @@ bool apply_runtime_limits(Slic3r::Web::SinglePlateSliceRequest &request, std::st
     return true;
 }
 
+// `inspect` shares the input and triangle ceilings with `slice` and adds one of
+// its own, so a scene the browser asked for is bounded the same way.
+bool apply_inspect_runtime_limits(Slic3r::Web::SceneExportRequest &request, std::string &error)
+{
+    std::uintmax_t max_input_bytes = 0;
+    std::uintmax_t max_triangles = 0;
+    std::uintmax_t max_scene_bytes = 0;
+    if (!read_configured_limit("ORCA_WEB_MAX_INPUT_BYTES", DEFAULT_MAX_INPUT_BYTES, max_input_bytes, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_TRIANGLES", DEFAULT_MAX_TRIANGLES, max_triangles, error) ||
+        !read_configured_limit("ORCA_WEB_MAX_SCENE_BYTES", DEFAULT_MAX_SCENE_BYTES, max_scene_bytes, error))
+        return false;
+
+    tighten_limit(request.max_input_bytes, max_input_bytes);
+    tighten_limit(request.max_triangles, max_triangles);
+    tighten_limit(request.max_scene_bytes, max_scene_bytes);
+    return true;
+}
+
 std::string sha256_file(const std::filesystem::path &path, std::string &error)
 {
     std::ifstream input(path, std::ios::binary);
@@ -539,6 +560,145 @@ int main(int argc, char **argv)
             return static_cast<int>(ExitCode::InvalidManifest);
         }
         std::cout << response << '\n';
+        return static_cast<int>(ExitCode::Success);
+    }
+
+    if (argc == 3 && std::string(argv[1]) == "--inspect-manifest") {
+        const auto started = std::chrono::steady_clock::now();
+        const std::clock_t cpu_started = std::clock();
+        std::string contents;
+        std::string error;
+        if (!read_manifest(argv[2], contents, error)) {
+            std::cerr << error << '\n';
+            return static_cast<int>(ExitCode::ManifestIoError);
+        }
+
+        const Slic3r::Web::WorkerManifestValidation envelope_validation =
+            Slic3r::Web::validate_inspect_envelope(contents);
+        if (!envelope_validation.is_valid()) {
+            std::cerr << validation_response(envelope_validation).dump() << '\n';
+            return static_cast<int>(ExitCode::InvalidManifest);
+        }
+
+        const std::string &job_id = envelope_validation.manifest->job_id;
+        EventEmitter emitter(job_id);
+        emitter.state(Slic3r::Web::WorkerJobState::Accepted);
+
+        Slic3r::Web::WorkerResult final_result;
+        final_result.job_id = job_id;
+
+        const std::filesystem::path manifest_path = std::filesystem::absolute(argv[2]);
+        std::filesystem::path job_root;
+        Slic3r::Web::WorkerManifestError job_root_error;
+        if (!Slic3r::Web::canonicalize_job_root(manifest_path.parent_path(), job_root, job_root_error)) {
+            emitter.error(job_root_error);
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
+        }
+
+        // One failure path, used before any artifact exists: report it, publish
+        // a terminal result, and leave nothing downloadable behind.
+        const auto abandon = [&](const Slic3r::Web::WorkerManifestError &failure, ExitCode code) {
+            emitter.error(failure);
+            final_result.outcome = failure.category == Slic3r::Web::WorkerErrorCategory::Cancellation ?
+                Slic3r::Web::WorkerJobState::Canceled : Slic3r::Web::WorkerJobState::Failed;
+            final_result.error = failure;
+            finish_timing(final_result, started, cpu_started);
+            std::string publish_error;
+            if (!write_result(job_root, final_result, publish_error))
+                std::cerr << publish_error << '\n';
+            emitter.state(final_result.outcome);
+            return static_cast<int>(code);
+        };
+
+        if (!Slic3r::Web::remove_abandoned_artifacts(job_root, job_id, job_root_error))
+            return abandon(job_root_error, ExitCode::InternalError);
+
+        CancellationSignalGuard cancellation_signals;
+        if (!cancellation_signals.installed())
+            return abandon({"cancellation_setup_failed", "Unable to install process cancellation handlers.",
+                            Slic3r::Web::WorkerErrorCategory::Internal},
+                           ExitCode::InternalError);
+
+        Slic3r::Web::SceneExportRequestValidation validation =
+            Slic3r::Web::validate_scene_export_request(contents);
+        if (!validation.is_valid()) {
+            for (const Slic3r::Web::WorkerManifestError &request_error : validation.errors)
+                emitter.error(request_error);
+            final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
+            final_result.error = validation.errors.front();
+            finish_timing(final_result, started, cpu_started);
+            if (!write_result(job_root, final_result, error))
+                std::cerr << error << '\n';
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InvalidManifest);
+        }
+
+        if (!apply_inspect_runtime_limits(*validation.request, error))
+            return abandon({"invalid_runtime_limits", error, Slic3r::Web::WorkerErrorCategory::Internal},
+                           ExitCode::InternalError);
+        if (!initialize_resources(argv[0], error))
+            return abandon({"resources_not_found", error, Slic3r::Web::WorkerErrorCategory::Internal},
+                           ExitCode::InternalError);
+
+        emitter.state(Slic3r::Web::WorkerJobState::Running);
+        Slic3r::Web::SceneExportCallbacks callbacks;
+        callbacks.progress = [&emitter](const Slic3r::Web::SceneExportProgress &progress) {
+            emitter.progress({progress.stage, progress.percent, progress.message});
+        };
+        callbacks.cancellation_requested = []() { return cancellation_requested(); };
+        const Slic3r::Web::SceneExportResult result =
+            Slic3r::Web::export_scene(*validation.request, job_root, callbacks);
+
+        const auto discard_artifacts = [&job_root, &result]() {
+            for (const Slic3r::Web::SceneExportArtifact &artifact : result.artifacts) {
+                std::error_code ignored;
+                std::filesystem::remove(job_root / artifact.path, ignored);
+            }
+        };
+        if (result.success) {
+            std::vector<Slic3r::Web::WorkerArtifact> hashed;
+            for (const Slic3r::Web::SceneExportArtifact &artifact : result.artifacts) {
+                if (cancellation_requested())
+                    break;
+                const std::filesystem::path path = job_root / artifact.path;
+                const std::string sha256 = sha256_file(path, error);
+                if (sha256.empty())
+                    break;
+                hashed.push_back({artifact.kind, artifact.path, std::filesystem::file_size(path), sha256});
+            }
+            if (cancellation_requested()) {
+                discard_artifacts();
+                return abandon({"job_canceled", "The inspect job was canceled.",
+                                Slic3r::Web::WorkerErrorCategory::Cancellation},
+                               ExitCode::Canceled);
+            }
+            if (hashed.size() != result.artifacts.size()) {
+                discard_artifacts();
+                return abandon({"artifact_hash_failed", error, Slic3r::Web::WorkerErrorCategory::Internal},
+                               ExitCode::InternalError);
+            }
+            final_result.outcome = Slic3r::Web::WorkerJobState::Succeeded;
+            for (const Slic3r::Web::WorkerArtifact &artifact : hashed) {
+                final_result.artifacts.push_back(artifact);
+                emitter.artifact(artifact);
+            }
+        } else {
+            return abandon({result.code, result.message, result.category},
+                           result.category == Slic3r::Web::WorkerErrorCategory::Cancellation ? ExitCode::Canceled :
+                           result.category == Slic3r::Web::WorkerErrorCategory::ResourceLimit ? ExitCode::ResourceLimit :
+                                                                                                ExitCode::SliceFailed);
+        }
+
+        finish_timing(final_result, started, cpu_started);
+        if (!write_result(job_root, final_result, error)) {
+            // Nothing is downloadable without the report that validates it.
+            discard_artifacts();
+            emitter.error({"result_publish_failed", error, Slic3r::Web::WorkerErrorCategory::Internal});
+            emitter.state(Slic3r::Web::WorkerJobState::Failed);
+            return static_cast<int>(ExitCode::InternalError);
+        }
+        emitter.state(Slic3r::Web::WorkerJobState::Succeeded);
         return static_cast<int>(ExitCode::Success);
     }
 

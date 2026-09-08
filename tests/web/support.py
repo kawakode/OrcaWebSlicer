@@ -107,10 +107,12 @@ def publish(outcome, artifacts=None, error=None, warnings=()):
     (job_root / "result.json").write_text(json.dumps(value), encoding="utf-8")
 
 
-# Every mode proves the request reached the worker intact.
+# Every mode proves the request reached the worker intact. An inspect payload
+# names only the machine profile, so the staged set is read from the payload
+# itself rather than assumed to be the slice payload's fixed three.
 assert (job_root / payload["input_model"]).is_file(), "the model was not staged"
-for name in ("machine", "process", "filament"):
-    assert (job_root / payload["profiles"][name]).is_file(), name + " profile was not staged"
+for name, relative in payload["profiles"].items():
+    assert (job_root / relative).is_file(), name + " profile was not staged"
 
 event("state", state="accepted")
 event("state", state="running")
@@ -154,13 +156,66 @@ def write_preview(relative):
     return [dict(describe(index_path), kind="preview"), dict(describe(data_path), kind="preview_data")]
 
 
-if mode == "success":
+def write_scene(relative):
+    """Two one-triangle objects, in the format the WORKER CONTRACT defines."""
+    index_path = job_root / relative
+    data_path = index_path.with_suffix(".bin")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    quantum = 0.001
+    identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    triangles = [
+        [(0, 0, 0), (10000, 0, 0), (0, 10000, 0)],
+        [(0, 0, 5000), (5000, 0, 5000), (0, 5000, 5000)],
+    ]
+    objects = []
+    blob = b""
+    for index, points in enumerate(triangles):
+        body = b"".join(struct.pack("<iii", *point) for point in points)
+        xs, ys, zs = zip(*points)
+        objects.append({
+            "index": index,
+            "name": "object-%d" % index,
+            "triangle_count": len(points) // 3,
+            "bounding_box": {
+                "min": [min(xs) * quantum, min(ys) * quantum, min(zs) * quantum],
+                "max": [max(xs) * quantum, max(ys) * quantum, max(zs) * quantum],
+            },
+            "transform": identity,
+            "offset": len(blob),
+            "length": len(body),
+            "vertex_count": len(points),
+        })
+        blob += body
+    data_path.write_bytes(blob)
+    index_path.write_text(json.dumps({
+        "scene_version": 1,
+        "units": "mm",
+        "quantum_mm": quantum,
+        "bed": {"shape": [[0, 0], [250, 0], [250, 220], [0, 220]], "printable_height": 250.0},
+        "data": str(data_path.relative_to(job_root).as_posix()),
+        "data_bytes": len(blob),
+        "objects": objects,
+    }), encoding="utf-8")
+    return [dict(describe(index_path), kind="scene"), dict(describe(data_path), kind="scene_data")]
+
+
+if mode == "success" and command == "--inspect-manifest":
+    artifacts = write_scene(payload["output_scene"])
+    publish("succeeded", artifacts)
+    for artifact in artifacts:
+        event("artifact", artifact=artifact)
+    event("state", state="succeeded")
+elif mode == "success":
     warnings = [{"code": "thin_wall", "message": "A thin wall was detected."}]
     event("progress", progress={"stage": "slicing", "percent": 50, "message": "Slicing"})
     event("warning", warning=warnings[0])
     target = job_root / payload["output_gcode"]
     target.parent.mkdir(parents=True, exist_ok=True)
-    contents = ("; layer_height = " + payload["settings"].get("layer_height", "default") + "\nG1 X1\n")
+    contents = (
+        "; layer_height = " + payload["settings"].get("layer_height", "default") + "\n"
+        "; objects = " + json.dumps(payload.get("objects", []), separators=(",", ":")) + "\n"
+        "G1 X1\n"
+    )
     target.write_text(contents, encoding="utf-8")
     artifacts = [dict(describe(target), kind="gcode")]
     if payload.get("output_preview"):
@@ -169,6 +224,12 @@ if mode == "success":
     for artifact in artifacts:
         event("artifact", artifact=artifact)
     event("state", state="succeeded")
+elif mode == "fail" and command == "--inspect-manifest":
+    error = {"category": "inspection", "code": "inspection_failed", "message": "The model could not be inspected."}
+    event("error", error=error)
+    publish("failed", error=error)
+    event("state", state="failed")
+    raise SystemExit(5)
 elif mode == "fail":
     error = {"category": "slicing", "code": "slicing_failed", "message": "The model could not be sliced."}
     event("error", error=error)

@@ -125,6 +125,7 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SettingsCatalog]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProfileCompatibility]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[SceneExport]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -154,6 +155,9 @@ services:
         "$${worker}" --evaluate-compatibility "$${compatibility_dir}/request.json" > "$${compatibility_dir}/response.json";
         python3 -c 'import json, pathlib, sys; answered=json.loads(pathlib.Path(sys.argv[1]).read_text()); assert answered["compatibility"]["matching"] == ["kobra"]; assert answered["compatibility"]["other"] == []; assert answered["unevaluated"] == []' "$${compatibility_dir}/response.json";
         rm -rf "$${compatibility_dir}";
+        python3 scripts/test_web_scene.py
+        --worker "$${worker}"
+        --model tests/data/20mm_cube.obj;
         job_dir=$$(mktemp -d);
         trap 'rm -rf "$${job_dir}"' EXIT;
         cp tests/data/20mm_cube.obj "$${job_dir}/model.obj";
@@ -346,16 +350,18 @@ services:
   frontend-e2e:
     <<: *build-environment
     working_dir: /workspace/web/frontend
-    # Playwright needs a browser and its system libraries; the cache volume
-    # keeps that download out of every later run.
+    # Playwright needs its browsers and their system libraries; the cache volume
+    # keeps that download out of every later run. Chrome, Edge, and Firefox are
+    # release-blocking per docs/web/mvp.md, so a failure in any of them fails
+    # this service; WebKit stands in for Safari and is reported but not fatal.
     command:
       - bash
       - -lc
       - >-
         npm ci --no-audit --no-fund
         && npm run build
-        && npx playwright install --with-deps chromium
-        && npm run e2e
+        && npx playwright install --with-deps chromium firefox msedge webkit
+        && npm run e2e:all
 
   baseline:
     <<: *build-environment

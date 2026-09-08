@@ -494,6 +494,8 @@ set(lisbslic3r_sources
     Web/ProfileCompatibility.hpp
     Web/ProjectArchive.cpp
     Web/ProjectArchive.hpp
+    Web/SceneExport.cpp
+    Web/SceneExport.hpp
     Web/SettingsCatalog.cpp
     Web/SettingsCatalog.hpp
     Web/WorkerManifest.cpp

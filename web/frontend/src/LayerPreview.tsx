@@ -166,13 +166,22 @@ export function LayerPreviewPanel({ jobId }: { jobId: string }) {
   }, [index, current]);
 
   if (failure) {
+    // Styled the same as every other error in the app (App.tsx's `failure`
+    // and `job-error`), so it needs the same role="alert" to actually reach a
+    // screen reader — without it the failure was visible but silent.
     return (
-      <p className="failure" data-testid="preview-failure">
+      <p className="failure" data-testid="preview-failure" role="alert">
         The layer preview could not be loaded.
       </p>
     );
   }
-  if (!index || !current) return <p data-testid="preview-loading">Loading the layer preview…</p>;
+  if (!index || !current) {
+    return (
+      <p data-testid="preview-loading" role="status">
+        Loading the layer preview…
+      </p>
+    );
+  }
 
   return (
     <div className="preview">
@@ -180,7 +189,7 @@ export function LayerPreviewPanel({ jobId }: { jobId: string }) {
         aria-label={`Layer ${layer + 1} of ${index.layers.length} at ${current.z.toFixed(2)} mm`} />
       <label htmlFor="preview-layer">
         Layer{" "}
-        <output data-testid="preview-layer-label">
+        <output data-testid="preview-layer-label" htmlFor="preview-layer">
           {layer + 1} / {index.layers.length} — {current.z.toFixed(2)} mm
         </output>
       </label>
@@ -191,6 +200,10 @@ export function LayerPreviewPanel({ jobId }: { jobId: string }) {
         min={0}
         max={index.layers.length - 1}
         value={layer}
+        // The number alone ("3") is what a range input announces by default;
+        // this gives the same layer-and-height sentence the visible label
+        // shows, so arrowing through layers is announced, not just moved.
+        aria-valuetext={`Layer ${layer + 1} of ${index.layers.length}, ${current.z.toFixed(2)} millimeters`}
         onChange={(event) => setLayer(Number(event.target.value))}
       />
       <label htmlFor="preview-travels">
@@ -203,7 +216,7 @@ export function LayerPreviewPanel({ jobId }: { jobId: string }) {
         />
         Show travel moves
       </label>
-      <ul className="legend" data-testid="preview-legend">
+      <ul className="legend" data-testid="preview-legend" aria-label="Roles drawn in this layer">
         {roles.map((role) => (
           <li key={role.id}>
             <span className="swatch" style={{ background: role.color }} aria-hidden="true" />

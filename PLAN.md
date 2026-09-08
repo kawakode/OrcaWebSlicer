@@ -33,8 +33,11 @@ The active gate is G5, the browser MVP. Two of its three features are in place:
 - [x] A sliced job publishes a browsable layer preview that the API serves one
   layer at a time.
 
-The single-plate plater and the remaining MVP compatibility work are what is
-left before the gate closes.
+The plater's data path is in place: the worker's `inspect` operation publishes
+a model's geometry and bed as a scene, the API serves it one object at a time,
+and a slice request can carry explicit per-object transforms. What is missing is
+the browser plater itself — the 3D view and the transform gizmos that would
+produce those transforms — plus the expanded baseline matrix.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -169,14 +172,20 @@ left before the gate closes.
 
 ### 10. Implement the single-plate plater
 
-- [ ] Render supported model geometry and configured bed bounds.
+The data path is complete; the browser view that consumes it is not.
+
+- [x] Publish model geometry and configured bed bounds from the engine, and
+  serve them to the browser one object at a time.
+- [ ] Render that geometry and those bed bounds in the browser.
 - [ ] Add selection, deletion, move, rotate, uniform scale, duplicate, and
   arrange operations.
-- [ ] Use millimetres consistently and submit explicit transforms to the worker.
+- [x] Use millimetres consistently and accept explicit transforms on a slice
+  request, replacing arrangement with exactly the placement that was submitted.
+- [ ] Submit those transforms from the plater.
 - [ ] Verify displayed and sliced placement against fixtures within a documented
   tolerance.
-- [ ] Support adding multiple objects to one plate while retaining the one-plate
-  limit.
+- [x] Support several objects on one plate, including duplicates of one imported
+  object, while retaining the one-plate limit.
 
 ### 11. Generate settings and profile UI from engine metadata
 
@@ -201,12 +210,12 @@ left before the gate closes.
 
 ### 13. Finish MVP behavior and compatibility
 
-- [ ] Surface slicing warnings and actionable configuration errors.
-- [ ] Add retry using the same immutable inputs and a new job ID.
+- [x] Surface slicing warnings and actionable configuration errors.
+- [x] Add retry using the same immutable inputs and a new job ID.
 - [ ] Expand the baseline with support, multipart, multi-filament, invalid
   configuration, Unicode 3MF, cancellation, and output-limit fixtures.
-- [ ] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
-- [ ] Add accessibility and keyboard-navigation checks for the supported flow.
+- [x] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
+- [x] Add accessibility and keyboard-navigation checks for the supported flow.
 
 ### G5 exit criteria
 

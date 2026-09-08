@@ -176,6 +176,16 @@ ul {
   opacity: 0.5;
 }
 
+/* A disabled control's explanation: same quiet register as .tooltip, used
+   outside .setting too (profile selects, the Slice/Cancel/Retry buttons), so
+   dimming a control is never the only signal something changed. */
+.hint {
+  grid-column: 2;
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 details[data-testid="job-report"] {
   margin-top: 1rem;
 }

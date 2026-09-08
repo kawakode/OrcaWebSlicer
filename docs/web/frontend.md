@@ -69,8 +69,10 @@ so the screen can be edited with hot reload against a separately running API.
 
 ## Tests
 
-`web/frontend/e2e/` holds the Playwright suite, which drives real Chromium
-against the API serving the real built bundle and the real native worker:
+`web/frontend/e2e/` holds the Playwright suite, run against the API serving
+the real built bundle and the real native worker.
+
+`slice.spec.ts` drives the supported flow end to end:
 
 - A browser upload produces downloadable G-code, and the downloaded file is the
   published artifact with the expected layer count.
@@ -83,6 +85,40 @@ against the API serving the real built bundle and the real native worker:
 - The layer preview steps through the layers, and its index agrees with the
   G-code the same job published while each request returns one layer's bytes.
 - An unsupported model is refused before any job is created.
+
+`accessibility.spec.ts` covers the same screen from an accessibility angle:
+
+- An automated `@axe-core/playwright` pass over the initial screen, over a
+  finished job with its layer preview open, and over a screen showing an
+  error, each asserting zero violations.
+- A keyboard-only walk of the whole flow — the file input, the profile
+  selects, the generated settings controls, Slice, and the layer preview's
+  slider and travel toggle — asserting forward focus order and that every one
+  of those controls is reachable and operable without a mouse.
+
+### Browser matrix
+
+Per [mvp.md](mvp.md), Chrome, Edge, and Firefox are release-blocking; **Safari
+is tested but not blocking**. `playwright.config.ts` declares one project per
+engine or channel — `chromium`, `firefox`, `msedge`, and `webkit` (WebKit
+stands in for Safari, which cannot be automated outside macOS). Playwright has
+no config-level flag to make one project's failures non-fatal, so that split
+lives at the script level instead:
+
+- `npm run e2e` — Chromium only. The fast default for local iteration, and
+  what running the suite with no arguments has always done.
+- `npm run e2e:matrix` — the three release-blocking browsers as one
+  invocation; a failure in any of them fails it.
+- `npm run e2e:webkit` — WebKit alone, as its own invocation.
+- `npm run e2e:all` — runs both of the above, but does not propagate
+  `e2e:webkit`'s exit code, so a WebKit-only failure is reported without
+  failing the build.
+
+The `msedge` project disables Edge's SmartScreen download protection. That
+check has no answer for a file served from `127.0.0.1` and takes the headless
+browser process down with it, which failed the download test in Edge alone;
+the download is the thing under test, so the check is turned off rather than
+the test.
 
 Semantic equivalence is checked separately, by
 `scripts/test_web_api_baseline.py`, which slices the recorded baseline fixtures

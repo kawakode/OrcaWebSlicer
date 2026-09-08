@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import re
 import tempfile
 import threading
@@ -39,6 +40,16 @@ SETTING_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled"})
 OUTPUT_GCODE = "output/model.gcode"
 OUTPUT_PREVIEW = "output/preview.json"
+OUTPUT_SCENE = "output/scene.json"
+# Two job kinds share one executor call site; the flag is a property of the
+# job rather than something the executor hardcodes.
+OPERATION_SLICE = "slice"
+OPERATION_INSPECT = "inspect"
+_MANIFEST_FLAGS = {OPERATION_SLICE: "--slice-manifest", OPERATION_INSPECT: "--inspect-manifest"}
+# A slice may place at most this many objects, each naming a 4x4 column-major
+# transform in millimetres; a source_object may repeat (a duplicate).
+MAX_OBJECT_TRANSFORMS = 64
+TRANSFORM_LENGTH = 16
 # Artifacts are downloaded by name, never by the worker's own relative path.
 ARTIFACT_NAMES = ("gcode", "result", "preview")
 _ARTIFACT_MEDIA = {
@@ -49,6 +60,8 @@ _ARTIFACT_MEDIA = {
 # The preview index names byte ranges into its binary companion, so it is read
 # once per job and kept; a layer request then seeks instead of parsing again.
 MAX_PREVIEW_INDEX_BYTES = 32 * 1024 * 1024
+# The scene index works the same way for a scene's binary triangle data.
+MAX_SCENE_INDEX_BYTES = 32 * 1024 * 1024
 
 # An executor status that is not "completed" never carries a worker result, so
 # the API states the failure in the worker's own error vocabulary instead.
@@ -70,6 +83,10 @@ class SliceRequest:
     filament_profile: str
     settings: Dict[str, str] = dataclasses.field(default_factory=dict)
     plate_index: int = 1
+    # Explicit per-object placement: each entry names a source object from the
+    # upload's scene and a 4x4 column-major transform in millimetres. Empty
+    # means the worker places the model the same way it always has.
+    objects: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def describe(self) -> Dict[str, Any]:
         return {
@@ -79,6 +96,35 @@ class SliceRequest:
             "filament_profile": self.filament_profile,
             "settings": dict(self.settings),
             "plate_index": self.plate_index,
+            "objects": [dict(entry) for entry in self.objects],
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class SceneRequest:
+    """The immutable inputs of one inspect job, reused verbatim by a retry.
+
+    A scene is derived from an upload, not from a slice job. It still names a
+    full profile chain, matching a slice of the same upload, because that is
+    the only way to flatten a machine profile's inheritance into a job-local
+    file without the worker ever reading the bundled profile tree: only the
+    machine profile reaches the inspect manifest, but process and filament are
+    validated for compatibility exactly as they would be for a real slice.
+    """
+
+    upload_id: str
+    machine_profile: str
+    process_profile: str
+    filament_profile: str
+    plate_index: int = 1
+
+    def describe(self) -> Dict[str, Any]:
+        return {
+            "upload_id": self.upload_id,
+            "machine_profile": self.machine_profile,
+            "process_profile": self.process_profile,
+            "filament_profile": self.filament_profile,
+            "plate_index": self.plate_index,
         }
 
 
@@ -86,9 +132,13 @@ class SliceRequest:
 class JobRecord:
     job_id: str
     correlation_id: str
-    request: SliceRequest
+    # SliceRequest for a "slice" operation, SceneRequest for "inspect".
+    request: Any
     path: Path
     created_at: float
+    # Which worker operation this job runs; selects the manifest flag the
+    # executor is invoked with, so the executor call site stays generic.
+    operation: str = OPERATION_SLICE
     state: str = "queued"
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
@@ -103,8 +153,10 @@ class JobRecord:
     # when the job was accepted so the report explains what was actually sliced.
     profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
     overrides: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
-    # Parsed once and kept, so paging through layers never re-reads the index.
+    # Parsed once and kept, so paging through layers/objects never re-reads
+    # the index.
     preview_index: Optional[Dict[str, Any]] = None
+    scene_index: Optional[Dict[str, Any]] = None
     cancellation: threading.Event = dataclasses.field(default_factory=threading.Event)
 
     def describe(self) -> Dict[str, Any]:
@@ -174,6 +226,10 @@ class JobService:
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
         self._jobs: Dict[str, JobRecord] = {}
+        # The most recent inspect job for one (upload, machine, process,
+        # filament, plate) request, so a repeated scene request returns the
+        # job already in flight or finished rather than starting another.
+        self._scenes: Dict[SceneRequest, str] = {}
         self._pool = ThreadPoolExecutor(
             max_workers=config.max_concurrent_jobs, thread_name_prefix="orca-slice-job"
         )
@@ -228,6 +284,27 @@ class JobService:
             raise ApiError("artifact_unavailable", "The preview data no longer matches its index.", 410)
         return path, offset, length
 
+    def scene(self, job_id: str) -> Dict[str, Any]:
+        """Read the scene index: the bed and every object's geometry range."""
+        return dict(self._scene_index(job_id))
+
+    def scene_object(self, job_id: str, index: int) -> Tuple[Path, int, int]:
+        """Locate one object's triangle soup inside the scene blob without reading the rest."""
+        scene = self._scene_index(job_id)
+        objects = scene.get("objects", [])
+        if not isinstance(objects, list) or not 0 <= index < len(objects):
+            raise ApiError("unknown_scene_object", "This scene has no such object.", 404)
+        described = objects[index]
+        with self._lock:
+            record = self._require(job_id)
+            path = self._published(record, "scene_data")
+        offset = int(described.get("offset", 0))
+        length = int(described.get("length", 0))
+        size = self._readable(path).stat().st_size
+        if offset < 0 or length < 0 or offset + length > size:
+            raise ApiError("artifact_unavailable", "The scene data no longer matches its index.", 410)
+        return path, offset, length
+
     # Commands
 
     def submit(
@@ -257,36 +334,86 @@ class JobService:
                 prepared = prepare_job_directory(
                     self._config.jobs_root,
                     job_id,
-                    self._manifest(job_id, upload, request),
+                    self._slice_manifest(job_id, upload, request),
                     inputs,
                     self._config.job_limits,
                 )
             except JobDirectoryError as error:
                 raise from_job_directory_error(error) from error
 
-        record = JobRecord(
-            job_id=job_id,
-            correlation_id=correlation_id,
-            request=request,
-            path=prepared.path,
-            created_at=time.time(),
-            retry_of=retry_of,
-            profiles=self._describe_chain(request),
-            overrides=self._describe_overrides(request.settings),
-        )
-        with self._lock:
-            self._jobs[job_id] = record
-            # Snapshot before queueing: a worker can start before this returns,
-            # and an acceptance must report the job as accepted.
-            accepted = record.describe()
-        self._log.info(
-            "job accepted job_id=%s correlation_id=%s retry_of=%s staged_bytes=%d",
+        return self._accept(
             job_id,
+            OPERATION_SLICE,
+            request,
+            prepared.path,
+            prepared.staged_bytes,
             correlation_id,
             retry_of,
-            prepared.staged_bytes,
+            self._describe_chain(request),
+            self._describe_overrides(request.settings),
         )
-        self._pool.submit(self._run, job_id)
+
+    def submit_scene(
+        self, request: SceneRequest, correlation_id: str, retry_of: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Start (or return) the inspect job for one upload, machine, and plate.
+
+        A direct request is idempotent: a matching job already queued, running,
+        or succeeded is returned rather than duplicated. A retry (`retry_of`
+        set) always starts a fresh job, exactly like a slice retry.
+        """
+        upload = self._uploads.get(request.upload_id)
+        self._validate_plate_index(request.plate_index)
+        self.sweep()
+
+        if retry_of is None:
+            with self._lock:
+                existing_job_id = self._scenes.get(request)
+                existing = self._jobs.get(existing_job_id) if existing_job_id else None
+                if existing is not None and existing.state not in ("failed", "canceled"):
+                    return existing.describe()
+
+        job_id = f"job-{uuid.uuid4().hex}"
+        with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
+            try:
+                profiles = self._catalog.materialize(
+                    request.machine_profile,
+                    request.process_profile,
+                    request.filament_profile,
+                    Path(staging),
+                )
+            except ProfileCatalogError as error:
+                raise from_catalog_error(error) from error
+            # The inspect manifest names only the machine profile; process and
+            # filament were validated above but are never staged or read.
+            inputs = [
+                JobInput(f"input/model.{upload.model_format}", upload.path, "model"),
+                JobInput("profiles/machine.json", profiles["machine"], "profile"),
+            ]
+            try:
+                prepared = prepare_job_directory(
+                    self._config.jobs_root,
+                    job_id,
+                    self._inspect_manifest(job_id, upload, request),
+                    inputs,
+                    self._config.job_limits,
+                )
+            except JobDirectoryError as error:
+                raise from_job_directory_error(error) from error
+
+        accepted = self._accept(
+            job_id,
+            OPERATION_INSPECT,
+            request,
+            prepared.path,
+            prepared.staged_bytes,
+            correlation_id,
+            retry_of,
+            self._describe_chain(request),
+            [],
+        )
+        with self._lock:
+            self._scenes[request] = job_id
         return accepted
 
     def cancel(self, job_id: str) -> Dict[str, Any]:
@@ -307,7 +434,10 @@ class JobService:
             record = self._require(job_id)
             if record.state not in TERMINAL_STATES:
                 raise ApiError("job_not_retryable", "This job has not finished yet.", 409)
+            operation = record.operation
             request = record.request
+        if operation == OPERATION_INSPECT:
+            return self.submit_scene(request, correlation_id, retry_of=job_id)
         return self.submit(request, correlation_id, retry_of=job_id)
 
     def sweep(self) -> Dict[str, Any]:
@@ -321,8 +451,15 @@ class JobService:
         except JobDirectoryError as error:
             raise from_job_directory_error(error) from error
         with self._lock:
+            removed = set(report.removed)
             for job_id in report.removed:
                 self._jobs.pop(job_id, None)
+            if removed:
+                # Never point a future scene request at a job directory that
+                # is gone.
+                self._scenes = {
+                    request: job_id for request, job_id in self._scenes.items() if job_id not in removed
+                }
         uploads = self._uploads.sweep(self._config.job_limits.retention_seconds)
         return {"jobs_removed": report.removed, "jobs_retained": report.retained, "uploads_removed": uploads}
 
@@ -335,6 +472,51 @@ class JobService:
 
     # Execution
 
+    def _accept(
+        self,
+        job_id: str,
+        operation: str,
+        request: Any,
+        path: Path,
+        staged_bytes: int,
+        correlation_id: str,
+        retry_of: Optional[str],
+        profiles: Dict[str, Any],
+        overrides: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Record a job the job-directory layer already staged, and queue it.
+
+        Shared by `submit` and `submit_scene`: the two operations differ only
+        in how their manifest and inputs are built, not in how a job is held,
+        logged, or handed to the worker pool.
+        """
+        record = JobRecord(
+            job_id=job_id,
+            correlation_id=correlation_id,
+            request=request,
+            path=path,
+            created_at=time.time(),
+            operation=operation,
+            retry_of=retry_of,
+            profiles=profiles,
+            overrides=overrides,
+        )
+        with self._lock:
+            self._jobs[job_id] = record
+            # Snapshot before queueing: a worker can start before this returns,
+            # and an acceptance must report the job as accepted.
+            accepted = record.describe()
+        self._log.info(
+            "job accepted job_id=%s operation=%s correlation_id=%s retry_of=%s staged_bytes=%d",
+            job_id,
+            operation,
+            correlation_id,
+            retry_of,
+            staged_bytes,
+        )
+        self._pool.submit(self._run, job_id)
+        return accepted
+
     def _run(self, job_id: str) -> None:
         with self._lock:
             record = self._jobs.get(job_id)
@@ -344,6 +526,7 @@ class JobService:
             record.started_at = time.time()
             record.progress = {"stage": "input", "percent": 0, "message": ""}
             manifest_path = record.path / MANIFEST_NAME
+            manifest_flag = _MANIFEST_FLAGS[record.operation]
 
         try:
             execution = execute_worker(
@@ -352,6 +535,7 @@ class JobService:
                 self._config.executor_limits,
                 record.cancellation,
                 lambda event: self._observe(record, event),
+                manifest_flag=manifest_flag,
             )
         except ExecutorError as error:
             self._log.warning("job executor failure job_id=%s code=%s", job_id, error.code)
@@ -470,9 +654,25 @@ class JobService:
             record.preview_index = index
             return index
 
+    def _scene_index(self, job_id: str) -> Dict[str, Any]:
+        with self._lock:
+            record = self._require(job_id)
+            if record.scene_index is not None:
+                return record.scene_index
+            path = self._readable(self._published(record, "scene"))
+            if path.stat().st_size > MAX_SCENE_INDEX_BYTES:
+                raise ApiError("artifact_unavailable", "The scene index is too large to serve.", 409)
+            try:
+                index = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ApiError("artifact_unavailable", "The scene index could not be read.", 410) from error
+            if not isinstance(index, dict) or not isinstance(index.get("objects"), list):
+                raise ApiError("artifact_unavailable", "The scene index is not a scene.", 410)
+            record.scene_index = index
+            return index
+
     def _validate(self, request: SliceRequest) -> None:
-        if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
-            raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
+        self._validate_plate_index(request.plate_index)
         if len(request.settings) > MAX_SETTINGS:
             raise ApiError(
                 "invalid_settings", f"A request may override at most {MAX_SETTINGS} settings."
@@ -490,9 +690,47 @@ class JobService:
                 self._settings.validate_overrides(request.settings)
             except SettingsCatalogError as error:
                 raise from_settings_error(error) from error
+        self._validate_objects(request.objects)
 
-    def _describe_chain(self, request: SliceRequest) -> Dict[str, Any]:
-        """Name the effective profile chain each selection flattens."""
+    @staticmethod
+    def _validate_plate_index(plate_index: Any) -> None:
+        if not isinstance(plate_index, int) or not 1 <= plate_index <= MAX_PLATE_INDEX:
+            raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
+
+    @staticmethod
+    def _validate_objects(objects: List[Dict[str, Any]]) -> None:
+        """Check bounds, shape, and finiteness before a worker ever sees these.
+
+        `source_object` is not checked against a scene's actual object count:
+        that count lives in a scene the worker produced, and only the worker
+        that runs the slice can say whether an index it names is in range.
+        """
+        if len(objects) > MAX_OBJECT_TRANSFORMS:
+            raise ApiError(
+                "invalid_objects", f"A request may place at most {MAX_OBJECT_TRANSFORMS} objects."
+            )
+        for entry in objects:
+            if not isinstance(entry, dict):
+                raise ApiError("invalid_objects", "Each placed object must be an object.")
+            source = entry.get("source_object")
+            if not isinstance(source, int) or isinstance(source, bool) or source < 0:
+                raise ApiError("invalid_objects", "source_object must be a non-negative integer.")
+            transform = entry.get("transform")
+            if not isinstance(transform, list) or len(transform) != TRANSFORM_LENGTH:
+                raise ApiError(
+                    "invalid_objects", f"transform must be an array of {TRANSFORM_LENGTH} numbers."
+                )
+            for value in transform:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ApiError("invalid_objects", "transform must contain only finite numbers.")
+
+    def _describe_chain(self, request: Any) -> Dict[str, Any]:
+        """Name the effective profile chain each selection flattens.
+
+        Shared by a slice and a scene request: both name a machine, process,
+        and filament profile, even though a scene manifest only ever
+        references the flattened machine.
+        """
         selected = {
             "machine": request.machine_profile,
             "process": request.process_profile,
@@ -517,23 +755,38 @@ class JobService:
             described.append(entry)
         return described
 
-    def _manifest(self, job_id: str, upload: UploadRecord, request: SliceRequest) -> Dict[str, Any]:
+    def _slice_manifest(self, job_id: str, upload: UploadRecord, request: SliceRequest) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "input_model": f"input/model.{upload.model_format}",
+            "output_gcode": OUTPUT_GCODE,
+            "output_preview": OUTPUT_PREVIEW,
+            "profiles": {
+                "machine": "profiles/machine.json",
+                "process": "profiles/process.json",
+                "filament": "profiles/filament.json",
+            },
+            "settings": dict(request.settings),
+            "plate_index": request.plate_index,
+        }
+        if request.objects:
+            payload["objects"] = [dict(entry) for entry in request.objects]
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "job_id": job_id,
+            "operation": {"name": "slice", "version": 1, "payload": payload},
+        }
+
+    def _inspect_manifest(self, job_id: str, upload: UploadRecord, request: SceneRequest) -> Dict[str, Any]:
         return {
             "protocol_version": PROTOCOL_VERSION,
             "job_id": job_id,
             "operation": {
-                "name": "slice",
+                "name": "inspect",
                 "version": 1,
                 "payload": {
                     "input_model": f"input/model.{upload.model_format}",
-                    "output_gcode": OUTPUT_GCODE,
-                    "output_preview": OUTPUT_PREVIEW,
-                    "profiles": {
-                        "machine": "profiles/machine.json",
-                        "process": "profiles/process.json",
-                        "filament": "profiles/filament.json",
-                    },
-                    "settings": dict(request.settings),
+                    "output_scene": OUTPUT_SCENE,
+                    "profiles": {"machine": "profiles/machine.json"},
                     "plate_index": request.plate_index,
                 },
             },

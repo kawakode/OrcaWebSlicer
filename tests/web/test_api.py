@@ -2,6 +2,7 @@
 
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import time
@@ -81,6 +82,15 @@ class ApiTests(unittest.TestCase):
         }
         body.update(overrides)
         return self.client.post("/api/v1/jobs", json=body)
+
+    def submit_scene(self, upload_id, **overrides):
+        body = {
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        body.update(overrides)
+        return self.client.post(f"/api/v1/uploads/{upload_id}/scene", json=body)
 
     def wait(self, job_id, timeout=30):
         deadline = time.monotonic() + timeout
@@ -366,6 +376,102 @@ class ApiTests(unittest.TestCase):
 
         rejected = self.client.get("/api/v1/health", headers={"X-Correlation-Id": "not a valid id"})
         self.assertRegex(rejected.headers["x-correlation-id"], r"^[0-9a-f]{32}$")
+
+    def test_produces_and_serves_a_scene_for_an_upload(self):
+        upload_id = self.upload().json()["upload_id"]
+        accepted = self.submit_scene(upload_id)
+        self.assertEqual(accepted.status_code, 202)
+        job_id = accepted.json()["job_id"]
+
+        # A repeated request for the same upload and profiles returns the job
+        # already in flight rather than starting a second one.
+        repeated = self.submit_scene(upload_id)
+        self.assertEqual(repeated.status_code, 202)
+        self.assertEqual(repeated.json()["job_id"], job_id)
+
+        job = self.wait(job_id)
+        self.assertEqual(job["state"], "succeeded")
+
+        index = self.client.get(f"/api/v1/scenes/{job_id}")
+        self.assertEqual(index.status_code, 200)
+        described = index.json()
+        self.assertEqual(described["scene_version"], 1)
+        self.assertEqual(len(described["objects"]), 2)
+
+        # An object request returns exactly that object's declared byte range,
+        # and never the whole blob.
+        for entry in described["objects"]:
+            with self.subTest(index=entry["index"]):
+                response = self.client.get(f"/api/v1/scenes/{job_id}/objects/{entry['index']}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(len(response.content), entry["length"])
+                self.assertLess(len(response.content), described["data_bytes"])
+
+        unknown = self.client.get(f"/api/v1/scenes/{job_id}/objects/99")
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(unknown.json()["error"]["code"], "unknown_scene_object")
+
+    def test_refuses_a_scene_for_an_unknown_upload(self):
+        response = self.submit_scene("0" * 32)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "unknown_upload")
+
+    def test_submits_explicit_object_transforms_and_preserves_them_through_retry(self):
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 5.0, 2.0, 0.0, 1.0]
+        objects = [{"source_object": 0, "transform": transform}, {"source_object": 0, "transform": transform}]
+        accepted = self.submit(objects=objects)
+        self.assertEqual(accepted.status_code, 202)
+        job_id = accepted.json()["job_id"]
+        self.assertEqual(accepted.json()["request"]["objects"], objects)
+
+        job = self.wait(job_id)
+        self.assertEqual(job["state"], "succeeded")
+        gcode = self.client.get(f"/api/v1/jobs/{job_id}/artifacts/gcode")
+        self.assertIn(json.dumps(objects, separators=(",", ":")), gcode.text)
+
+        retried = self.client.post(f"/api/v1/jobs/{job_id}/retry")
+        self.assertEqual(retried.status_code, 202)
+        self.assertEqual(retried.json()["request"]["objects"], objects)
+        self.assertEqual(self.wait(retried.json()["job_id"])["state"], "succeeded")
+
+    def test_refuses_invalid_object_placements_before_a_worker_runs(self):
+        upload_id = self.upload().json()["upload_id"]
+        valid_transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        body = {
+            "upload_id": upload_id,
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        # Each of these fails Pydantic's structural schema, so a worker is
+        # never reached and no job is ever recorded.
+        for objects in (
+            [{"source_object": 0, "transform": valid_transform[:-1]}],
+            [{"source_object": -1, "transform": valid_transform}],
+            [{"source_object": 0, "transform": valid_transform, "extra": 1}],
+            [{"source_object": 0, "transform": valid_transform}] * 65,
+        ):
+            with self.subTest(objects=objects):
+                response = self.client.post("/api/v1/jobs", json={**body, "objects": objects})
+                self.assertEqual(response.status_code, 422)
+
+        # A value large enough to overflow a float to infinity is an ordinary
+        # JSON number, so httpx (which refuses to encode a Python `inf` at
+        # all) is bypassed with a hand-built body. It passes Pydantic's
+        # structural schema (a float field accepts infinity) and is instead
+        # refused by JobService with a stable code, still before a worker is
+        # spawned.
+        transform_text = ",".join(["1e400"] + [str(value) for value in valid_transform[1:]])
+        raw = (
+            '{"upload_id": "%s", "machine_profile": "%s", "process_profile": "%s", '
+            '"filament_profile": "%s", "objects": [{"source_object": 0, "transform": [%s]}]}'
+        ) % (upload_id, MACHINE_ID, PROCESS_ID, FILAMENT_ID, transform_text)
+        rejected = self.client.post(
+            "/api/v1/jobs", content=raw.encode("utf-8"), headers={"Content-Type": "application/json"}
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["error"]["code"], "invalid_objects")
+        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
     test_project_archive.cpp
     test_settings_catalog.cpp
     test_profile_compatibility.cpp
+    test_scene_export.cpp
     test_optimizers.cpp
     test_ordering_strategies.cpp
     # test_png_io.cpp

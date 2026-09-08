@@ -37,6 +37,10 @@ test("a browser upload produces downloadable G-code", async ({ page }) => {
     page.getByTestId("download-gcode").click(),
   ]).then(([event]) => event);
   expect(download.suggestedFilename()).toMatch(/^job-[0-9a-f]{32}\.gcode$/);
+  // Wait for the transfer itself, not just the event that started it: the
+  // assertion above passes even if no byte ever lands.
+  expect(await download.failure()).toBeNull();
+  expect(await download.path()).toBeTruthy();
 
   // The download must be the G-code the worker actually published: a 20 mm cube
   // at 0.28 mm is about 71 layers.
