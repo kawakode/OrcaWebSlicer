@@ -22,7 +22,7 @@ from support import (  # noqa: E402
     VENDOR,
     write_profile_tree,
 )
-from web_job_directory import JobDirectoryLimits  # noqa: E402
+from web_job_directory import MANIFEST_NAME, JobDirectoryLimits  # noqa: E402
 from web_profile_catalog import load_catalog  # noqa: E402
 from web_worker_executor import ExecutorLimits  # noqa: E402
 
@@ -91,7 +91,7 @@ class JobServiceTests(unittest.TestCase):
             "upload_id": upload_id,
             "machine_profile": MACHINE_ID,
             "process_profile": PROCESS_ID,
-            "filament_profile": FILAMENT_ID,
+            "filament_profiles": (FILAMENT_ID,),
         }
         fields.update(overrides)
         return SliceRequest(**fields)
@@ -269,6 +269,19 @@ class JobServiceTests(unittest.TestCase):
                 "invalid_objects",
                 400,
             ),
+            (
+                {"objects": [{"source_object": 0, "transform": valid_transform, "filament": -1}]},
+                "invalid_object_filament",
+                400,
+            ),
+            (
+                # Only one filament is named, so slot 2 does not exist.
+                {"objects": [{"source_object": 0, "transform": valid_transform, "filament": 2}]},
+                "invalid_object_filament",
+                400,
+            ),
+            ({"filament_profiles": ()}, "invalid_filament_profiles", 400),
+            ({"filament_profiles": tuple([FILAMENT_ID] * 17)}, "invalid_filament_profiles", 400),
         ):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ApiError) as raised:
@@ -297,6 +310,56 @@ class JobServiceTests(unittest.TestCase):
         retried = service.retry(job["job_id"], "correlation-objects-retry")
         self.assertEqual(retried["request"]["objects"], objects)
         self.assertEqual(self.wait(service, retried["job_id"])["state"], "succeeded")
+
+    def test_slices_with_several_filament_profiles_assigned_per_object(self):
+        service = self.service()
+        upload = self.upload()
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        objects = [
+            {"source_object": 0, "transform": transform, "filament": 1},
+            {"source_object": 0, "transform": transform, "filament": 2},
+        ]
+        # Two spools of the same bundled material: a repeated filament id is
+        # not an error, and each slot still gets its own profile file.
+        request = self.request(
+            upload.upload_id, filament_profiles=(FILAMENT_ID, FILAMENT_ID), objects=objects
+        )
+        accepted = service.submit(request, "correlation-multi-filament")
+        self.assertEqual(accepted["request"]["filament_profiles"], [FILAMENT_ID, FILAMENT_ID])
+        # The job report names every filament in the chain, not only the first.
+        self.assertEqual(
+            [entry["profile_id"] for entry in accepted["profiles"]["filaments"]], [FILAMENT_ID, FILAMENT_ID]
+        )
+        self.assertNotIn("filament", accepted["profiles"])
+
+        job_dir = self.config.jobs_root / accepted["job_id"]
+        manifest = json.loads((job_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        manifest_profiles = manifest["operation"]["payload"]["profiles"]
+        self.assertEqual(
+            manifest_profiles["filaments"], ["profiles/filament-0.json", "profiles/filament-1.json"]
+        )
+        self.assertTrue((job_dir / "profiles" / "filament-0.json").is_file())
+        self.assertTrue((job_dir / "profiles" / "filament-1.json").is_file())
+
+        job = self.wait(service, accepted["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        self.assertEqual(job["profiles"]["filaments"][1]["profile_id"], FILAMENT_ID)
+
+    def test_refuses_an_out_of_range_object_filament_through_the_retry_path(self):
+        # `retry()` calls this same `submit()` with `retry_of` set and never
+        # touches the request schema, so exercise that path directly: even a
+        # request that looks like a retry must still be revalidated.
+        service = self.service()
+        upload = self.upload()
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        bad = self.request(
+            upload.upload_id,
+            objects=[{"source_object": 0, "transform": transform, "filament": 2}],
+        )
+        with self.assertRaises(ApiError) as raised:
+            service.submit(bad, "correlation-retry-like", retry_of="job-does-not-exist")
+        self.assertEqual(raised.exception.code, "invalid_object_filament")
+        self.assertEqual(service.list(), [])
 
     def test_produces_a_scene_for_an_upload_and_serves_its_objects(self):
         service = self.service()

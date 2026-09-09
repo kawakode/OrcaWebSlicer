@@ -19,7 +19,8 @@ slicing behavior. It is not intended to reproduce every desktop feature.
 - STL and 3MF input.
 - Add and remove objects.
 - Select, move, rotate, uniformly scale, duplicate, and arrange objects.
-- Select bundled printer, process, and filament profiles.
+- Select bundled printer and process profiles, and one or more filaments.
+- Assign each object on the plate to one of the chosen filaments.
 - Edit a curated set of common setting overrides.
 - Display configuration validation errors and slicing warnings.
 - Start, monitor, cancel, and retry a slicing job.

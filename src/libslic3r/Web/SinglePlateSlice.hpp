@@ -24,6 +24,15 @@ namespace Slic3r::Web {
 // SceneExport's `inspect` operation, which selects a plate the same way.
 inline constexpr std::uint64_t MAX_PLATE_INDEX = 36;
 
+// The engine's own ceiling is EnforcerBlockerType::ExtruderMax == 32
+// (TriangleSelector.hpp): paint-on supports encode one enforcer/blocker state
+// per extruder into a triangle selector nibble, and that encoding is what
+// actually bounds how many extruders the engine can address. The worker caps
+// well inside that at 16, comfortably above any multi-material hardware in
+// use today, so a malformed or adversarial request can't force it to build
+// vectors sized to the engine's own limit.
+inline constexpr std::size_t MAX_FILAMENTS = 16;
+
 // One explicit placement the browser asked the worker to slice instead of
 // arranging. `source_object` indexes `scene.json`'s `objects` array, i.e. the
 // order the shared importer below fills `Model::objects` in; the same
@@ -34,6 +43,11 @@ struct SliceObjectTransform
     // Column-major 4x4 matrix in millimetres, the same layout SceneExport
     // publishes and the browser edits.
     std::array<double, 16> transform {};
+    // 1-based index into the request's filament profiles. 0 (the default)
+    // means "leave the model's own assignment alone" rather than "filament 1",
+    // so an object that already carries an extruder assignment (e.g. from a
+    // project archive) is not silently overwritten.
+    unsigned filament {0};
 };
 
 struct SinglePlateSliceRequest
@@ -46,7 +60,11 @@ struct SinglePlateSliceRequest
     std::string output_preview;
     std::string machine_profile;
     std::string process_profile;
-    std::string filament_profile;
+    // Exactly one entry is the single-filament request every existing caller
+    // sends, and takes the same `config.apply(profile)` path it always has.
+    // 2-16 entries compose through `set_num_filaments` + `set_at`, one slot
+    // per filament. Empty means no filament profile was named at all.
+    std::vector<std::string> filament_profiles;
     std::vector<std::pair<std::string, std::string>> settings;
     // 1-based plate selection inside a project archive. Mesh inputs describe a
     // single implicit plate and ignore it.
@@ -150,5 +168,18 @@ bool count_model_triangles(const Model &model, std::optional<std::uintmax_t> max
 // export_scene's single optional machine profile.
 bool apply_profile_file(const std::filesystem::path &job_root, const std::string &relative_path,
                         WorkerErrorCategory category, DynamicPrintConfig &config, WorkerManifestError &error);
+
+// Test-only: composes 2+ filament profiles into one job config the way a
+// multi-filament slice_single_plate request does -- set_num_filaments,
+// per-profile set_at, Preset::normalize, then the filament_colour/
+// filament_map/flush_volumes_matrix synthesis -- without running an actual
+// slice. `config` is reset to DynamicPrintConfig::full_print_config() first,
+// mirroring what slice_single_plate itself starts from. Exists so
+// [SliceRequest] tests can assert the synthesis directly and cheaply; it is
+// not part of the worker's request-handling surface and nothing under
+// src/libslic3r/Web calls it outside tests.
+bool compose_multi_filament_config_for_testing(const std::filesystem::path &job_root,
+                                               const std::vector<std::string> &filament_profiles,
+                                               DynamicPrintConfig &config, WorkerManifestError &error);
 
 } // namespace Slic3r::Web

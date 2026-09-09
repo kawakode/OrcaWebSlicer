@@ -37,28 +37,49 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 
 Request bodies are validated against the published schema before any handler
 runs, and unknown fields are refused rather than ignored. A slice request names
-an upload, one profile of each kind, optional curated setting overrides, an
-optional 1-based `plate_index`, and optional explicit object placement:
+an upload, a machine and process profile, one or more filament profiles,
+optional curated setting overrides, an optional 1-based `plate_index`, and
+optional explicit object placement:
 
 ```json
 {
   "upload_id": "3f2a...",
   "machine_profile": "Anycubic/machine/Anycubic Kobra 0.4 nozzle",
   "process_profile": "Anycubic/process/0.20mm Standard @Anycubic Kobra",
-  "filament_profile": "Anycubic/filament/Anycubic Generic PLA",
+  "filament_profiles": [
+    "Anycubic/filament/Anycubic Generic PLA",
+    "Anycubic/filament/Anycubic Generic PETG"
+  ],
   "settings": {"layer_height": "0.28"},
   "plate_index": 1,
   "objects": [
-    {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 5, 0, 1]}
+    {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 5, 0, 1], "filament": 1},
+    {"source_object": 1, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 5, 0, 1], "filament": 2}
   ]
 }
 ```
 
+`filament_profiles` names 1-16 filament profiles, one per filament slot, in
+the order the worker should see them; the same profile id may repeat (two
+spools of the same material). `filament_profile` (a single string) is kept as
+the single-filament spelling and is equivalent to a one-element
+`filament_profiles`. A request naming both is refused with `invalid_profiles`,
+mirroring the worker's own manifest validation, rather than one silently
+winning. The API always forwards the array form to the worker's manifest
+(`profiles.filaments`), even for a single filament, so it only ever has to
+speak one spelling; a one-element array takes the worker's unchanged
+single-filament code path. The API never sends filament colour, filament
+mapping, or the flush-volume matrix — the worker synthesizes those itself.
+
 `objects` places the plate explicitly: each entry names a `source_object`
-index into a scene's `objects` array (below) and a 16-number column-major
-transform in millimetres. A `source_object` may repeat to place a duplicate,
-and at most 64 entries are accepted. Omitting `objects` keeps the worker's
-existing default placement.
+index into a scene's `objects` array (below), a 16-number column-major
+transform in millimetres, and an optional 1-based `filament` assigning that
+object to one of the request's `filament_profiles` slots. Omitting `filament`
+(or sending `0`) leaves the object's own assignment alone, matching the
+worker's meaning for the field; a value outside `1..len(filament_profiles)` is
+refused with `invalid_object_filament`. A `source_object` may repeat to place
+a duplicate, and at most 64 entries are accepted. Omitting `objects` keeps the
+worker's existing default placement.
 
 A failure is always the same shape, and always carries a stable code from the
 layer that produced it:
@@ -120,9 +141,11 @@ the API never interprets an expression itself. A profile with neither is offered
 for every printer, and so is one whose condition the engine could not parse,
 which is what the desktop does with a broken expression.
 
-A selected chain is flattened once, at submission, into three job-local JSON
-files. The worker therefore never reads the bundled profile tree and never
-resolves a path outside its own job directory.
+A selected chain is flattened once, at submission, into job-local JSON files:
+one machine, one process, and one filament file per named filament slot
+(`filament-0.json`, `filament-1.json`, ...). The worker therefore never reads
+the bundled profile tree and never resolves a path outside its own job
+directory.
 
 ## Settings
 
@@ -159,8 +182,11 @@ form, and jobs run with the selected profiles unchanged.
 
 `GET /jobs/{job_id}` carries what was actually sliced alongside the state:
 
-- `profiles` names the machine, process, and filament entries with the
-  `inherits_chain` each one flattens.
+- `profiles` names the machine and process entries, plus a `filaments` array
+  (one entry per named filament slot, in order — always a list, even for a
+  single-filament request), each with the `inherits_chain` it flattens. There
+  is no singular `filament` key; a redundant duplicate of `filaments[0]` would
+  only drift.
 - `overrides` lists every submitted override paired with the engine's label,
   unit, and scope for that setting.
 

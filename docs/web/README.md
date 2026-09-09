@@ -67,6 +67,14 @@ covers support, multipart, invalid configuration, Unicode 3MF, and the
 output-size limit across all three [baseline lanes](baseline.md). G5 is
 complete; G6, production readiness, is the next gate.
 
+Multi-filament landed after that gate closed: a slice request names 1-16
+filament profiles and assigns each placed object to one of them, from the
+browser through to the G-code. The worker synthesizes the per-filament state
+the engine needs — colour, filament-to-nozzle mapping, and the flush-volume
+matrix. That synthesis is the thing the desktop CLI does not do, which is why
+the CLI crashes on the same input; [baseline.md](baseline.md) records that
+defect and why multi-filament therefore has no native baseline lane.
+
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).
 

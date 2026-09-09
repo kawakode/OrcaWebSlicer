@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { readJob, readScene, sceneObject, submitScene, type ProfileSelection } from "./api";
+import { filamentColor, filamentCss } from "./filamentColors";
 import {
   ISOMETRIC_VIEW,
   PlaterCanvas,
@@ -45,6 +46,8 @@ interface Placement {
   rotation: number;
   /** Uniform, 1 being the imported size. */
   scale: number;
+  /** 1-based index into the slice request's filament slots. */
+  filament: number;
 }
 
 interface Scene {
@@ -171,10 +174,17 @@ export function Plater(props: {
   uploadId: string;
   profiles: ProfileSelection;
   disabled: boolean;
+  /**
+   * The chosen filament for each slot, by name, in slot order. Only its
+   * length matters for the plate's own logic; the names are what the
+   * per-object filament select shows.
+   */
+  filamentSlots: string[];
   /** Null while there is no scene, so the worker keeps arranging as before. */
   onPlacements: (placements: ObjectPlacement[] | null) => void;
 }) {
-  const { uploadId, profiles, disabled, onPlacements } = props;
+  const { uploadId, profiles, disabled, filamentSlots, onPlacements } = props;
+  const filamentCount = filamentSlots.length;
   const [scene, setScene] = useState<Scene | null>(null);
   const [placements, setPlacements] = useState<Placement[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -201,6 +211,7 @@ export function Plater(props: {
           y: 0,
           rotation: 0,
           scale: 1,
+          filament: 1,
         }));
         setPlacements(arrange(loaded, fresh));
         setSelected(fresh.length === 1 ? fresh[0].id : null);
@@ -225,20 +236,39 @@ export function Plater(props: {
     [scene, placements],
   );
 
+  // Removing a filament slot must never leave an object pointing at a slot
+  // that no longer exists. The rule is a plain clamp to the new valid range:
+  // predictable (a pure function of the new count, not of which slot was
+  // removed), and visible (the object's color and its select both update
+  // immediately, on the same render that dropped the slot).
+  useEffect(() => {
+    setPlacements((current) =>
+      current.map((placement) =>
+        placement.filament > filamentCount
+          ? { ...placement, filament: filamentCount }
+          : placement,
+      ),
+    );
+  }, [filamentCount]);
+
   // The plate the slice request will carry. An empty list is the pre-plater
-  // behaviour: the worker arranges whatever the model held.
+  // behaviour: the worker arranges whatever the model held. The per-object
+  // filament is only sent once there is more than one slot to choose among —
+  // with a single slot the API's own "no explicit assignment" default applies.
   useEffect(() => {
     if (!scene) {
       onPlacements(null);
       return;
     }
+    const multiFilament = filamentCount > 1;
     onPlacements(
       placements.map((placement, index) => ({
         source_object: placement.source,
         transform: placed[index].matrix,
+        ...(multiFilament ? { filament: placement.filament } : {}),
       })),
     );
-  }, [scene, placements, placed, onPlacements]);
+  }, [scene, placements, placed, filamentCount, onPlacements]);
 
   const items = useMemo<DrawItem[]>(() => {
     if (!scene) return [];
@@ -249,6 +279,7 @@ export function Plater(props: {
       return {
         vertices: simplified ? boxMesh(object.bounding_box) : scene.meshes[placement.source],
         matrix: placed[index].matrix,
+        color: filamentColor(placement.filament - 1),
         selected: placement.id === selected,
         simplified,
       };
@@ -340,6 +371,13 @@ export function Plater(props: {
               aria-pressed={placement.id === selected}
               onClick={() => setSelected(placement.id)}
             >
+              {filamentCount > 1 && (
+                <span
+                  className="swatch filament-swatch"
+                  style={{ backgroundColor: filamentCss(placement.filament - 1) }}
+                  aria-hidden="true"
+                />
+              )}
               {scene.index.objects[placement.source].name || `Object ${placement.source + 1}`}
               <span className="plater-position">
                 {" "}
@@ -389,6 +427,25 @@ export function Plater(props: {
             min={1}
             onChange={(value) => update(selection.id, { scale: Math.max(0.01, value / 100) })}
           />
+          {/* Only shown once there is something to choose between: with a
+              single slot every object is implicitly on it. */}
+          {filamentCount > 1 && (
+            <label>
+              <span>Filament</span>
+              <select
+                data-testid="plater-filament"
+                value={selection.filament}
+                disabled={disabled}
+                onChange={(event) => update(selection.id, { filament: Number(event.target.value) })}
+              >
+                {filamentSlots.map((name, index) => (
+                  <option key={index} value={index + 1}>
+                    {index + 1}. {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
       )}
 

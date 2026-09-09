@@ -98,6 +98,8 @@ set(lisbslic3r_sources
     ClipperZUtils.hpp
     Color.cpp
     Color.hpp
+    ColorSpaceConvert.cpp
+    ColorSpaceConvert.hpp
     CommonDefs.hpp
     Config.cpp
     Config.hpp

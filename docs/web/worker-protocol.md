@@ -65,6 +65,24 @@ STL, OBJ, and 3MF before invoking an importer.
 `plate_index` is the optional 1-based plate to slice from a project archive. It
 defaults to 1 and is ignored for meshes, which always describe one plate.
 
+`profiles.filament` names one filament, exactly as shown above. A request that
+prints in more than one filament instead names `profiles.filaments`, an array
+of 1-16 safe relative JSON paths, one per filament slot in order:
+
+```json
+"profiles": {
+  "machine": "profiles/machine.json",
+  "process": "profiles/process.json",
+  "filaments": ["profiles/filament-0.json", "profiles/filament-1.json"]
+}
+```
+
+Naming both `filament` and `filaments` is `invalid_profiles`; an unsafe or
+non-JSON entry inside `filaments`, or a `filaments` array with zero or more
+than 16 entries, is `invalid_profile_path` / `invalid_filaments` respectively,
+the same as an invalid `filament`. Every entry is subject to the same
+safe-relative-path and `.json`-extension checks as every other profile path.
+
 `objects` is optional. When present, each entry names a `source_object` index
 into the scene the `inspect` operation published and a 16-number column-major
 millimetre transform, and the worker slices exactly those placements instead of
@@ -72,6 +90,48 @@ arranging; a repeated `source_object` is a duplicate. At most 64 entries are
 accepted. See [scene-format.md](scene-format.md), which also documents the
 `inspect` operation, its `scene.json` / `scene.bin` artifacts, and
 `ORCA_WEB_MAX_SCENE_BYTES`.
+
+Each `objects` entry may also carry a 1-based `filament`, naming which
+filament slot (from `profiles.filament`/`profiles.filaments`) that placement
+prints in:
+
+```json
+{"source_object": 0, "transform": [ /* 16 numbers */ ], "filament": 2}
+```
+
+Omitting `filament`, or giving it as `0`, leaves the object's own extruder
+assignment alone. A value greater than the number of filaments the request
+names is `invalid_object_filament`, checked before the model is touched, the
+same as an out-of-range `source_object` is `invalid_source_object`.
+
+A request that names more than one filament does not need to supply
+`filament_colour`, `filament_map`, or `flush_volumes_matrix` either: the
+worker synthesizes all three the same way the desktop's preset pipeline does
+before any multi-filament print, so a plain request with only `machine`,
+`process`, and `filaments` slices correctly. `filament_colour` takes each
+slot's colour from its own filament profile where declared, falling back to
+the engine default otherwise (two slots sharing a colour is a legitimate
+configuration, not an error). `filament_map` assigns every filament to the
+printer's first nozzle, which is the only mapping a single-nozzle printer
+has; a *multi-filament* request against a machine profile with more than one
+nozzle (`nozzle_diameter` declaring more than one entry, e.g. some bundled
+BBL and WEMAKE3D printers) is rejected as
+`multi_nozzle_filament_map_unsupported` in the `profile` category, since
+deciding which nozzle each filament actually feeds is not implemented yet. A
+single-filament request is unaffected by this limit regardless of nozzle
+count.
+
+Multi-filament requests also get the prime tower positioned onto the bed
+automatically. The desktop places it as part of a project's per-plate layout
+(`PartPlate`, GUI-only); the worker has no such concept, so a request that
+doesn't set `wipe_tower_x`/`wipe_tower_y` gets the engine's own defaults
+(15 mm, 220 mm), which sit outside or at the very edge of most bundled
+printers' beds and would otherwise make every multi-filament slice fail
+validation. When the prime tower is enabled and its configured footprint
+(including its brim) does not fit the bed, the worker moves it just inside
+the bed's near corner and reports a warning naming the new position. A
+footprint that already fits -- including one the request placed deliberately
+-- is left untouched, and single-filament requests are never affected.
 
 `output_preview` is optional. When present it names the JSON index of the
 [layer preview](preview-format.md); the binary companion is the same path with a

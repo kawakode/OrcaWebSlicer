@@ -109,10 +109,16 @@ def publish(outcome, artifacts=None, error=None, warnings=()):
 
 # Every mode proves the request reached the worker intact. An inspect payload
 # names only the machine profile, so the staged set is read from the payload
-# itself rather than assumed to be the slice payload's fixed three.
+# itself rather than assumed to be the slice payload's fixed set. A slice
+# payload's "filaments" is always the array form (one path per slot, 1-16).
 assert (job_root / payload["input_model"]).is_file(), "the model was not staged"
 for name, relative in payload["profiles"].items():
-    assert (job_root / relative).is_file(), name + " profile was not staged"
+    if isinstance(relative, list):
+        assert relative, name + " named no slots"
+        for item in relative:
+            assert (job_root / item).is_file(), name + " profile was not staged"
+    else:
+        assert (job_root / relative).is_file(), name + " profile was not staged"
 
 event("state", state="accepted")
 event("state", state="running")
@@ -214,6 +220,7 @@ elif mode == "success":
     contents = (
         "; layer_height = " + payload["settings"].get("layer_height", "default") + "\n"
         "; objects = " + json.dumps(payload.get("objects", []), separators=(",", ":")) + "\n"
+        "; profiles = " + json.dumps(payload["profiles"], separators=(",", ":")) + "\n"
         "G1 X1\n"
     )
     target.write_text(contents, encoding="utf-8")

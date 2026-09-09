@@ -85,8 +85,15 @@ export async function sceneObject(jobId: string, index: number): Promise<ArrayBu
   return response.arrayBuffer();
 }
 
-export interface SliceSubmission extends ProfileSelection {
+export interface SliceSubmission {
   upload_id: string;
+  machine_profile: string;
+  process_profile: string;
+  /**
+   * One bundled filament profile id per slot, 1-16 entries, in order. The
+   * same id may appear twice — that is two spools of the same material.
+   */
+  filament_profiles: string[];
   settings: Record<string, string>;
   /** Empty leaves placement to the worker, exactly as before the plater existed. */
   objects?: ObjectPlacement[];

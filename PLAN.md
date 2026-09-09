@@ -220,13 +220,12 @@ verified in a browser the release depends on.
   lanes. Cancellation stays in `scripts/test_web_worker_cancellation.py`, which
   signals a running worker mid-slice — something a manifest-driven runner
   cannot do.
-- [ ] Multi-filament is deliberately deferred out of this gate: the worker
-  protocol names exactly one filament profile, so a multi-filament case cannot
-  be reproduced in the worker or API lanes without composing several filament
-  presets into the config's per-extruder vectors — a feature in its own right,
-  not a fixture. The desktop CLI already accepts `--load-filaments a;b`, so the
-  native lane alone could express it, which would measure nothing the worker
-  can be held to. Track it with multi-material support rather than here.
+- [x] Multi-filament: a slice request names 1-16 filament profiles and assigns
+  each placed object to one of them, end to end from the browser. It has no
+  baseline fixture, and cannot have one, for the reason recorded in
+  [baseline.md](docs/web/baseline.md): the desktop CLI crashes whenever a
+  second filament is actually used, so there is no native run to compare
+  against. The worker is verified directly instead.
 - [x] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
 - [x] Add accessibility and keyboard-navigation checks for the supported flow.
 

@@ -58,12 +58,44 @@ fixture through that lane without changing what the API accepts.
 Multi-filament and cancellation fixtures are intentionally not part of this
 manifest:
 
-- The worker protocol accepts exactly one filament profile
-  (`payload.profiles.filament` is a single path), so a multi-filament case
-  cannot be expressed in the worker or API lanes without a protocol change.
+- **Multi-filament has no native reference to compare against.** The worker
+  slices it (`payload.profiles.filaments`, verified directly — see below), but
+  the desktop CLI crashes whenever a second filament is actually used, so the
+  native lane cannot produce the recording the other two lanes are measured
+  against. Both a semantic comparison and an `expect` assertion are therefore
+  meaningless here, and the capability is covered by the worker's own tests
+  and the browser suite instead.
 - Cancellation is already covered by `scripts/test_web_worker_cancellation.py`,
   which signals a running worker process mid-slice — a capability this
   manifest-driven runner does not have.
+
+### The desktop CLI's multi-filament crash
+
+Measured on 2026-09-09 against `build/package/bin/orca-slicer` from this
+repository, with stock bundled profiles:
+
+| Configuration | Result |
+| --- | --- |
+| Anycubic Kobra, one filament | exit 0 |
+| Two filaments, the second never used | exit 0 |
+| Two filaments, support on filament 2, no prime tower | exit 134, `free(): invalid next size (fast)`, after writing 334 KB of G-code |
+| The same with the prime tower placed on the bed | exit 139 (`SIGSEGV`) |
+| Bambu Lab X1 Carbon, two filaments, support on filament 2 | exit 134 |
+
+It is neither printer-specific nor prime-tower-specific: the trigger is a
+second filament actually being used. The cause is per-filament configuration
+that nothing sizes to the filament count. `set_num_filaments` covers only the
+short `filament_option_keys()` list, and `ConfigOptionVector::set_at` grows
+only the keys a given profile happens to declare, so `filament_colour`,
+`filament_map` and `flush_volumes_matrix` are left sized for one filament
+while the rest of the config is sized for several. The engine documents the
+gap itself, in `Print.cpp`: *"fall back to a synthesized base when no producer
+sized them to the filament count (CLI runs until the per-filament synthesis
+lands there), where indexing per filament would run out of bounds."*
+
+The worker synthesizes all three, which is why it slices what the CLI cannot;
+`docs/web/worker-protocol.md` documents that synthesis. Fixing the CLI is
+upstream work and is not required by the web tier.
 
 Additional fixtures are added only when they protect a distinct contract such
 as modifier volumes.

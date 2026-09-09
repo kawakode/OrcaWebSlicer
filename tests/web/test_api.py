@@ -112,9 +112,12 @@ class ApiTests(unittest.TestCase):
         document = schema.json()
         self.assertIn("/api/v1/jobs/{job_id}/artifacts/{name}", document["paths"])
         submission = document["components"]["schemas"]["SliceSubmission"]
+        # Neither filament spelling is structurally required: exactly one of
+        # them must be named, but that is checked once the body is parsed
+        # (see test_refuses_naming_both_filament_spellings), not by the schema.
         self.assertEqual(
             sorted(submission["required"]),
-            ["filament_profile", "machine_profile", "process_profile", "upload_id"],
+            ["machine_profile", "process_profile", "upload_id"],
         )
 
     def test_lists_bundled_profiles_and_narrows_them_to_a_printer(self):
@@ -204,6 +207,62 @@ class ApiTests(unittest.TestCase):
         )
         # The report survives the job, so a finished job still explains itself.
         self.assertEqual(self.wait(report["job_id"])["overrides"], report["overrides"])
+
+    def test_slices_with_several_filament_profiles_assigned_per_object(self):
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        objects = [
+            {"source_object": 0, "transform": transform, "filament": 1},
+            {"source_object": 0, "transform": transform, "filament": 2},
+        ]
+        # Two spools of the same bundled material: naming the same filament id
+        # twice is accepted, not a duplicate error.
+        # The fixture's default body names the singular `filament_profile`;
+        # null it out so only the plural spelling is sent.
+        accepted = self.submit(
+            filament_profile=None, filament_profiles=[FILAMENT_ID, FILAMENT_ID], objects=objects
+        )
+        self.assertEqual(accepted.status_code, 202)
+        report = accepted.json()
+        self.assertEqual(report["request"]["filament_profiles"], [FILAMENT_ID, FILAMENT_ID])
+        # The job report names every filament in the chain, as a list, with no
+        # singular "filament" key left over.
+        self.assertEqual(
+            [entry["profile_id"] for entry in report["profiles"]["filaments"]], [FILAMENT_ID, FILAMENT_ID]
+        )
+        self.assertNotIn("filament", report["profiles"])
+
+        job = self.wait(report["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        gcode = self.client.get(f"/api/v1/jobs/{report['job_id']}/artifacts/gcode")
+        self.assertIn(json.dumps(objects, separators=(",", ":")), gcode.text)
+
+    def test_refuses_naming_both_filament_spellings(self):
+        upload_id = self.upload().json()["upload_id"]
+        rejected = self.client.post(
+            "/api/v1/jobs",
+            json={
+                "upload_id": upload_id,
+                "machine_profile": MACHINE_ID,
+                "process_profile": PROCESS_ID,
+                "filament_profile": FILAMENT_ID,
+                "filament_profiles": [FILAMENT_ID],
+            },
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["error"]["code"], "invalid_profiles")
+        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
+
+    def test_refuses_an_object_filament_outside_the_declared_filament_count(self):
+        transform = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        # Only one filament is named, so slot 2 does not exist. Structurally
+        # valid (a non-negative int), so this is refused by JobService, not
+        # by the request schema, before any job is created.
+        rejected = self.submit(
+            objects=[{"source_object": 0, "transform": transform, "filament": 2}]
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["error"]["code"], "invalid_object_filament")
+        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
 
     def test_accepts_supported_models_and_refuses_the_rest(self):
         accepted = self.upload("cube.STL")

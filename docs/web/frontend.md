@@ -8,11 +8,12 @@ Status: Active contract for G5
 ## What the screen does
 
 - Select one STL, OBJ, or 3MF file and see its name and size.
-- Choose a bundled printer, then a process and filament narrowed to that
-  printer by the [API](api.md).
+- Choose a bundled printer, then a process and one or more filaments narrowed
+  to that printer by the [API](api.md).
 - Lay out the plate: see the model on the printer's own bed, select, move,
-  rotate, scale, duplicate, delete, and arrange objects, and slice exactly the
-  placement on screen.
+  rotate, scale, duplicate, delete, and arrange objects; assign each object a
+  filament when more than one is chosen; and slice exactly the placement and
+  assignment on screen.
 - Edit the curated overrides, in a form generated from the engine's own setting
   definitions. Blank fields are not sent, so the profile's own value stands.
 - Slice, Cancel, and Retry, each disabled when the job state makes it
@@ -55,6 +56,44 @@ Two deliberate departures from "report placement as imported":
 - **Every object sits on the bed.** The worker only lifts an object that is
   *entirely* below the bed, so a plater that let one hang would slice exactly
   the hanging placement. Z is therefore derived, not edited.
+
+### Filament slots
+
+A slice request carries a filament **list**, `filament_profiles`, rather than
+one profile: `App` holds an ordered array of slots, each narrowed to the
+current printer exactly like the old single select was. A slot can be added
+up to 16 and removed down to 1 — never fewer, since a plate always slices with
+at least one filament. With a single slot the screen looks and behaves exactly
+as it always has: no per-object control, no swatches, one plain "Filament"
+select with the same test id it has always had.
+
+Once a second slot exists, every placed object carries a `filament` — a
+1-based index into that array — shown next to its position, rotation, and
+scale in the transform panel and submitted as that object's `filament`. A
+freshly loaded or duplicated object starts on slot 1.
+
+**Removing a slot never leaves an object pointing at a filament that no
+longer exists.** The rule is a plain clamp to the new valid range: any
+object's `filament` above the new slot count falls to the new last slot. This
+is deliberately simple rather than trying to preserve which physical filament
+an object was on — it is a pure function of the new count, not of which slot
+was removed, so it is predictable — and it is visible immediately, because
+the clamped object's color and its own select both update on the same render
+that dropped the slot.
+
+Each filament slot is colored, and every object on the canvas is painted in
+its assigned filament's color, so the plate is readable at a glance; the
+on-screen filament list uses the exact same palette (`filamentColors.ts`), so
+the two always agree. Selection is drawn as a two-tone wireframe halo over an
+object's own color rather than a color swap, precisely because the fill now
+carries meaning — swapping it away on selection would hide which filament an
+object is on, and risks landing on a color indistinguishable from another
+slot's.
+
+Filament color, filament-to-extruder mapping, and purge volumes are all the
+worker's job. The browser never computes or sends any of them — it only
+sends the ordered list of profile ids and each object's 1-based index into
+it.
 
 ### Drawing it
 
@@ -152,12 +191,18 @@ the real built bundle and the real native worker.
   switched off) of the placed model's box, and translating the object moves the
   printed outline by exactly that translation. `scripts/test_web_placement.py`
   makes the same checks against the HTTP API without a browser.
+- Multi-filament plates: with a single slot the per-object filament control
+  is absent; adding a slot and assigning a duplicated object to it submits
+  the expected `filament_profiles` and per-object `filament`; removing a slot
+  clamps rather than dangling; the job report names every filament; and a
+  finished multi-filament slice's G-code carries a `T1` tool change.
 
 `accessibility.spec.ts` covers the same screen from an accessibility angle:
 
 - An automated `@axe-core/playwright` pass over the initial screen, over a
-  finished job with its layer preview open, and over a screen showing an
-  error, each asserting zero violations.
+  finished job with its layer preview open, over a plate with several
+  filament slots and an object reassigned off the default one, and over a
+  screen showing an error, each asserting zero violations.
 - A keyboard-only walk of the whole flow — the file input, the profile
   selects, the generated settings controls, Slice, and the layer preview's
   slider and travel toggle — asserting forward focus order and that every one

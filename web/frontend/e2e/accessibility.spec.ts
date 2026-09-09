@@ -64,6 +64,26 @@ test.describe("accessibility: automated axe pass", () => {
     await expectNoViolations(page);
   });
 
+  test("a plate with several filament slots and a reassigned object has no violations", async ({ page }) => {
+    await page.goto("/");
+    await waitForProfiles(page);
+
+    await page.getByTestId("file-input").setInputFiles(CUBE);
+    await expect(page.getByTestId("plater-canvas")).toBeVisible();
+
+    // Three slots, a duplicated object, and one of the two objects moved off
+    // the default slot: this is what actually paints the plate in more than
+    // one color, which is exactly the kind of change that reintroduced a
+    // contrast violation in the object list before.
+    await page.getByTestId("filament-add").click();
+    await page.getByTestId("filament-add").click();
+    await page.getByTestId("plater-duplicate").click();
+    await page.getByTestId("plater-select-1").click();
+    await page.getByTestId("plater-filament").selectOption("2");
+
+    await expectNoViolations(page);
+  });
+
   test("a screen showing an error has no violations", async ({ page }) => {
     await page.goto("/");
     await waitForProfiles(page);

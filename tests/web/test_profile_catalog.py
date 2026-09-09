@@ -113,8 +113,8 @@ class ProfileCatalogTests(unittest.TestCase):
 
     def test_materializes_a_flattened_chain(self):
         destination = self.root / "job" / "profiles"
-        written = self.catalog.materialize(MACHINE_ID, PROCESS_ID, FILAMENT_ID, destination)
-        self.assertEqual(sorted(written), ["filament", "machine", "process"])
+        written = self.catalog.materialize(MACHINE_ID, PROCESS_ID, [FILAMENT_ID], destination)
+        self.assertEqual(sorted(written), ["filament-0", "machine", "process"])
         process = json.loads(written["process"].read_text(encoding="utf-8"))
         # Inherited defaults are merged in and the inheritance link is gone, so
         # the worker never reads the bundled profile tree.
@@ -122,11 +122,21 @@ class ProfileCatalogTests(unittest.TestCase):
         self.assertNotIn("inherits", process)
         self.assertEqual(json.loads(written["machine"].read_text(encoding="utf-8"))["printable_height"], "250")
         # The filament inherits across directories, not from a sibling file.
-        self.assertEqual(json.loads(written["filament"].read_text(encoding="utf-8"))["filament_type"], ["PLA"])
+        self.assertEqual(json.loads(written["filament-0"].read_text(encoding="utf-8"))["filament_type"], ["PLA"])
+
+    def test_materializes_one_file_per_filament_slot_allowing_a_repeated_id(self):
+        destination = self.root / "job" / "profiles"
+        # Two spools of the same material: a repeated id is not an error, and
+        # each slot still gets its own file.
+        written = self.catalog.materialize(MACHINE_ID, PROCESS_ID, [FILAMENT_ID, FILAMENT_ID], destination)
+        self.assertEqual(sorted(written), ["filament-0", "filament-1", "machine", "process"])
+        self.assertNotEqual(written["filament-0"], written["filament-1"])
+        for key in ("filament-0", "filament-1"):
+            self.assertEqual(json.loads(written[key].read_text(encoding="utf-8"))["filament_type"], ["PLA"])
 
     def test_refuses_to_materialize_an_incompatible_chain(self):
         with self.assertRaises(ProfileCatalogError) as raised:
-            self.catalog.materialize(MACHINE_ID, OTHER_PROCESS_ID, FILAMENT_ID, self.root / "job")
+            self.catalog.materialize(MACHINE_ID, OTHER_PROCESS_ID, [FILAMENT_ID], self.root / "job")
         self.assertEqual(raised.exception.code, "incompatible_profile")
 
     def test_rejects_an_unknown_or_unsafe_vendor(self):

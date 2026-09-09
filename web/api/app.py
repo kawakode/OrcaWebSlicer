@@ -26,6 +26,7 @@ from .config import ApiConfig, from_environment
 from .errors import ApiError, from_catalog_error
 from .jobs import (
     ARTIFACT_NAMES,
+    MAX_FILAMENT_PROFILES,
     MAX_OBJECT_TRANSFORMS,
     MAX_SETTINGS,
     TRANSFORM_LENGTH,
@@ -75,6 +76,11 @@ class ObjectPlacement(BaseModel):
 
     source_object: int = Field(ge=0)
     transform: List[float] = Field(min_length=TRANSFORM_LENGTH, max_length=TRANSFORM_LENGTH)
+    # 1-based index into the request's filament_profiles; 0 (the default)
+    # means "leave this object's own assignment alone", matching the worker.
+    # The upper bound depends on how many filaments the request names, so it
+    # is re-checked in `JobService` rather than here.
+    filament: int = Field(default=0, ge=0)
 
 
 class SliceSubmission(BaseModel):
@@ -85,7 +91,13 @@ class SliceSubmission(BaseModel):
     upload_id: str = Field(min_length=1, max_length=64)
     machine_profile: str = Field(min_length=1, max_length=512)
     process_profile: str = Field(min_length=1, max_length=512)
-    filament_profile: str = Field(min_length=1, max_length=512)
+    # Exactly one of these two must be named: `filament_profile` is the
+    # single-filament spelling kept for compatibility, `filament_profiles`
+    # names one profile per filament slot. Naming both is refused the same
+    # way the worker itself refuses it (`invalid_profiles`), rather than one
+    # silently winning.
+    filament_profile: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    filament_profiles: Optional[List[str]] = Field(default=None, min_length=1, max_length=MAX_FILAMENT_PROFILES)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
     plate_index: int = Field(default=1, ge=1)
     # Explicit per-object placement; empty keeps the worker's existing default
@@ -93,18 +105,39 @@ class SliceSubmission(BaseModel):
     objects: List[ObjectPlacement] = Field(default_factory=list, max_length=MAX_OBJECT_TRANSFORMS)
 
     def to_request(self) -> SliceRequest:
+        if self.filament_profile is not None and self.filament_profiles is not None:
+            raise ApiError(
+                "invalid_profiles", "Name either filament_profile or filament_profiles, not both."
+            )
+        if self.filament_profile is not None:
+            filament_profiles = (self.filament_profile,)
+        elif self.filament_profiles is not None:
+            filament_profiles = tuple(self.filament_profiles)
+        else:
+            raise ApiError(
+                "invalid_profiles", "A slice must name filament_profile or filament_profiles."
+            )
         return SliceRequest(
             upload_id=self.upload_id,
             machine_profile=self.machine_profile,
             process_profile=self.process_profile,
-            filament_profile=self.filament_profile,
+            filament_profiles=filament_profiles,
             settings=dict(self.settings),
             plate_index=self.plate_index,
-            objects=[
-                {"source_object": entry.source_object, "transform": list(entry.transform)}
-                for entry in self.objects
-            ],
+            objects=[_object_placement(entry) for entry in self.objects],
         )
+
+
+def _object_placement(entry: ObjectPlacement) -> Dict[str, Any]:
+    """Placement as a plain dict, omitting `filament` when it is the default.
+
+    Keeps an unassigned object's manifest entry identical to what it was
+    before per-object filament assignment existed.
+    """
+    placement: Dict[str, Any] = {"source_object": entry.source_object, "transform": list(entry.transform)}
+    if entry.filament:
+        placement["filament"] = entry.filament
+    return placement
 
 
 class SceneSubmission(BaseModel):

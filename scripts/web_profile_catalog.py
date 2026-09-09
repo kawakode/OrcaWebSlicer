@@ -211,36 +211,44 @@ class ProfileCatalog:
         return True if matches is None else printer.profile_id in matches
 
     def materialize(
-        self, machine_id: str, process_id: str, filament_id: str, destination: Path
+        self, machine_id: str, process_id: str, filament_ids: Sequence[str], destination: Path
     ) -> Dict[str, Path]:
         """Resolve one selected chain into job-local profile files.
 
         Inheritance is flattened here so the worker never reads the bundled
         profile tree and never resolves a path outside its own job directory.
+        `filament_ids` names one profile per filament slot, in order; the
+        same id may repeat (two spools of one material), which is not an
+        error. Each slot is written as its own file (`filament-0.json`,
+        `filament-1.json`, ...) so the returned name doubles as the relative
+        path the caller stages it under.
         """
         machine = self.get(machine_id, "machine")
-        selected = {
-            "machine": machine,
-            "process": self.get(process_id, "process"),
-            "filament": self.get(filament_id, "filament"),
-        }
-        for kind in ("process", "filament"):
-            if not self.is_compatible(selected[kind], machine):
+        process = self.get(process_id, "process")
+        filaments = [self.get(filament_id, "filament") for filament_id in filament_ids]
+        for kind, entry in [("process", process)] + [("filament", filament) for filament in filaments]:
+            if not self.is_compatible(entry, machine):
                 raise ProfileCatalogError(
                     "incompatible_profile",
                     f"The selected {kind} profile is not compatible with {machine.name}.",
                 )
 
         destination.mkdir(parents=True, exist_ok=True)
-        written: Dict[str, Path] = {}
-        for kind, entry in selected.items():
-            resolved, _ = _resolve(entry.source, self._lookups.get((entry.vendor, entry.kind)))
-            target = destination / f"{kind}.json"
-            with target.open("w", encoding="utf-8") as stream:
-                json.dump(resolved, stream, indent=2, sort_keys=True)
-                stream.write("\n")
-            written[kind] = target
+        written: Dict[str, Path] = {
+            "machine": self._write(machine, destination, "machine"),
+            "process": self._write(process, destination, "process"),
+        }
+        for index, filament in enumerate(filaments):
+            written[f"filament-{index}"] = self._write(filament, destination, f"filament-{index}")
         return written
+
+    def _write(self, entry: ProfileEntry, destination: Path, name: str) -> Path:
+        resolved, _ = _resolve(entry.source, self._lookups.get((entry.vendor, entry.kind)))
+        target = destination / f"{name}.json"
+        with target.open("w", encoding="utf-8") as stream:
+            json.dump(resolved, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        return target
 
 
 def _resolve(

@@ -27,6 +27,8 @@ export interface DrawItem {
   /** Local-frame triangle soup: three floats per vertex, three vertices per triangle. */
   vertices: Float32Array;
   matrix: Matrix;
+  /** The object's own filament color — see filamentColors.ts. */
+  color: Vector;
   selected: boolean;
   /** True when the mesh was replaced by its bounding box to stay inside the budget. */
   simplified: boolean;
@@ -41,11 +43,19 @@ const BED_FILL = "#8892a022";
 const BED_LINE = "#8892a0";
 const GRID_LINE = "#8892a044";
 const GRID_MM = 50;
-const OBJECT_COLOR: Vector = [77, 139, 224];
-const SELECTED_COLOR: Vector = [232, 114, 42];
 const SIMPLIFIED_ALPHA = 0.55;
 const LIGHT: Vector = [0.35, -0.5, 0.79];
 const AMBIENT = 0.38;
+/**
+ * Selection is drawn as a two-tone wireframe halo over the item's own fill
+ * rather than a color swap: a fill now carries meaning (which filament), so
+ * swapping it away on selection would hide that and could also collide with
+ * another slot's own color. Stroking every edge in both a near-black and a
+ * near-white line guarantees at least one of the two contrasts with any fill
+ * color underneath, light or dark.
+ */
+const SELECTION_HALO_OUTER = "#10131a";
+const SELECTION_HALO_INNER = "#ffffff";
 
 interface Basis {
   right: Vector;
@@ -122,7 +132,6 @@ function project(
   const originY = height / 2;
 
   items.forEach((item, owner) => {
-    const base = item.selected ? SELECTED_COLOR : OBJECT_COLOR;
     for (let vertex = 0; vertex + 8 < item.vertices.length; vertex += 9) {
       const world: Vector[] = [];
       for (let corner = 0; corner < 3; corner += 1) {
@@ -167,7 +176,7 @@ function project(
         depth: depth / 3,
         owner,
         screen,
-        fill: `rgb(${base.map((channel) => Math.round(channel * lit)).join(",")})`,
+        fill: `rgb(${item.color.map((channel) => Math.round(channel * lit)).join(",")})`,
       });
     }
   });
@@ -299,6 +308,24 @@ export function PlaterCanvas(props: {
       context.fill();
     }
     context.globalAlpha = 1;
+
+    // Selection halo: a second pass, on top of every fill, so it reads
+    // clearly regardless of paint order or which filament color it sits on.
+    for (let triangle = 0; triangle < scene.owner.length; triangle += 1) {
+      if (!items[scene.owner[triangle]].selected) continue;
+      const base = triangle * 6;
+      context.beginPath();
+      context.moveTo(scene.points[base], scene.points[base + 1]);
+      context.lineTo(scene.points[base + 2], scene.points[base + 3]);
+      context.lineTo(scene.points[base + 4], scene.points[base + 5]);
+      context.closePath();
+      context.strokeStyle = SELECTION_HALO_OUTER;
+      context.lineWidth = 3;
+      context.stroke();
+      context.strokeStyle = SELECTION_HALO_INNER;
+      context.lineWidth = 1.25;
+      context.stroke();
+    }
   }, [bed, items, camera, onCamera]);
 
   useEffect(() => {

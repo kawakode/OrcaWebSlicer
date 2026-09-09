@@ -50,6 +50,9 @@ _MANIFEST_FLAGS = {OPERATION_SLICE: "--slice-manifest", OPERATION_INSPECT: "--in
 # transform in millimetres; a source_object may repeat (a duplicate).
 MAX_OBJECT_TRANSFORMS = 64
 TRANSFORM_LENGTH = 16
+# The worker accepts 1-16 filament slots; an object's `filament` indexes into
+# whichever count the request actually declared.
+MAX_FILAMENT_PROFILES = 16
 # Artifacts are downloaded by name, never by the worker's own relative path.
 ARTIFACT_NAMES = ("gcode", "result", "preview")
 _ARTIFACT_MEDIA = {
@@ -80,12 +83,16 @@ class SliceRequest:
     upload_id: str
     machine_profile: str
     process_profile: str
-    filament_profile: str
+    # One profile id per filament slot, in order. A tuple (not a list) so the
+    # frozen dataclass stays hashable field-for-field, matching the other
+    # immutable fields here.
+    filament_profiles: Tuple[str, ...]
     settings: Dict[str, str] = dataclasses.field(default_factory=dict)
     plate_index: int = 1
     # Explicit per-object placement: each entry names a source object from the
-    # upload's scene and a 4x4 column-major transform in millimetres. Empty
-    # means the worker places the model the same way it always has.
+    # upload's scene, a 4x4 column-major transform in millimetres, and
+    # optionally a 1-based `filament` slot to assign it to. Empty means the
+    # worker places the model the same way it always has.
     objects: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def describe(self) -> Dict[str, Any]:
@@ -93,7 +100,7 @@ class SliceRequest:
             "upload_id": self.upload_id,
             "machine_profile": self.machine_profile,
             "process_profile": self.process_profile,
-            "filament_profile": self.filament_profile,
+            "filament_profiles": list(self.filament_profiles),
             "settings": dict(self.settings),
             "plate_index": self.plate_index,
             "objects": [dict(entry) for entry in self.objects],
@@ -320,7 +327,7 @@ class JobService:
                 profiles = self._catalog.materialize(
                     request.machine_profile,
                     request.process_profile,
-                    request.filament_profile,
+                    request.filament_profiles,
                     Path(staging),
                 )
             except ProfileCatalogError as error:
@@ -379,7 +386,7 @@ class JobService:
                 profiles = self._catalog.materialize(
                     request.machine_profile,
                     request.process_profile,
-                    request.filament_profile,
+                    [request.filament_profile],
                     Path(staging),
                 )
             except ProfileCatalogError as error:
@@ -673,6 +680,7 @@ class JobService:
 
     def _validate(self, request: SliceRequest) -> None:
         self._validate_plate_index(request.plate_index)
+        self._validate_filament_profiles(request.filament_profiles)
         if len(request.settings) > MAX_SETTINGS:
             raise ApiError(
                 "invalid_settings", f"A request may override at most {MAX_SETTINGS} settings."
@@ -690,7 +698,7 @@ class JobService:
                 self._settings.validate_overrides(request.settings)
             except SettingsCatalogError as error:
                 raise from_settings_error(error) from error
-        self._validate_objects(request.objects)
+        self._validate_objects(request.objects, len(request.filament_profiles))
 
     @staticmethod
     def _validate_plate_index(plate_index: Any) -> None:
@@ -698,7 +706,19 @@ class JobService:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
 
     @staticmethod
-    def _validate_objects(objects: List[Dict[str, Any]]) -> None:
+    def _validate_filament_profiles(filament_profiles: Any) -> None:
+        # Re-checked here, not only in the request schema: a retry replays a
+        # stored SliceRequest without ever passing through that schema.
+        if not isinstance(filament_profiles, (tuple, list)) or not (
+            1 <= len(filament_profiles) <= MAX_FILAMENT_PROFILES
+        ):
+            raise ApiError(
+                "invalid_filament_profiles",
+                f"A slice must name 1 to {MAX_FILAMENT_PROFILES} filament profiles.",
+            )
+
+    @staticmethod
+    def _validate_objects(objects: List[Dict[str, Any]], filament_count: int) -> None:
         """Check bounds, shape, and finiteness before a worker ever sees these.
 
         `source_object` is not checked against a scene's actual object count:
@@ -723,20 +743,30 @@ class JobService:
             for value in transform:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ApiError("invalid_objects", "transform must contain only finite numbers.")
+            # 0 (or omitted) means "leave this object's own assignment alone",
+            # matching the worker's own meaning for the field.
+            filament = entry.get("filament", 0)
+            if isinstance(filament, bool) or not isinstance(filament, int) or not 0 <= filament <= filament_count:
+                raise ApiError(
+                    "invalid_object_filament",
+                    f"filament must be 0 (unchanged) or a 1-based index up to {filament_count}.",
+                )
 
     def _describe_chain(self, request: Any) -> Dict[str, Any]:
         """Name the effective profile chain each selection flattens.
 
-        Shared by a slice and a scene request: both name a machine, process,
-        and filament profile, even though a scene manifest only ever
-        references the flattened machine.
+        Shared by a slice and a scene request: `filaments` is always a list,
+        even for a scene, which only ever names one filament (for
+        compatibility validation; a scene manifest never references it).
         """
-        selected = {
-            "machine": request.machine_profile,
-            "process": request.process_profile,
-            "filament": request.filament_profile,
+        filament_profiles = (
+            request.filament_profiles if isinstance(request, SliceRequest) else (request.filament_profile,)
+        )
+        return {
+            "machine": self._catalog.get(request.machine_profile, "machine").describe(),
+            "process": self._catalog.get(request.process_profile, "process").describe(),
+            "filaments": [self._catalog.get(filament_id, "filament").describe() for filament_id in filament_profiles],
         }
-        return {kind: self._catalog.get(profile_id, kind).describe() for kind, profile_id in selected.items()}
 
     def _describe_overrides(self, settings: Dict[str, str]) -> List[Dict[str, Any]]:
         """Pair each override with the engine's own description of the setting."""
@@ -763,7 +793,12 @@ class JobService:
             "profiles": {
                 "machine": "profiles/machine.json",
                 "process": "profiles/process.json",
-                "filament": "profiles/filament.json",
+                # Always the array form, even for one filament: a one-element
+                # array takes the worker's unchanged single-filament path, so
+                # the API only ever has to speak one spelling.
+                "filaments": [
+                    f"profiles/filament-{index}.json" for index in range(len(request.filament_profiles))
+                ],
             },
             "settings": dict(request.settings),
             "plate_index": request.plate_index,

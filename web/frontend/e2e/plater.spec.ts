@@ -95,6 +95,19 @@ async function slice(page: Page, previousJobId?: string): Promise<string> {
   return page.getByTestId("job-id").innerText();
 }
 
+/**
+ * Submit the current plate and return once the job reaches any terminal
+ * state, whatever it is. Use this instead of `slice()` for a check that only
+ * needs the *request* the browser recorded — the submitted `filament_profiles`
+ * and per-object `filament` — and not a finished slice.
+ */
+async function submitAndSettle(page: Page, previousJobId?: string): Promise<string> {
+  await page.getByTestId("slice").click();
+  if (previousJobId) await expect(page.getByTestId("job-id")).not.toHaveText(previousJobId);
+  await expect(page.getByTestId("job-state")).toHaveText(/^(succeeded|failed|canceled)$/);
+  return page.getByTestId("job-id").innerText();
+}
+
 /** The bed the selected printer declares, read off the plate's own summary. */
 async function bedSize(page: Page): Promise<[number, number]> {
   const summary = await page.getByTestId("plater-summary").innerText();
@@ -198,4 +211,90 @@ test("the placement the plater shows is the placement that gets sliced", async (
   expect(after.minX - before.minX).toBeCloseTo(40, 1);
   expect(after.maxX - before.maxX).toBeCloseTo(40, 1);
   expect(Math.abs(after.minY - before.minY)).toBeLessThan(TRANSLATION_TOLERANCE_MM);
+});
+
+test.describe("multi-filament plates", () => {
+  test("with one filament slot, no per-object filament control is shown", async ({ page }) => {
+    await page.goto("/");
+    await waitForPlate(page);
+
+    await expect(page.getByTestId("plater-filament")).toHaveCount(0);
+
+    await page.getByTestId("filament-add").click();
+    await expect(page.getByTestId("plater-filament")).toBeVisible();
+  });
+
+  test("assigning a duplicated object to a new slot submits the expected filament_profiles and per-object filament", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPlate(page);
+
+    const firstSlotId = await page.getByTestId("filament-select").inputValue();
+    await page.getByTestId("filament-add").click();
+    const secondSlotId = await page.getByTestId("filament-select-1").inputValue();
+
+    await page.getByTestId("plater-duplicate").click();
+    await expect(page.getByTestId("plater-summary")).toContainText("2 objects");
+
+    // The duplicate starts on slot 1, same as its source; assign it to slot 2.
+    await page.getByTestId("plater-select-1").click();
+    await page.getByTestId("plater-filament").selectOption("2");
+
+    // This only checks the request the browser recorded, not a finished
+    // slice: the worker's multi-filament support is landing separately, so
+    // whether this particular job succeeds is not this test's concern.
+    const jobId = await submitAndSettle(page);
+    const job = await (await page.request.get(`/api/v1/jobs/${jobId}`)).json();
+
+    expect(job.request.filament_profiles).toEqual([firstSlotId, secondSlotId]);
+    expect(job.request.objects).toHaveLength(2);
+    const filaments = job.request.objects.map((object: { filament: number }) => object.filament);
+    expect(filaments.sort()).toEqual([1, 2]);
+  });
+
+  test("removing a filament slot clamps any object assigned to it, rather than leaving a dangling reference", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPlate(page);
+
+    await page.getByTestId("filament-add").click();
+    await page.getByTestId("filament-add").click();
+    await expect(page.getByTestId("filament-select-2")).toBeVisible();
+
+    await page.getByTestId("plater-filament").selectOption("3");
+    // Removing slot 3 (the one just assigned) must not leave the object
+    // referring to a slot that no longer exists.
+    await page.getByTestId("filament-remove-2").click();
+    await expect(page.getByTestId("filament-select-2")).toHaveCount(0);
+    await expect(page.getByTestId("plater-filament")).toHaveValue("2");
+  });
+
+  test("the finished multi-filament G-code contains a second tool's tool change", async ({ page }) => {
+    await page.goto("/");
+    await waitForPlate(page);
+
+    await page.getByTestId("filament-add").click();
+    await page.getByTestId("plater-duplicate").click();
+    await page.getByTestId("plater-select-1").click();
+    await page.getByTestId("plater-filament").selectOption("2");
+
+    const jobId = await slice(page);
+    const gcode = await (await page.request.get(`/api/v1/jobs/${jobId}/artifacts/gcode`)).text();
+    expect(gcode).toMatch(/^T1\b/m);
+  });
+
+  test("the job report names every filament", async ({ page }) => {
+    await page.goto("/");
+    await waitForPlate(page);
+
+    await page.getByTestId("filament-add").click();
+    const jobId = await slice(page);
+    await expect(page.getByTestId("job-id")).toHaveText(jobId);
+
+    await page.getByTestId("job-report").locator("summary").click();
+    await expect(page.getByTestId("job-profile-filament-0")).toBeVisible();
+    await expect(page.getByTestId("job-profile-filament-1")).toBeVisible();
+  });
 });

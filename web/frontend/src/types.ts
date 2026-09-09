@@ -125,7 +125,12 @@ export interface Job {
   warnings: JobWarning[];
   error: JobError | null;
   artifacts: JobArtifact[];
-  profiles: Partial<Record<"machine" | "process" | "filament", ProfileEntry>>;
+  profiles: {
+    machine?: ProfileEntry;
+    process?: ProfileEntry;
+    /** One entry per filament slot, in slot order. */
+    filaments?: ProfileEntry[];
+  };
   overrides: JobOverride[];
   retry_of: string | null;
   timing: { duration_ms: number; cpu_time_ms: number } | null;
@@ -171,4 +176,11 @@ export interface SceneIndex {
 export interface ObjectPlacement {
   source_object: number;
   transform: number[];
+  /**
+   * 1-based index into the slice request's `filament_profiles`. Omitted (or
+   * 0) means no explicit assignment. The plater only sends this once more
+   * than one filament slot exists — with a single slot there is nothing to
+   * assign.
+   */
+  filament?: number;
 }

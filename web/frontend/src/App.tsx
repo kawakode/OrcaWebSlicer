@@ -10,6 +10,7 @@ import {
   submitJob,
   uploadModel,
 } from "./api";
+import { filamentCss } from "./filamentColors";
 import { LayerPreviewPanel } from "./LayerPreview";
 import { Plater } from "./Plater";
 import { SettingsForm } from "./SettingsForm";
@@ -25,6 +26,8 @@ import {
 } from "./types";
 
 const POLL_INTERVAL_MS = 400;
+/** The API accepts 1-16 filament slots. */
+const MAX_FILAMENTS = 16;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 
@@ -44,7 +47,8 @@ export default function App() {
   const [printers, setPrinters] = useState<ProfileEntry[]>([]);
   const [machine, setMachine] = useState("");
   const [process, setProcess] = useState("");
-  const [filament, setFilament] = useState("");
+  // One bundled filament profile id per slot, in order. Always at least one.
+  const [filaments, setFilaments] = useState<string[]>([""]);
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [file, setFile] = useState<File | null>(null);
   const [upload, setUpload] = useState<Upload | null>(null);
@@ -81,7 +85,11 @@ export default function App() {
         setCatalog(narrowed);
         const printer = narrowed.machine.find((entry) => entry.profile_id === machine);
         setProcess(firstId(narrowed.process, printer?.default_process));
-        setFilament(firstId(narrowed.filament));
+        // A printer change resets every profile choice, filament slots
+        // included, back down to one — the same reset the printer's other
+        // profiles already get, and predictable rather than trying to guess
+        // which of several prior slots the new printer's list can still fill.
+        setFilaments([firstId(narrowed.filament)]);
       })
       .catch((error) => !stale && setFailure(describe(error)));
     return () => {
@@ -148,7 +156,7 @@ export default function App() {
           upload_id: stored.upload_id,
           machine_profile: machine,
           process_profile: process,
-          filament_profile: filament,
+          filament_profiles: filaments,
           settings: declared,
           // Slice exactly what the plater is showing, when it is showing one.
           ...(placements ? { objects: placements } : {}),
@@ -159,10 +167,29 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [file, upload, settings, machine, process, filament, placements]);
+  }, [file, upload, settings, machine, process, filaments, placements]);
+
+  const filamentsChosen = filaments.length > 0 && filaments.every(Boolean);
+  // Names, not ids, are what the plate's per-object select and swatches show.
+  const filamentNames = useMemo(
+    () => filaments.map((id) => catalog.filament.find((entry) => entry.profile_id === id)?.name ?? id),
+    [filaments, catalog.filament],
+  );
+  const addFilament = useCallback(() => {
+    setFilaments((current) =>
+      current.length >= MAX_FILAMENTS ? current : [...current, firstId(catalog.filament)],
+    );
+  }, [catalog.filament]);
+  const removeFilament = useCallback((index: number) => {
+    // Bounded at one slot: nothing is left to assign objects to below that.
+    setFilaments((current) => (current.length <= 1 ? current : current.filter((_, i) => i !== index)));
+  }, []);
+  const updateFilament = useCallback((index: number, value: string) => {
+    setFilaments((current) => current.map((entry, i) => (i === index ? value : entry)));
+  }, []);
 
   const emptyPlate = placements !== null && placements.length === 0;
-  const ready = Boolean(file && machine && process && filament) && !busy && !active && !emptyPlate;
+  const ready = Boolean(file && machine && process) && filamentsChosen && !busy && !active && !emptyPlate;
   const succeeded = job?.state === "succeeded";
 
   // Each disabled action button is explained, not just dimmed: the reason
@@ -174,7 +201,7 @@ export default function App() {
       ? "A job is already running."
       : !file
         ? "Choose a model file first."
-        : !machine || !process || !filament
+        : !machine || !process || !filamentsChosen
           ? "Choose a printer, process, and filament first."
           : emptyPlate
             ? "The plate is empty. Add an object back before slicing."
@@ -237,16 +264,39 @@ export default function App() {
           entries={catalog.process}
           onChange={setProcess}
         />
-        <ProfileSelect
-          label="Filament"
-          testId="filament-select"
-          value={filament}
-          entries={catalog.filament}
-          onChange={setFilament}
-        />
+        <div className="filament-slots" data-testid="filament-slots">
+          {filaments.map((value, index) => (
+            <div className="filament-slot" key={index}>
+              <FilamentSlotSelect
+                index={index}
+                total={filaments.length}
+                value={value}
+                entries={catalog.filament}
+                onChange={(next) => updateFilament(index, next)}
+              />
+              {filaments.length > 1 && (
+                <button
+                  type="button"
+                  data-testid={`filament-remove-${index}`}
+                  onClick={() => removeFilament(index)}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            type="button"
+            data-testid="filament-add"
+            disabled={filaments.length >= MAX_FILAMENTS || catalog.filament.length === 0}
+            onClick={addFilament}
+          >
+            Add filament
+          </button>
+        </div>
       </section>
 
-      {upload && machine && process && filament && (
+      {upload && machine && process && filamentsChosen && (
         <section>
           <h2>Plate</h2>
           <Plater
@@ -254,9 +304,12 @@ export default function App() {
             profiles={{
               machine_profile: machine,
               process_profile: process,
-              filament_profile: filament,
+              // Scene inspection names one filament regardless of how many
+              // slots the slice request will carry; the first slot answers.
+              filament_profile: filaments[0],
             }}
             disabled={active}
+            filamentSlots={filamentNames}
             onPlacements={setPlacements}
           />
         </section>
@@ -386,6 +439,59 @@ function ProfileSelect(props: {
   );
 }
 
+/**
+ * One filament slot's own select. With a single slot this renders exactly
+ * like the old plain "Filament" select, test id included — a user who never
+ * adds a slot sees no difference. A second slot onward is numbered and
+ * swatched in the same color the plate paints that slot's objects, so the
+ * two stay legible together.
+ */
+function FilamentSlotSelect(props: {
+  index: number;
+  total: number;
+  value: string;
+  entries: ProfileEntry[];
+  onChange: (value: string) => void;
+}) {
+  const { index, total, value, entries, onChange } = props;
+  const label = total > 1 ? `Filament ${index + 1}` : "Filament";
+  const testId = index === 0 ? "filament-select" : `filament-select-${index}`;
+  const empty = entries.length === 0;
+  const hintId = empty ? `${testId}-hint` : undefined;
+  return (
+    <label>
+      <span>
+        {total > 1 && (
+          <span
+            className="swatch filament-swatch"
+            style={{ backgroundColor: filamentCss(index) }}
+            aria-hidden="true"
+          />
+        )}
+        {label}
+      </span>
+      <select
+        data-testid={testId}
+        value={value}
+        disabled={empty}
+        aria-describedby={hintId}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {entries.map((entry) => (
+          <option key={entry.profile_id} value={entry.profile_id}>
+            {entry.name}
+          </option>
+        ))}
+      </select>
+      {hintId && (
+        <span className="hint" id={hintId}>
+          No filament profiles are available yet.
+        </span>
+      )}
+    </label>
+  );
+}
+
 function JobPanel({ job }: { job: Job }) {
   const percent = useMemo(() => Math.min(100, Math.max(0, job.progress.percent)), [job]);
   // Progress is monotonic per the worker contract, so the highest value seen is
@@ -432,7 +538,8 @@ function JobPanel({ job }: { job: Job }) {
 
 /** What was actually sliced: the flattened profile chain and what displaced it. */
 function JobReport({ job }: { job: Job }) {
-  const kinds = ["machine", "process", "filament"] as const;
+  const kinds = ["machine", "process"] as const;
+  const filaments = job.profiles.filaments ?? [];
   return (
     <details data-testid="job-report">
       <summary>Effective configuration</summary>
@@ -452,6 +559,17 @@ function JobReport({ job }: { job: Job }) {
             </div>
           );
         })}
+        {filaments.map((profile, index) => (
+          <div key={`filament-${index}`}>
+            <dt>{filaments.length > 1 ? `filament ${index + 1}` : "filament"}</dt>
+            <dd data-testid={`job-profile-filament-${index}`}>
+              {profile.name}
+              {profile.inherits_chain.length > 1 && (
+                <span className="chain"> — {profile.inherits_chain.join(" → ")}</span>
+              )}
+            </dd>
+          </div>
+        ))}
       </dl>
       {job.overrides.length > 0 ? (
         <ul data-testid="job-overrides">

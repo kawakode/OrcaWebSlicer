@@ -300,3 +300,24 @@ details[data-testid="job-report"] dd {
   margin: 0 0 0.6rem;
   color: var(--muted);
 }
+
+/* One row per filament slot, its own select plus a Remove button that only
+   exists once there is a second slot to remove. */
+.filament-slot {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.filament-slot label {
+  flex: 1;
+}
+
+/* A swatch identifying a filament slot's color, matching the plate exactly:
+   bordered so it stays legible against a same-toned page background in
+   either theme. */
+.filament-swatch {
+  margin-right: 0.4rem;
+  vertical-align: -1px;
+  border: 1px solid var(--ink);
+}
