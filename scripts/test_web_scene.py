@@ -22,8 +22,21 @@ VERTEX_BYTES = POINT.size
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify a published scene against its own blob.")
     parser.add_argument("--worker", required=True, type=Path)
-    parser.add_argument("--model", required=True, type=Path)
+    # Repeatable, because "sees the correct model bounds" in docs/web/mvp.md is
+    # a claim about every supported format, not about one of them. Each value
+    # is a path, optionally followed by "=WxDxH" naming the millimetre size the
+    # published scene must report for that fixture.
+    parser.add_argument("--model", required=True, action="append", metavar="PATH[=WxDxH]")
     return parser.parse_args()
+
+
+def parse_model(value: str) -> tuple:
+    path, separator, size = value.partition("=")
+    if not separator:
+        return Path(path), None
+    measurements = tuple(float(part) for part in size.split("x"))
+    require(len(measurements) == 3, f"{value} does not name three dimensions")
+    return Path(path), measurements
 
 
 def require(condition: bool, message: str) -> None:
@@ -70,11 +83,35 @@ def decode_bounds(blob: bytes, offset: int, vertex_count: int, quantum: float) -
     return minimum, maximum
 
 
-def main() -> None:
-    args = parse_args()
+def placed_size(scene) -> tuple:
+    """The millimetre extent the browser will display for the whole scene.
+
+    Each object declares its box in its own local frame, so every corner has to
+    go through that object's placement transform before the extents mean
+    anything on the bed.
+    """
+    points = []
+    for described in scene["objects"]:
+        matrix = described["transform"]
+        box = described["bounding_box"]
+        for x in (box["min"][0], box["max"][0]):
+            for y in (box["min"][1], box["max"][1]):
+                for z in (box["min"][2], box["max"][2]):
+                    points.append(
+                        [
+                            matrix[axis] * x + matrix[4 + axis] * y + matrix[8 + axis] * z + matrix[12 + axis]
+                            for axis in range(3)
+                        ]
+                    )
+    return tuple(
+        max(point[axis] for point in points) - min(point[axis] for point in points) for axis in range(3)
+    )
+
+
+def verify(worker: Path, model: Path, expected_size) -> None:
     with tempfile.TemporaryDirectory(prefix="orca-scene-") as temporary:
         job_dir = Path(temporary)
-        inspect(args.worker, args.model, job_dir)
+        inspect(worker, model, job_dir)
 
         scene = json.loads((job_dir / "scene.json").read_text(encoding="utf-8"))
         blob = (job_dir / "scene.bin").read_bytes()
@@ -124,11 +161,26 @@ def main() -> None:
             expected_offset += described["length"]
         require(expected_offset == len(blob), "the scene's object ranges do not cover the blob")
 
+    size = placed_size(scene)
+    if expected_size is not None:
+        for axis in range(3):
+            require(
+                abs(size[axis] - expected_size[axis]) <= 0.01,
+                f"{model.name} measures {size[axis]:.3f} mm on axis {axis}, expected {expected_size[axis]} mm",
+            )
+
     triangles = sum(described["triangle_count"] for described in scene["objects"])
     print(
-        f"scene verified: {len(scene['objects'])} objects, {triangles} triangles, "
-        f"{len(blob)} bytes, bed {len(scene['bed']['shape'])} points"
+        f"{model.name}: {len(scene['objects'])} objects, {triangles} triangles, {len(blob)} bytes, "
+        f"{size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} mm, bed {len(scene['bed']['shape'])} points"
     )
+
+
+def main() -> None:
+    args = parse_args()
+    for value in args.model:
+        model, expected_size = parse_model(value)
+        verify(args.worker, model, expected_size)
 
 
 if __name__ == "__main__":

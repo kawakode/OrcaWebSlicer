@@ -11,11 +11,13 @@ import {
   uploadModel,
 } from "./api";
 import { LayerPreviewPanel } from "./LayerPreview";
+import { Plater } from "./Plater";
 import { SettingsForm } from "./SettingsForm";
 import {
   ApiError,
   TERMINAL_STATES,
   type Job,
+  type ObjectPlacement,
   type ProfileCatalog,
   type ProfileEntry,
   type SettingsCatalog,
@@ -46,6 +48,9 @@ export default function App() {
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [file, setFile] = useState<File | null>(null);
   const [upload, setUpload] = useState<Upload | null>(null);
+  // Null means the plater has no scene, which is the pre-plater behaviour: the
+  // worker arranges whatever the model held.
+  const [placements, setPlacements] = useState<ObjectPlacement[] | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -108,12 +113,31 @@ export default function App() {
     }
   }, []);
 
+  // The model is stored as soon as it is chosen, because the plater has to
+  // inspect it before anything is sliced. A retry then reuses the same
+  // immutable upload.
+  const chooseFile = useCallback(async (chosen: File | null) => {
+    setFile(chosen);
+    setUpload(null);
+    setPlacements(null);
+    setJob(null);
+    setFailure(null);
+    if (!chosen) return;
+    setBusy(true);
+    try {
+      setUpload(await uploadModel(chosen));
+    } catch (error) {
+      setFailure(describe(error));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const slice = useCallback(async () => {
     if (!file) return;
     setBusy(true);
     setFailure(null);
     try {
-      // One upload per selected file: a retry reuses the same immutable inputs.
       const stored = upload ?? (await uploadModel(file));
       setUpload(stored);
       const declared = Object.fromEntries(
@@ -126,6 +150,8 @@ export default function App() {
           process_profile: process,
           filament_profile: filament,
           settings: declared,
+          // Slice exactly what the plater is showing, when it is showing one.
+          ...(placements ? { objects: placements } : {}),
         }),
       );
     } catch (error) {
@@ -133,9 +159,10 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [file, upload, settings, machine, process, filament]);
+  }, [file, upload, settings, machine, process, filament, placements]);
 
-  const ready = Boolean(file && machine && process && filament) && !busy && !active;
+  const emptyPlate = placements !== null && placements.length === 0;
+  const ready = Boolean(file && machine && process && filament) && !busy && !active && !emptyPlate;
   const succeeded = job?.state === "succeeded";
 
   // Each disabled action button is explained, not just dimmed: the reason
@@ -149,7 +176,9 @@ export default function App() {
         ? "Choose a model file first."
         : !machine || !process || !filament
           ? "Choose a printer, process, and filament first."
-          : undefined;
+          : emptyPlate
+            ? "The plate is empty. Add an object back before slicing."
+            : undefined;
   const cancelHint = busy
     ? "A request is already in progress."
     : !active
@@ -182,12 +211,7 @@ export default function App() {
             type="file"
             accept=".stl,.obj,.3mf"
             data-testid="file-input"
-            onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
-              setUpload(null);
-              setJob(null);
-              setFailure(null);
-            }}
+            onChange={(event) => void chooseFile(event.target.files?.[0] ?? null)}
           />
         </label>
         {file && (
@@ -221,6 +245,22 @@ export default function App() {
           onChange={setFilament}
         />
       </section>
+
+      {upload && machine && process && filament && (
+        <section>
+          <h2>Plate</h2>
+          <Plater
+            uploadId={upload.upload_id}
+            profiles={{
+              machine_profile: machine,
+              process_profile: process,
+              filament_profile: filament,
+            }}
+            disabled={active}
+            onPlacements={setPlacements}
+          />
+        </section>
+      )}
 
       <section>
         <h2>Overrides</h2>

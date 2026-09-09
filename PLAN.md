@@ -25,19 +25,17 @@ The foundation is complete:
 - [x] G4: the minimum API and the first browser screen turn a browser upload
   into downloadable, baseline-equivalent G-code through a disposable worker.
 
-The active gate is G5, the browser MVP. Two of its three features are in place:
+The active gate is G5, the browser MVP. All three of its features are in place:
 
 - [x] The settings and profile UI is generated from a versioned catalog the
   engine exports, and compatibility expressions are resolved by the engine's own
   placeholder parser.
 - [x] A sliced job publishes a browsable layer preview that the API serves one
   layer at a time.
+- [x] The browser plater draws the scene the worker publishes and slices exactly
+  the placement it displays.
 
-The plater's data path is in place: the worker's `inspect` operation publishes
-a model's geometry and bed as a scene, the API serves it one object at a time,
-and a slice request can carry explicit per-object transforms. What is missing is
-the browser plater itself — the 3D view and the transform gizmos that would
-produce those transforms — plus the expanded baseline matrix.
+What remains for G5 is the expanded baseline matrix.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -172,17 +170,21 @@ produce those transforms — plus the expanded baseline matrix.
 
 ### 10. Implement the single-plate plater
 
-The data path is complete; the browser view that consumes it is not.
+The plate is drawn on a 2D canvas with an orthographic camera rather than in
+WebGL. That is a tested constraint, not a preference: headless Firefox, one of
+the three release-blocking browsers, exposes no WebGL context at all in the
+container the Playwright matrix runs in, so a WebGL plater could not have been
+verified in a browser the release depends on.
 
 - [x] Publish model geometry and configured bed bounds from the engine, and
   serve them to the browser one object at a time.
-- [ ] Render that geometry and those bed bounds in the browser.
-- [ ] Add selection, deletion, move, rotate, uniform scale, duplicate, and
+- [x] Render that geometry and those bed bounds in the browser.
+- [x] Add selection, deletion, move, rotate, uniform scale, duplicate, and
   arrange operations.
 - [x] Use millimetres consistently and accept explicit transforms on a slice
   request, replacing arrangement with exactly the placement that was submitted.
-- [ ] Submit those transforms from the plater.
-- [ ] Verify displayed and sliced placement against fixtures within a documented
+- [x] Submit those transforms from the plater.
+- [x] Verify displayed and sliced placement against fixtures within a documented
   tolerance.
 - [x] Support several objects on one plate, including duplicates of one imported
   object, while retaining the one-plate limit.
@@ -212,16 +214,39 @@ The data path is complete; the browser view that consumes it is not.
 
 - [x] Surface slicing warnings and actionable configuration errors.
 - [x] Add retry using the same immutable inputs and a new job ID.
-- [ ] Expand the baseline with support, multipart, multi-filament, invalid
-  configuration, Unicode 3MF, cancellation, and output-limit fixtures.
+- [x] Expand the baseline with support, multipart, invalid configuration,
+  Unicode 3MF, and output-limit fixtures, each declared once in
+  `docs/web/baseline-cases.json` and run through the native, worker, and API
+  lanes. Cancellation stays in `scripts/test_web_worker_cancellation.py`, which
+  signals a running worker mid-slice — something a manifest-driven runner
+  cannot do.
+- [ ] Multi-filament is deliberately deferred out of this gate: the worker
+  protocol names exactly one filament profile, so a multi-filament case cannot
+  be reproduced in the worker or API lanes without composing several filament
+  presets into the config's per-extruder vectors — a feature in its own right,
+  not a fixture. The desktop CLI already accepts `--load-filaments a;b`, so the
+  native lane alone could express it, which would measure nothing the worker
+  can be held to. Track it with multi-material support rather than here.
 - [x] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
 - [x] Add accessibility and keyboard-navigation checks for the supported flow.
 
 ### G5 exit criteria
 
-- [ ] Every functional acceptance criterion in `docs/web/mvp.md` is automated.
-- [ ] The complete supported workflow works without installing the desktop app.
-- [ ] Desktop behavior and native baseline tests remain unchanged.
+- [x] Every functional acceptance criterion in `docs/web/mvp.md` is automated:
+  model bounds per supported format by `scripts/test_web_scene.py`, placement by
+  `scripts/test_web_placement.py` and `plater.spec.ts`, effective configuration
+  and semantic equivalence by the three baseline lanes, categorized errors by
+  the `invalid-config` case and the API tests, progress and cancellation by
+  `worker-smoke` and the executor tests, preview agreement by
+  `scripts/test_web_preview.py`, and worker-crash isolation by
+  `tests/web/test_job_service.py`.
+- [x] The complete supported workflow works without installing the desktop app:
+  the Playwright suite drives upload, plate, overrides, slice, preview, and
+  download against the API and a disposable worker.
+- [x] Desktop behavior and native baseline tests remain unchanged. This gate's
+  final batch changed no C++ translation unit, and the re-recorded native
+  baseline reproduces the byte counts recorded on 2026-09-01 exactly for the
+  three original cases.
 
 ## Phase 4: Production readiness (G6, priority P3)
 

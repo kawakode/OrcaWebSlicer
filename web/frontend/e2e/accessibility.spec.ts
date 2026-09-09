@@ -52,6 +52,8 @@ test.describe("accessibility: automated axe pass", () => {
     await waitForProfiles(page);
 
     await page.getByTestId("file-input").setInputFiles(CUBE);
+    // The plate is part of this screen too, so the pass below covers it.
+    await expect(page.getByTestId("plater-canvas")).toBeVisible();
     await page.getByTestId("setting-layer_height").fill("0.3");
     await page.getByTestId("slice").click();
     await expect(page.getByTestId("job-state")).toHaveText("succeeded");
@@ -111,6 +113,20 @@ test.describe("accessibility: keyboard navigation", () => {
     await tabUntil("printer-select");
     await tabUntil("process-select");
     await tabUntil("filament-select");
+
+    // The plate is editable without a mouse: every operation the canvas offers
+    // by pointer — select, move, rotate, scale — is also a real control here.
+    await expect(page.getByTestId("plater-canvas")).toBeVisible();
+    await tabUntil("plater-view-top");
+    await tabUntil("plater-select-0");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("plater-select-0")).toHaveAttribute("aria-pressed", "true");
+    await tabUntil("plater-x");
+    await page.keyboard.press("ArrowUp");
+    expect(Number(await page.getByTestId("plater-x").inputValue())).toBeGreaterThan(100);
+    await tabUntil("plater-duplicate");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("plater-summary")).toContainText("2 objects");
 
     // The overrides form is generated from the engine's own settings; tabbing
     // to two curated settings that are guaranteed present (see slice.spec.ts)

@@ -10,6 +10,9 @@ Status: Active contract for G5
 - Select one STL, OBJ, or 3MF file and see its name and size.
 - Choose a bundled printer, then a process and filament narrowed to that
   printer by the [API](api.md).
+- Lay out the plate: see the model on the printer's own bed, select, move,
+  rotate, scale, duplicate, delete, and arrange objects, and slice exactly the
+  placement on screen.
 - Edit the curated overrides, in a form generated from the engine's own setting
   definitions. Blank fields are not sent, so the profile's own value stands.
 - Slice, Cancel, and Retry, each disabled when the job state makes it
@@ -24,6 +27,57 @@ Status: Active contract for G5
 Every failure the user sees is the API's stable code plus its message.
 Framework schema rejections are reduced to the same shape, so the screen has one
 error path rather than two.
+
+## The plate
+
+`Plater` is the browser half of [scene-format.md](scene-format.md). Choosing a
+file uploads it immediately — the plater has to inspect it before anything is
+sliced — and the plater then runs the upload's `inspect` job, reads the scene
+index, and fetches each object's geometry one request at a time, the way the
+API serves it.
+
+What it submits is the write side of that same document: one `objects` entry
+per placed copy, each a 16-number column-major millimetre matrix. When the
+plater has a scene, a slice request always carries the placement on screen, so
+the worker places rather than arranges. When it has none — an upload it could
+not inspect, or a deployment whose worker has no `inspect` operation — the
+request carries no `objects` at all and behaviour is exactly what it was before
+the plater existed.
+
+Two deliberate departures from "report placement as imported":
+
+- **A freshly loaded plate is arranged.** `inspect` reports placement exactly as
+  the file declares it, which for a loose mesh is wherever its author left it —
+  possibly off the bed. Arranging on load is what a slice without explicit
+  placement would have done anyway. The browser's own shelf packing is not the
+  engine's `arrange`; it leaves a fixed 6 mm gap, because the browser cannot
+  evaluate `min_object_distance` without the resolved configuration.
+- **Every object sits on the bed.** The worker only lifts an object that is
+  *entirely* below the bed, so a plater that let one hang would slice exactly
+  the hanging placement. Z is therefore derived, not edited.
+
+### Drawing it
+
+`PlaterCanvas` is an orthographic camera with painter's-algorithm depth sorting
+and flat shading — drawn with the Canvas 2D API, not WebGL. That is a tested
+constraint rather than a preference: headless Firefox, one of the three
+release-blocking browsers, exposes no WebGL context at all in the container the
+Playwright matrix runs in (verified for `webgl` and `webgl2`, with
+`webgl.force-enabled` and software WebRender both forced on), while Chromium and
+WebKit get one from SwiftShader. A WebGL plater could not have been verified in
+a browser the release depends on. Canvas 2D also matches how the layer preview
+is already drawn, and adds no dependency.
+
+Because a 2D canvas paints one path per triangle, drawing is bounded: past
+20,000 triangles across the plate, objects are drawn as their bounding boxes
+instead. The ceiling the worker enforces is a million, so this is a frame-time
+budget for the view and never a limit on what can be sliced.
+
+Pointer gestures — click to select, drag an object to move it on the bed, drag
+the background to orbit, wheel to zoom — are conveniences. Every operation is
+also a real control: the object list selects, the numeric fields move, rotate
+and scale, and Duplicate, Delete and Arrange are buttons, so the plate is fully
+editable from the keyboard.
 
 ## Generated settings
 
@@ -85,6 +139,19 @@ the real built bundle and the real native worker.
 - The layer preview steps through the layers, and its index agrees with the
   G-code the same job published while each request returns one layer's bytes.
 - An unsupported model is refused before any job is created.
+
+`plater.spec.ts` covers the plate:
+
+- An upload shows the model's own bounds on the printer's own bed, arranged.
+- Duplicate, Arrange, and Delete change the plate, and an empty plate disables
+  Slice and says why.
+- Rotation and uniform scale change the placed size the panel reports.
+- The placement on screen is the placement that gets sliced: the displayed
+  transform is the one the API recorded, the printed outline sits within
+  `PLACEMENT_TOLERANCE_MM` (1 mm, half an extrusion width with skirt and brim
+  switched off) of the placed model's box, and translating the object moves the
+  printed outline by exactly that translation. `scripts/test_web_placement.py`
+  makes the same checks against the HTTP API without a browser.
 
 `accessibility.spec.ts` covers the same screen from an accessibility angle:
 

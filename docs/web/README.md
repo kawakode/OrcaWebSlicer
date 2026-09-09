@@ -31,7 +31,7 @@ prerequisites pass.
 | G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
-| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | In progress (settings and preview done; plater outstanding) |
+| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Complete |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
 
 ## Engineering rules
@@ -60,8 +60,12 @@ G5 is under way. The settings UI is now generated from a versioned catalog the
 engine itself exports, compatibility expressions are resolved by the engine's
 own placeholder parser, and a sliced job publishes a
 [browsable layer preview](preview-format.md) the API serves one layer at a time.
-The single-plate plater and the remaining MVP compatibility work are what is
-left before the gate closes.
+The [single-plate plater](frontend.md) draws the [scene](scene-format.md) the
+worker publishes and slices exactly the placement it displays, verified against
+produced G-code by `scripts/test_web_placement.py`, and the fixture matrix now
+covers support, multipart, invalid configuration, Unicode 3MF, and the
+output-size limit across all three [baseline lanes](baseline.md). G5 is
+complete; G6, production readiness, is the next gate.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).
@@ -71,4 +75,4 @@ registered CTest tests, and produced deterministic semantic output for the
 cube, bridge, and concave-hole CLI fixtures. Five tests were explicitly marked
 skipped by the existing suite. On 2026-09-02, the headless worker reproduced all
 recorded semantic fields for those three fixtures while passing its forbidden-
-dependency audit. The next active gate is G3.
+dependency audit.

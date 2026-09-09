@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "defaults": {
     "expected_exit_codes": [0],
     "repetitions": 2,
@@ -13,39 +13,124 @@
   "cases": [
     {
       "name": "cube-default",
+      "model": "{repo}/tests/data/20mm_cube.obj",
       "arguments": [
         "--slice", "1",
         "--load-settings", "{process_profile};{machine_profile}",
         "--load-filaments", "{filament_profile}",
         "--outputdir", "{case_output}",
         "--debug", "2",
-        "{repo}/tests/data/20mm_cube.obj"
+        "{model}"
       ],
       "expected_outputs": ["*.gcode", "result.json"]
     },
     {
       "name": "bridge",
+      "model": "{repo}/tests/data/bridge.obj",
       "arguments": [
         "--slice", "1",
         "--load-settings", "{process_profile};{machine_profile}",
         "--load-filaments", "{filament_profile}",
         "--outputdir", "{case_output}",
         "--debug", "2",
-        "{repo}/tests/data/bridge.obj"
+        "{model}"
       ],
       "expected_outputs": ["*.gcode", "result.json"]
     },
     {
       "name": "concave-hole",
+      "model": "{repo}/tests/data/cube_with_concave_hole.obj",
       "arguments": [
         "--slice", "1",
         "--load-settings", "{process_profile};{machine_profile}",
         "--load-filaments", "{filament_profile}",
         "--outputdir", "{case_output}",
         "--debug", "2",
-        "{repo}/tests/data/cube_with_concave_hole.obj"
+        "{model}"
       ],
       "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "overhang-support",
+      "model": "{repo}/tests/data/overhang.obj",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{model}"
+      ],
+      "settings": {
+        "enable_support": "1"
+      },
+      "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "multipart",
+      "model": "{repo}/tests/data/two_hollow_squares.obj",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{model}"
+      ],
+      "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "unicode-3mf",
+      "model": "{repo}/tests/data/test_3mf/Geräte/Büchse.3mf",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{model}"
+      ],
+      "expected_outputs": ["*.gcode", "result.json"]
+    },
+    {
+      "name": "invalid-config",
+      "model": "{repo}/tests/data/20mm_cube.obj",
+      "arguments": [
+        "--slice", "1",
+        "--load-settings", "{process_profile};{machine_profile}",
+        "--load-filaments", "{filament_profile}",
+        "--outputdir", "{case_output}",
+        "--debug", "2",
+        "{model}"
+      ],
+      "settings": {
+        "layer_height": "10"
+      },
+      "expected_outputs": ["result.json"],
+      "expected_exit_codes": [205],
+      "allow_no_gcode": true,
+      "expect": {
+        "code": "slice_validation_failed",
+        "category": "validation"
+      }
+    },
+    {
+      "name": "output-limit",
+      "model": "{repo}/tests/data/20mm_cube.obj",
+      "arguments": [],
+      "lanes": ["worker"],
+      "settings": {
+        "layer_height": "0.3",
+        "initial_layer_print_height": "0.3",
+        "layer_change_gcode": "G92 E0\n"
+      },
+      "limits": {
+        "max_output_bytes": 1
+      },
+      "expect": {
+        "code": "output_size_limit_exceeded",
+        "category": "resource_limit"
+      }
     }
   ]
 }

@@ -157,7 +157,9 @@ services:
         rm -rf "$${compatibility_dir}";
         python3 scripts/test_web_scene.py
         --worker "$${worker}"
-        --model tests/data/20mm_cube.obj;
+        --model tests/data/20mm_cube.obj=20x20x20
+        --model tests/data/test_stl/ASCII/20mmbox-LF.stl=20x20x20
+        --model "tests/data/test_3mf/Geräte/Büchse.3mf=10x20x30";
         job_dir=$$(mktemp -d);
         trap 'rm -rf "$${job_dir}"' EXIT;
         cp tests/data/20mm_cube.obj "$${job_dir}/model.obj";
@@ -324,6 +326,15 @@ services:
       - build-worker/src/Release/orca-slicer-worker
       - --native-baselines
       - build/web-baseline
+
+  placement-check:
+    <<: *build-environment
+    network_mode: none
+    command:
+      - python3
+      - scripts/test_web_placement.py
+      - --worker
+      - build-worker/src/Release/orca-slicer-worker
 
   frontend-build:
     <<: *build-environment

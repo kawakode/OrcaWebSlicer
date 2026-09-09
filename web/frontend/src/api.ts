@@ -1,8 +1,10 @@
 import {
   ApiError,
   type Job,
+  type ObjectPlacement,
   type PreviewIndex,
   type ProfileCatalog,
+  type SceneIndex,
   type SettingsCatalog,
   type Upload,
 } from "./types";
@@ -56,12 +58,38 @@ export function uploadModel(file: File): Promise<Upload> {
   return request<Upload>("/uploads", { method: "POST", body });
 }
 
-export interface SliceSubmission {
-  upload_id: string;
+export interface ProfileSelection {
   machine_profile: string;
   process_profile: string;
   filament_profile: string;
+}
+
+/** Start, or return, the inspect job that turns one upload into a scene. */
+export function submitScene(uploadId: string, profiles: ProfileSelection): Promise<Job> {
+  return request<Job>(`/uploads/${uploadId}/scene`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profiles),
+  });
+}
+
+export const readScene = (jobId: string): Promise<SceneIndex> =>
+  request<SceneIndex>(`/scenes/${jobId}`);
+
+/** One object's triangle soup. Only the objects drawn are ever fetched. */
+export async function sceneObject(jobId: string, index: number): Promise<ArrayBuffer> {
+  const response = await fetch(`${PREFIX}/scenes/${jobId}/objects/${index}`);
+  if (!response.ok) {
+    throw new ApiError("scene_unavailable", "That scene object is unavailable.", response.status);
+  }
+  return response.arrayBuffer();
+}
+
+export interface SliceSubmission extends ProfileSelection {
+  upload_id: string;
   settings: Record<string, string>;
+  /** Empty leaves placement to the worker, exactly as before the plater existed. */
+  objects?: ObjectPlacement[];
 }
 
 export function submitJob(submission: SliceSubmission): Promise<Job> {

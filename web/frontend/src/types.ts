@@ -143,3 +143,32 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+/** One object of an inspected scene, as `docs/web/scene-format.md` declares it. */
+export interface SceneObject {
+  index: number;
+  name: string;
+  triangle_count: number;
+  vertex_count: number;
+  /** In the object's own local frame — the frame its vertices are in. */
+  bounding_box: { min: [number, number, number]; max: [number, number, number] };
+  /** Column-major 4x4 in millimetres, placing that frame on the bed. */
+  transform: number[];
+  offset: number;
+  length: number;
+}
+
+export interface SceneIndex {
+  scene_version: number;
+  units: "mm";
+  quantum_mm: number;
+  bed: { shape: [number, number][]; printable_height: number };
+  data_bytes: number;
+  objects: SceneObject[];
+}
+
+/** One placed copy: what the plater displays and what a slice request carries. */
+export interface ObjectPlacement {
+  source_object: number;
+  transform: number[];
+}

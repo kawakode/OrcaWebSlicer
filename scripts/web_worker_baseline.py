@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
-from web_baseline import expand, resolve_profile, summarize_gcode, validate_manifest
+from web_baseline import case_lanes, expand, resolve_profile, summarize_gcode, validate_manifest
 
 
 def latest_native_run(root):
@@ -28,14 +28,10 @@ def profile_sources(manifest, repo):
 
 
 def model_source(case, repo):
-    candidates = [
-        pathlib.Path(value.replace("{repo}", str(repo)))
-        for value in case["arguments"]
-        if pathlib.Path(value).suffix.lower() in (".stl", ".obj")
-    ]
-    if len(candidates) != 1 or not candidates[0].is_file():
-        raise ValueError("case {} must resolve to one STL or OBJ input".format(case["name"]))
-    return candidates[0]
+    path = pathlib.Path(expand(case["model"], {"repo": str(repo)}))
+    if not path.is_file():
+        raise ValueError("case {} model does not exist: {}".format(case["name"], path))
+    return path
 
 
 def materialize_profile_set(sources, destination):
@@ -47,13 +43,53 @@ def materialize_profile_set(sources, destination):
             stream.write("\n")
 
 
+def check_expected_failure(job, expect, completed):
+    """Assert the worker's own stable error instead of comparing G-code."""
+    result_path = job / "result.json"
+    result = None
+    if result_path.is_file():
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    error = result.get("error") if isinstance(result, dict) else None
+    matches = (
+        completed.returncode != 0
+        and isinstance(result, dict)
+        and result.get("outcome") == "failed"
+        and isinstance(error, dict)
+        and error.get("code") == expect["code"]
+        and error.get("category") == expect["category"]
+    )
+    return {
+        "matches": matches,
+        "worker_exit_code": completed.returncode,
+        "expected": expect,
+        "result": result,
+    }
+
+
 def run_case(worker, case, repo, sources, native_run, output_root):
     job = output_root / case["name"]
     job.mkdir()
     source_model = model_source(case, repo)
-    input_model = "model{}".format(source_model.suffix.lower())
+    # The unicode-3mf case exists to exercise a non-ASCII input_model; keeping
+    # the fixture's own name (rather than a normalized "model.ext") is what
+    # makes every case actually stage the file name it claims to.
+    input_model = source_model.name
     shutil.copy2(source_model, job / input_model)
     materialize_profile_set(sources, job / "profiles")
+
+    payload = {
+        "input_model": input_model,
+        "output_gcode": "result.gcode",
+        "profiles": {
+            "machine": "profiles/machine.json",
+            "process": "profiles/process.json",
+            "filament": "profiles/filament.json",
+        },
+    }
+    if case.get("settings"):
+        payload["settings"] = dict(case["settings"])
+    if case.get("limits"):
+        payload["limits"] = dict(case["limits"])
 
     request = {
         "protocol_version": 1,
@@ -61,25 +97,25 @@ def run_case(worker, case, repo, sources, native_run, output_root):
         "operation": {
             "name": "slice",
             "version": 1,
-            "payload": {
-                "input_model": input_model,
-                "output_gcode": "result.gcode",
-                "profiles": {
-                    "machine": "profiles/machine.json",
-                    "process": "profiles/process.json",
-                    "filament": "profiles/filament.json",
-                },
-            },
+            "payload": payload,
         },
     }
     request_path = job / "request.json"
-    request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    request_path.write_text(
+        json.dumps(request, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
     completed = subprocess.run(
         [str(worker), "--slice-manifest", str(request_path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
+
+    expect = case.get("expect")
+    if expect is not None:
+        return check_expected_failure(job, expect, completed)
+
     if completed.returncode != 0:
         return {
             "matches": False,
@@ -130,6 +166,7 @@ def main():
     results = {
         case["name"]: run_case(args.worker, case, repo, sources, native_run, output_root)
         for case in manifest["cases"]
+        if "worker" in case_lanes(case)
     }
     report = {
         "native_run": native_run.name,

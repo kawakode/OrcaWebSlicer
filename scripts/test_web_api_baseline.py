@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from web.api.config import ApiConfig  # noqa: E402
 from web.api.app import create_app  # noqa: E402
-from web_baseline import expand, summarize_gcode, validate_manifest  # noqa: E402
+from web_baseline import case_lanes, expand, summarize_gcode, validate_manifest  # noqa: E402
 from web_job_directory import JobDirectoryLimits  # noqa: E402
 from web_worker_executor import ExecutorLimits  # noqa: E402
 
@@ -59,14 +59,10 @@ def selected_profiles(manifest):
 
 
 def model_source(case):
-    candidates = [
-        pathlib.Path(value.replace("{repo}", str(REPO_ROOT)))
-        for value in case["arguments"]
-        if pathlib.Path(value).suffix.lower() in (".stl", ".obj")
-    ]
-    if len(candidates) != 1 or not candidates[0].is_file():
-        raise ValueError("case {} must resolve to one STL or OBJ input".format(case["name"]))
-    return candidates[0]
+    path = pathlib.Path(expand(case["model"], {"repo": str(REPO_ROOT)}))
+    if not path.is_file():
+        raise ValueError("case {} model does not exist: {}".format(case["name"], path))
+    return path
 
 
 def run_case(client, case, native_run, output_root, timeout_seconds):
@@ -76,9 +72,12 @@ def run_case(client, case, native_run, output_root, timeout_seconds):
     if upload.status_code != 201:
         return {"matches": False, "stage": "upload", "response": upload.json()}
 
+    submission = {"upload_id": upload.json()["upload_id"], **case["profiles"]}
+    if case.get("settings"):
+        submission["settings"] = dict(case["settings"])
     accepted = client.post(
         "/api/v1/jobs",
-        json={"upload_id": upload.json()["upload_id"], **case["profiles"]},
+        json=submission,
         headers={"X-Correlation-Id": "api-baseline-{}".format(case["name"])},
     )
     if accepted.status_code != 202:
@@ -92,6 +91,25 @@ def run_case(client, case, native_run, output_root, timeout_seconds):
         if job["state"] in TERMINAL_STATES:
             break
         time.sleep(0.05)
+
+    expect = case.get("expect")
+    if expect is not None:
+        # An error-fixture case asserts the API's stable error verbatim
+        # instead of comparing G-code; it is expected never to succeed.
+        error = job.get("error") or {}
+        matches = (
+            job["state"] == "failed"
+            and error.get("code") == expect["code"]
+            and error.get("category") == expect["category"]
+        )
+        return {
+            "matches": matches,
+            "stage": "compared",
+            "state": job["state"],
+            "expected": expect,
+            "error": job["error"],
+        }
+
     if job["state"] != "succeeded":
         return {"matches": False, "stage": "slice", "state": job["state"], "error": job["error"]}
 
@@ -132,7 +150,11 @@ def main():
     validate_manifest(manifest)
     native_run = latest_native_run(args.native_baselines)
     vendor, profiles = selected_profiles(manifest)
-    cases = [case for case in manifest["cases"] if args.case is None or case["name"] in args.case]
+    cases = [
+        case
+        for case in manifest["cases"]
+        if (args.case is None or case["name"] in args.case) and "api" in case_lanes(case)
+    ]
     if not cases:
         raise ValueError("no baseline case matched {}".format(args.case))
     for case in cases:

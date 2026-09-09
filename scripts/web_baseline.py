@@ -18,7 +18,8 @@ import sys
 import time
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LANES = ("native", "worker", "api")
 MOVE_RE = re.compile(r"^\s*(G[0123])(?:\s|$)", re.IGNORECASE)
 WORD_RE = re.compile(r"([A-Za-z])([-+]?(?:\d+(?:\.\d*)?|\.\d+))")
 TOOL_RE = re.compile(r"^\s*T(\d+)\s*(?:;.*)?$", re.IGNORECASE)
@@ -257,6 +258,22 @@ def summarize_gcode(path):
     }
 
 
+def case_lanes(case):
+    return case.get("lanes", LANES)
+
+
+def setting_cli_flag(key, value):
+    """Turn one manifest setting into the CLI override the desktop app accepts.
+
+    `ConfigOptionDef::cli_args()` (src/libslic3r/Config.cpp) falls back to the
+    option key with underscores replaced by dashes whenever an option defines
+    no explicit `cli` alias; every setting used by these baseline cases relies
+    on that default, so the substitution is done once, here, rather than in
+    every case that needs an override.
+    """
+    return "--{}={}".format(key.replace("_", "-"), value)
+
+
 def expand(value, variables):
     if isinstance(value, str):
         return value.format_map(variables)
@@ -357,6 +374,39 @@ def validate_manifest(manifest):
         names.add(name)
         if not isinstance(case.get("arguments"), list):
             raise ValueError("case {} arguments must be an array".format(name))
+        if not isinstance(case.get("model"), str) or not case["model"]:
+            raise ValueError("case {} needs a non-empty model path".format(name))
+        settings = case.get("settings", {})
+        if not isinstance(settings, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in settings.items()
+        ):
+            raise ValueError("case {} settings must be a string-to-string object".format(name))
+        limits = case.get("limits", {})
+        if not isinstance(limits, dict) or not all(
+            isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
+            for key, value in limits.items()
+        ):
+            raise ValueError("case {} limits must be a string-to-integer object".format(name))
+        lanes = case.get("lanes", list(LANES))
+        if (
+            not isinstance(lanes, list)
+            or not lanes
+            or any(lane not in LANES for lane in lanes)
+        ):
+            raise ValueError(
+                "case {} lanes must be a non-empty subset of {}".format(name, LANES)
+            )
+        expect = case.get("expect")
+        if expect is not None and (
+            not isinstance(expect, dict)
+            or not isinstance(expect.get("code"), str)
+            or not expect.get("code")
+            or not isinstance(expect.get("category"), str)
+            or not expect.get("category")
+        ):
+            raise ValueError(
+                "case {} expect must be an object with non-empty code and category".format(name)
+            )
 
 
 def output_matches(case_output, patterns):
@@ -391,8 +441,24 @@ def run_repetition(
         "output": str(output_root),
         "case_output": str(case_output),
     })
+    # Resolved before the full case is expanded, so "{model}" inside the
+    # arguments list expands to the same path as the case's own "model"
+    # field instead of the two ever drifting apart.
+    variables["model"] = expand(case["model"], variables)
     resolved = expand(case, variables)
-    arguments = [str(slicer)] + [str(item) for item in resolved["arguments"]]
+    case_arguments = [str(item) for item in resolved["arguments"]]
+    settings = resolved.get("settings", {})
+    if settings:
+        # Each case declares its trailing "{model}" placeholder explicitly (see
+        # the manifest), so the generated overrides are inserted ahead of the
+        # last argument to land alongside the other `--load-settings`/
+        # `--load-filaments` flags instead of trailing the positional input.
+        model_argument = case_arguments.pop()
+        case_arguments.extend(
+            setting_cli_flag(key, value) for key, value in sorted(settings.items())
+        )
+        case_arguments.append(model_argument)
+    arguments = [str(slicer)] + case_arguments
     environment = os.environ.copy()
     environment.update(
         {str(key): str(value) for key, value in resolved.get("environment", {}).items()}
@@ -504,7 +570,7 @@ def main(argv=None):
 
     if args.list_cases:
         for case in manifest["cases"]:
-            if case.get("enabled", True):
+            if case.get("enabled", True) and "native" in case_lanes(case):
                 print(case["name"])
         return 0
     if args.validate_only:
@@ -553,7 +619,7 @@ def main(argv=None):
     repetitions = int(defaults.get("repetitions", 2))
     all_passed = True
     for case in manifest["cases"]:
-        if not case.get("enabled", True):
+        if not case.get("enabled", True) or "native" not in case_lanes(case):
             continue
         print("Running {}".format(case["name"]), flush=True)
         case_record = {"name": case["name"], "runs": []}

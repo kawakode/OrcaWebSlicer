@@ -202,13 +202,17 @@ docker compose -f docker/web/compose.yml run --rm frontend-build
 docker compose -f docker/web/compose.yml up api
 docker compose -f docker/web/compose.yml run --rm executor-smoke
 docker compose -f docker/web/compose.yml run --rm api-baseline
+docker compose -f docker/web/compose.yml run --rm placement-check
 ```
 
 `api` serves on `http://localhost:8000` and reads the worker built by
 `worker-build`. `executor-smoke` runs the whole `tests/web` suite, which covers
 the profile catalog, the job service against fake workers, and the HTTP surface.
 `api-baseline` slices the recorded baseline fixtures through the API and
-compares the downloaded G-code with the native baseline run.
+compares the downloaded G-code with the native baseline run. `placement-check`
+inspects a fixture, slices it at explicit placements, and checks that the
+G-code lands where the transform said it would — the write side of
+[scene-format.md](scene-format.md), verified end to end.
 
 ## Still deferred
 

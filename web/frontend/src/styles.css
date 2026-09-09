@@ -248,3 +248,55 @@ details[data-testid="job-report"] dd {
   height: 0.75rem;
   border-radius: 2px;
 }
+
+/* The plate: one canvas showing the bed, and the controls that edit it. */
+.plater-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  touch-action: none;
+}
+
+.plater-views {
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.plater-objects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plater-objects button {
+  background: transparent;
+  color: var(--accent);
+}
+
+.plater-objects button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+/* The object's bed position, quieter than its name but still the button's own
+   color: the muted grey `.chain` uses fails contrast against the selected
+   button's accent background. */
+.plater-position {
+  font-size: 0.9em;
+}
+
+.plater-transform {
+  margin-bottom: 1rem;
+}
+
+.plater-transform p {
+  margin: 0 0 0.6rem;
+  color: var(--muted);
+}

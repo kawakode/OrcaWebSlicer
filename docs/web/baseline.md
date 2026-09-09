@@ -1,6 +1,9 @@
 # Native slicing compatibility baseline
 
-Status: Initial native matrix complete; expansion cases remain tracked below
+Status: Fixture matrix expanded to support, multipart, invalid-configuration,
+Unicode 3MF, and output-limit cases. Multi-filament and cancellation are
+deliberately not part of this manifest; see the note at the end of the fixture
+matrix.
 
 ## Purpose
 
@@ -18,21 +21,52 @@ The baseline has two lanes:
 
 ## Fixture matrix
 
-Existing repository fixtures are reused before adding new binary assets.
+Existing repository fixtures are reused before adding new binary assets. Every
+case is declared once in `docs/web/baseline-cases.json` and driven by three
+runners that share that manifest: `scripts/web_baseline.py` (native desktop
+CLI), `scripts/web_worker_baseline.py` (headless `orca-slicer-worker`), and
+`scripts/test_web_api_baseline.py` (the HTTP API through `TestClient`). A
+case's `lanes` field lists which of the three it runs in; when omitted it
+runs in all three.
 
-| Case | Source | Defining behavior |
-| --- | --- | --- |
-| `cube-default` | `tests/data/20mm_cube.obj` | Basic import, layer generation, extrusion, and G-code export |
-| `bridge` | `tests/data/bridge.obj` | Bridge detection and bridge extrusion roles |
-| `overhang-support` | `tests/data/overhang.obj` | Support generation when explicitly enabled |
-| `concave-hole` | `tests/data/cube_with_concave_hole.obj` | Polygon topology and hole preservation |
-| `multipart` | `tests/data/two_hollow_squares.obj` | Multiple disconnected regions in one mesh |
-| `unicode-3mf` | `tests/data/test_3mf/Geräte/Büchse.3mf` | 3MF archive import and Unicode paths |
-| `invalid-config` | Generated manifest | Stable rejection of an unknown or invalid option value |
-| `cancel` | A deliberately slow generated job | Worker cancellation and partial-artifact cleanup |
+| Case | Source | Lanes | Defining behavior |
+| --- | --- | --- | --- |
+| `cube-default` | `tests/data/20mm_cube.obj` | native, worker, api | Basic import, layer generation, extrusion, and G-code export |
+| `bridge` | `tests/data/bridge.obj` | native, worker, api | Bridge detection and bridge extrusion roles |
+| `concave-hole` | `tests/data/cube_with_concave_hole.obj` | native, worker, api | Polygon topology and hole preservation |
+| `overhang-support` | `tests/data/overhang.obj` (`enable_support=1`) | native, worker, api | Support generation when explicitly enabled |
+| `multipart` | `tests/data/two_hollow_squares.obj` | native, worker, api | Multiple disconnected regions in one mesh |
+| `unicode-3mf` | `tests/data/test_3mf/Geräte/Büchse.3mf` | native, worker, api | 3MF archive import and a non-ASCII file name |
+| `invalid-config` | `tests/data/20mm_cube.obj` (`layer_height=10` against a 0.4 mm nozzle) | native, worker, api | Stable rejection by `Print::validate()` instead of G-code |
+| `output-limit` | `tests/data/20mm_cube.obj` (`limits.max_output_bytes=1`) | worker only | Stable rejection by the worker's own output-size ceiling |
 
-Additional fixtures are added only when they protect a distinct contract such as
-multi-filament tool ordering or modifier volumes.
+Most cases compare a semantic G-code summary across lanes, as before. A case
+that declares `expect` (`invalid-config`, `output-limit`) never produces
+G-code on purpose: the worker and API lanes instead assert that the run
+failed with exactly the declared `{"code": ..., "category": ...}`, taken
+verbatim from the worker's own `result.json`/`error` document. `invalid-config`
+also runs natively, where the same rejection is asserted through
+`expected_exit_codes` and `allow_no_gcode` rather than `expect` (the native
+CLI has no stable code/category document to compare).
+
+`output-limit` is worker-lane only: the limit that trips it
+(`limits.max_output_bytes`) is a field of the worker's own slice-manifest
+payload, not something the public API lets a caller set — the API applies its
+own server-configured ceiling instead, so there is no way to reproduce this
+fixture through that lane without changing what the API accepts.
+
+Multi-filament and cancellation fixtures are intentionally not part of this
+manifest:
+
+- The worker protocol accepts exactly one filament profile
+  (`payload.profiles.filament` is a single path), so a multi-filament case
+  cannot be expressed in the worker or API lanes without a protocol change.
+- Cancellation is already covered by `scripts/test_web_worker_cancellation.py`,
+  which signals a running worker process mid-slice — a capability this
+  manifest-driven runner does not have.
+
+Additional fixtures are added only when they protect a distinct contract such
+as modifier volumes.
 
 ## Recorded result
 
@@ -79,6 +113,49 @@ were explicitly skipped. The packaged slicer SHA-256 was
 The runner resolves each selected shipped profile's inheritance into a
 self-contained temporary JSON file. This matches desktop preset layering while
 keeping generated configurations and raw artifacts out of version control.
+
+## Expanded matrix result
+
+The expanded matrix was recorded on 2026-09-08 against commit
+`62423275fbafd7338d35b252c1275d8aea96d255` with this gate's changes in the
+working tree. Every case passed and repeated identically.
+
+| Case | Layers | G-code bytes | Wall time range | Exit |
+| --- | ---: | ---: | ---: | ---: |
+| `cube-default` | 100 | 346,079 | 0.565-0.615 s | 0 |
+| `bridge` | 40 | 188,531 | 0.520-0.634 s | 0 |
+| `concave-hole` | 50 | 348,155 | 0.618-0.622 s | 0 |
+| `overhang-support` | 39 | 375,644 | 0.512-0.515 s | 0 |
+| `multipart` | 14 | 92,235 | 0.617-0.627 s | 0 |
+| `unicode-3mf` | 150 | 351,381 | 0.565-0.614 s | 0 |
+| `invalid-config` | — | — | 0.359-0.577 s | 205 |
+
+The three original cases reproduce the byte counts recorded on 2026-09-01
+exactly, which is what confirms that declaring each case's model once and
+referring to it as `{model}` in the arguments changed no native invocation.
+`overhang-support` emits `Support` and `Support interface` extrusion roles, so
+the case measures support generation rather than merely enabling it.
+
+The worker lane matched the native semantic summary for every comparison case
+and produced the declared error for each `expect` case
+(`slice_validation_failed`/`validation` at exit 5, and
+`output_size_limit_exceeded`/`resource_limit` at exit 7, publishing no
+artifact). The API lane matched on every case it runs.
+
+Run these against the recorded native run with:
+
+```powershell
+$env:ORCA_WEB_GIT_COMMIT = (git rev-parse HEAD).Trim()
+$env:ORCA_WEB_GIT_DIRTY = if (git status --porcelain) { "true" } else { "false" }
+docker compose -f docker/web/compose.yml run --rm baseline
+docker compose -f docker/web/compose.yml run --rm worker-baseline
+docker compose -f docker/web/compose.yml run --rm api-baseline
+```
+
+Injecting the commit and dirty flag is not optional in practice: without them
+the runner falls back to `git status --porcelain`, which stats the whole
+bind-mounted worktree from inside the container and can stall the run for many
+minutes before the first case starts.
 
 ## Headless parity result
 

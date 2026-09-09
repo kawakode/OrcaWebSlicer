@@ -121,6 +121,12 @@ they do to a slice.
 
 ## Verifying it
 
+`scripts/test_web_scene.py` runs the worker's own `inspect` over one fixture of
+each supported format — OBJ, STL, and 3MF — and checks that the published scene
+agrees with the blob it describes and reports the size that fixture actually is.
+That is `docs/web/mvp.md`'s first acceptance criterion: every supported fixture
+shows the correct model bounds. `worker-smoke` runs it.
+
 `tests/libslic3r/test_scene_export.cpp` (`[SceneExport]`) exports a real mesh
 and checks the index against the blob it describes: the ranges tile the file
 exactly, every range holds whole triangles, `vertex_count` is three times
