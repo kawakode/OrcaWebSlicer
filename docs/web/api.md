@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract for G5
+Status: Active contract
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very

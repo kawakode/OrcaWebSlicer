@@ -73,6 +73,20 @@ Before creating worker equivalents:
 Completed: color decoding and minimum flush-volume calculations now have core
 APIs and focused headless tests. Desktop callers use the same implementations.
 
+One case stayed latent until 2026-09-09, when the worker first linked
+`FlushVolCalculator` to synthesize a multi-filament purge matrix:
+`libslic3r/FlushVolCalc.cpp` included `slic3r/Utils/ColorSpaceConvert.hpp` for
+`RGB2HSV`, so a core file depended on the GUI layer. Nothing had pulled that
+object into the worker link before, so neither the dependency guard nor the
+build had anything to complain about — a reminder that this audit's boundary is
+only enforced for code the worker actually reaches.
+
+Linking the GUI file was not an option: it also declares two wxWidgets helpers.
+Following step 2 above, the pure colour-space maths moved verbatim into
+`libslic3r/ColorSpaceConvert.{cpp,hpp}` and the wx helpers stayed in
+`slic3r/Utils/`, whose header now includes the core one, so every desktop
+caller is unchanged and no colour converts differently.
+
 ### Thumbnail rendering
 
 CLI project export creates hidden GLFW contexts and calls `OpenGLManager`,

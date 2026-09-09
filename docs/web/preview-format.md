@@ -1,6 +1,6 @@
 # Layer preview format version 1
 
-Status: Active contract for G5
+Status: Active contract
 
 A sliced job publishes a browsable preview of its own toolpaths as two files:
 `preview.json`, a small index, and `preview.bin`, the geometry. Splitting them

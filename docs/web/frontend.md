@@ -1,6 +1,6 @@
 # Browser screen
 
-Status: Active contract for G5
+Status: Active contract
 
 `web/frontend/` is the React, TypeScript, and Vite application chosen in
 [ADR 0002](adr/0002-web-stack.md).

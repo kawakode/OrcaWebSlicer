@@ -62,7 +62,8 @@ failure rather than a silent overwrite, so one job can never observe or
 overwrite another's files.
 
 Only files the request declares are staged: the input model and the resolved
-machine, process, and filament profiles. Each declared destination must be a
+machine and process profiles, plus one flattened profile per filament slot the
+request names. Each declared destination must be a
 relative POSIX path inside the job; absolute paths, `..`, backslashes, repeated
 separators, paths crossing a symbolic link, a duplicate destination, and
 anything named `request.json` are rejected. Sources are copied through a bounded

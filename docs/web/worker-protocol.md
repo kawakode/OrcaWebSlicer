@@ -1,6 +1,6 @@
 # Worker protocol version 1
 
-Status: Active contract for G5
+Status: Active contract
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal

@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-07
+Last updated: 2026-09-09
 
 ## Objective
 
@@ -25,17 +25,17 @@ The foundation is complete:
 - [x] G4: the minimum API and the first browser screen turn a browser upload
   into downloadable, baseline-equivalent G-code through a disposable worker.
 
-The active gate is G5, the browser MVP. All three of its features are in place:
+- [x] G5: the browser MVP. The settings and profile UI is generated from a
+  versioned catalog the engine exports and compatibility expressions are
+  resolved by the engine's own placeholder parser; a sliced job publishes a
+  browsable layer preview the API serves one layer at a time; the plater draws
+  the scene the worker publishes and slices exactly the placement it displays;
+  and the baseline matrix covers support, multipart, invalid configuration,
+  Unicode 3MF, and the output-size limit across all three lanes.
 
-- [x] The settings and profile UI is generated from a versioned catalog the
-  engine exports, and compatibility expressions are resolved by the engine's own
-  placeholder parser.
-- [x] A sliced job publishes a browsable layer preview that the API serves one
-  layer at a time.
-- [x] The browser plater draws the scene the worker publishes and slices exactly
-  the placement it displays.
+Multi-filament landed after G5 closed and is described in section 18.
 
-What remains for G5 is the expanded baseline matrix.
+The active gate is G6, production readiness. Nothing in it has started.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -293,6 +293,45 @@ verified in a browser the release depends on.
 - [ ] A worker compromise or crash is contained to one disposable job.
 - [ ] The release checklist is reproducible from a clean checkout.
 
+## Phase 5: Beyond the MVP
+
+### 18. Multi-filament
+
+Completed on 2026-09-09, after G5 closed. It was scoped out of the gate as a
+fixture-sized deferral; it turned out to be a feature the engine could not
+perform at all, so it is recorded here rather than folded back into G5.
+
+- [x] A slice request names 1-16 filament profiles, and each placed object
+  names which of them it prints in.
+- [x] The worker synthesizes the per-filament state the engine indexes but no
+  headless producer sizes — `filament_colour`, `filament_map`, and the N x N
+  `flush_volumes_matrix` — the way `PresetBundle` does for the desktop. Without
+  it the engine reads past the end of vectors sized for one filament; see
+  [baseline.md](docs/web/baseline.md) for the measurements.
+- [x] The worker places a prime tower that does not fit the printable area and
+  warns where it moved it, standing in for the desktop's `PartPlate`, which the
+  headless worker has no equivalent of.
+- [x] The browser chooses filament slots, assigns each object to one, and
+  colors the plate by filament.
+- [x] The pure colour-space maths moved from `src/slic3r/Utils/` into
+  `libslic3r`, so `FlushVolCalc` no longer reaches up into the GUI layer for
+  `RGB2HSV` and the headless worker can link it.
+
+Deliberately not done, and why:
+
+- [ ] Multi-nozzle printers. A multi-filament request against a machine
+  declaring more than one `nozzle_diameter` is refused with
+  `multi_nozzle_filament_map_unsupported` rather than mapped onto the first
+  nozzle. Deciding which nozzle each filament feeds is real assignment logic
+  (see `FilamentGroup.cpp`), and silently guessing it would mis-slice hardware
+  where a wrong nozzle is physically reachable.
+- [ ] A baseline fixture. The native lane is the desktop CLI, which crashes on
+  this input, so there is no reference run to compare against. The capability
+  is covered by the worker's own tests, the API suite, and the browser suite.
+- [ ] Fixing the desktop CLI. The same synthesis would plausibly repair it, but
+  that was not established, so no claim is made. It is upstream work the web
+  tier does not depend on.
+
 ## Required checks for every implementation batch
 
 - [ ] Add focused tests for every behavior change.
@@ -306,14 +345,18 @@ verified in a browser the release depends on.
 
 ## Decisions intentionally deferred
 
-These choices are not blockers for G3 and should be made only when their phase
-begins:
+A choice is made only when its phase begins. These are the ones still open:
 
-- Frontend and API frameworks.
-- Database, queue, and object-store products.
-- Preview artifact encoding.
+- Database, queue, and object-store products. Job state and artifacts live on
+  the job-directory filesystem behind `JobService` until local throughput and
+  artifact sizes are measured.
 - Production hosting and sandbox technology.
 - Authentication provider and billing model.
+
+Settled since: the frontend and API frameworks in
+[ADR 0002](docs/web/adr/0002-web-stack.md), the preview artifact encoding in
+[preview-format.md](docs/web/preview-format.md), and the scene encoding the
+plater consumes in [scene-format.md](docs/web/scene-format.md).
 
 SLA slicing, multiple plates, painting tools, desktop gizmo parity, direct
 printer control, plugins, arbitrary post-processing, offline WebAssembly

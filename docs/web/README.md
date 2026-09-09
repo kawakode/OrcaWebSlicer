@@ -43,6 +43,10 @@ prerequisites pass.
   output limits.
 - The browser contract is versioned independently from internal C++ classes.
 - Desktop behavior remains unchanged while the headless boundary is extracted.
+- When a `libslic3r` file needs something that lives in `src/slic3r`, the code
+  moves down a layer rather than the worker linking upwards. Moving it verbatim
+  keeps desktop behavior identical, and the forbidden-dependency audit is what
+  proves the worker stayed free of the GUI toolkit.
 - Frontend controls for slicing settings are generated from engine metadata;
   setting definitions are not manually duplicated in TypeScript.
 - Every feature added after the MVP brings a fixture or targeted behavioral test.

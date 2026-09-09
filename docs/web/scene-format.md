@@ -1,6 +1,6 @@
 # Scene format version 1
 
-Status: Active contract for G5
+Status: Active contract
 
 The browser plater needs geometry to draw and a bed to draw it on, and the API
 process must never parse an untrusted model. So the worker does it: the
@@ -93,8 +93,8 @@ A slice request may carry the placement the browser is displaying:
 
 ```json
 "objects": [
-  {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 5, 0, 1]},
-  {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 60, 5, 0, 1]}
+  {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 5, 0, 1], "filament": 1},
+  {"source_object": 0, "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 60, 5, 0, 1], "filament": 2}
 ]
 ```
 
@@ -103,11 +103,17 @@ same column-major millimetre layout the scene publishes. The same
 `source_object` may repeat, which is how a duplicate is expressed: the example
 above slices two copies of one imported object.
 
+`filament` is optional and 1-based, naming which of the request's filament
+profiles that copy prints in; the example above prints the two copies in
+different filaments. Omitting it, or sending `0`, leaves the object's own
+assignment alone. See [worker-protocol.md](worker-protocol.md) for the filament
+list it indexes and the per-filament state the worker derives from it.
+
 When `objects` is present the worker replaces the imported objects with exactly
 one placed copy per entry and does not arrange. When it is absent, behaviour is
 unchanged: loose meshes are arranged and a project plate keeps its own
-placement. Every `source_object` is validated before the model is touched, so a
-bad index fails the job instead of half-applying it.
+placement. Every `source_object` and `filament` is validated before the model is
+touched, so a bad index fails the job instead of half-applying it.
 
 ## Limits
 
