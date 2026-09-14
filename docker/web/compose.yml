@@ -29,6 +29,10 @@ x-build-environment: &build-environment
     ORCA_WEB_PROFILE_VENDORS: ${ORCA_WEB_PROFILE_VENDORS:-Anycubic}
     ORCA_WEB_STATE_ROOT: ${ORCA_WEB_STATE_ROOT:-/workspace/build/web-state}
     ORCA_WEB_WORKER: ${ORCA_WEB_WORKER:-/workspace/build-worker/src/Release/orca-slicer-worker}
+    ORCA_WEB_WORKER_SANDBOX: ${ORCA_WEB_WORKER_SANDBOX:-required}
+    # A service that starts as root hands each worker to this user; one that is
+    # already unprivileged keeps the account it has.
+    ORCA_WEB_WORKER_USER: ${ORCA_WEB_WORKER_USER:-65534:65534}
     ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
     ORCA_WEB_MAX_OUTPUT_BYTES: ${ORCA_WEB_MAX_OUTPUT_BYTES:-1073741824}
     ORCA_WEB_MAX_PREVIEW_BYTES: ${ORCA_WEB_MAX_PREVIEW_BYTES:-268435456}
@@ -299,6 +303,67 @@ services:
         --worker build-worker/src/Release/orca-slicer-worker
         --model tests/data/20mm_cube.obj
 
+  # The deployment shape the API actually runs in: a service that starts as
+  # root, on a network, launching workers that have neither. Keeping the
+  # container's network is the point — it is what makes the worker's own
+  # refusal to reach it worth measuring.
+  sandbox-smoke:
+    <<: *build-environment
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    # Capabilities stay at the runtime default here: a root executor needs
+    # CAP_CHOWN to hand a job directory over, CAP_SETUID and CAP_SETGID to
+    # switch its worker, CAP_SETPCAP to drop the worker's bounding set, and
+    # CAP_DAC_OVERRIDE to read back what the worker published.
+    command:
+      - bash
+      - -lc
+      - >-
+        python3 -m unittest tests.web.test_worker_sandbox -v
+        && python3 scripts/test_web_worker_executor.py
+        --worker build-worker/src/Release/orca-slicer-worker
+        --model tests/data/20mm_cube.obj
+
+  security-scan:
+    profiles:
+      - security
+    image: orca-web-security:latest
+    build:
+      context: ../..
+      dockerfile: docker/web/Security.Dockerfile
+      args:
+        SYFT_VERSION: v1.51.1
+        GRYPE_VERSION: v0.116.1
+        TARGET_IMAGE: ${ORCA_WEB_SCAN_IMAGE:-orca-web-build:latest}
+    environment:
+      GRYPE_CHECK_FOR_APP_UPDATE: "false"
+      GRYPE_DB_CACHE_DIR: /var/cache/grype
+      SYFT_CACHE_DIR: /var/cache/syft
+      SYFT_CHECK_FOR_APP_UPDATE: "false"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      # Syft needs to traverse package locations that are not world-readable.
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../..:/source:ro
+      - ../../artifacts/web-security:/output
+      - orca-web-grype-db:/var/cache/grype
+      - orca-web-syft-cache:/var/cache/syft
+    command:
+      - --image
+      - ${ORCA_WEB_SCAN_IMAGE:-orca-web-build:latest}
+
   api:
     <<: *build-environment
     ports:
@@ -392,3 +457,5 @@ volumes:
   orca-ccache:
   orca-frontend-modules:
   orca-playwright:
+  orca-web-grype-db:
+  orca-web-syft-cache:

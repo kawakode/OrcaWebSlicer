@@ -119,6 +119,17 @@ Required rules:
 - outputs are first written to temporary names and atomically promoted on success;
 - cancellation is represented by a token checked by existing status callbacks.
 
+Two of these the audit predicted only in general terms, and both went unnoticed
+until the worker first ran without privileges in G6. The engine reads process
+state the desktop sets at startup and a worker inherits nothing for:
+`temporary_dir()`, which the 3MF importer's backup tree hangs off and which
+resolves to `/orcaslicer_model` at the filesystem root when unset; and the
+Boost.Log sink, which defaults to writing engine diagnostics onto stdout — the
+stream the worker protocol owns. The worker now sets both before it does
+anything else. The general rule is the same one the boundary already has: what
+the desktop initializes for the engine, the worker initializes for itself,
+rather than inheriting the ambient default.
+
 ## Extraction units
 
 The work will be split into reviewable units in this order:

@@ -96,8 +96,44 @@ configurable grace period. Its additional settings are
 `ORCA_WEB_MAX_CPU_TIME_MS`, and `ORCA_WEB_TERMINATION_GRACE_MS`.
 
 The smoke service itself is unprivileged, offline, capability-free, read-only
-outside its private temporary storage, and cgroup PID-limited. This proves the
-local isolation mechanics without selecting the final production sandbox.
+outside its private temporary storage, and cgroup PID-limited, so it also
+covers the case where the executor has no privilege to give away.
+
+`sandbox-smoke` covers the other case, and the one a deployment actually runs:
+a service that starts as root, on a network, launching workers that get
+neither. It keeps the container's network on purpose — that is what makes the
+worker's own refusal to reach it worth measuring — and runs the sandbox suite
+plus the real worker end to end.
+
+```powershell
+docker compose -f docker/web/compose.yml run --rm sandbox-smoke
+```
+
+Every worker runs confined either way: no network, no capabilities, no
+privileges to gain, `TMPDIR` and `HOME` inside its own job directory, an
+environment rebuilt from an allowlist, and never as root.
+`ORCA_WEB_WORKER_SANDBOX` defaults to `required` and fails a job closed when a
+control cannot be applied; `off` disables it for a host that cannot provide the
+Linux controls. `ORCA_WEB_WORKER_USER` names the numeric `uid[:gid]` a root
+executor switches its workers to, and is required of one.
+[ADR 0003](../../docs/web/adr/0003-worker-sandbox.md) records why these are
+seccomp and `prctl` rather than namespaces.
+
+## Generate SBOMs and scan dependencies
+
+After building `orca-web-build:latest`, run the pinned Syft and Grype toolchain:
+
+```powershell
+docker compose -f docker/web/compose.yml build security-scan
+docker compose -f docker/web/compose.yml run --rm security-scan
+```
+
+The command inventories the image and the frontend lockfile, writes CycloneDX
+SBOMs and complete vulnerability reports under `artifacts/web-security/`, and
+fails on fixable High or Critical findings. See
+[security-scanning.md](../../docs/web/security-scanning.md) for artifact names,
+the scanner update procedure, the socket-free scanner boundary, and native C++
+coverage limitations.
 
 The smoke check runs the focused manifest, protocol, request, project-archive,
 settings-catalog, profile-compatibility, core-color, and flush-volume

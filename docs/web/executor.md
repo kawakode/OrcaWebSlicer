@@ -29,7 +29,49 @@ the worker has not exited.
 The container remains a second boundary. The `executor-smoke` service runs as
 an unprivileged user with no network, no capabilities, no-new-privileges, a
 read-only root filesystem, private temporary storage, and a cgroup PID limit.
-The final production container and sandbox choice remains a G6 decision.
+
+## Sandbox
+
+Resources are bounded above; everything else a worker must not reach is
+confined by `scripts/web_worker_sandbox.py`, which the executor applies in the
+child between `fork` and `exec`. [ADR 0003](adr/0003-worker-sandbox.md) records
+why each control uses the mechanism it does, and what the runtime measurably
+refused.
+
+| Control | What the worker gets |
+| --- | --- |
+| `network` | A seccomp filter fails `socket()` with `EAFNOSUPPORT` for every address family but `AF_UNIX` |
+| `no_new_privileges` | `PR_SET_NO_NEW_PRIVS`, which also lets an unprivileged process install that filter |
+| `capabilities` | Ambient set cleared, bounding set dropped |
+| `user` | Never root: a privileged executor switches to `ORCA_WEB_WORKER_USER`, an unprivileged one keeps the account it has |
+| `private_tmp` | `TMPDIR` and `HOME` inside the job directory, `0700` |
+| `environment` | Rebuilt from an allowlist: `PATH`, `LANG`, `LC_ALL`, `TZ`, `ORCA_SLICER_RESOURCES`, and `ORCA_WEB_MAX_*` |
+
+The applied controls are reported in the executor summary, so a deployment can
+assert what actually held rather than what was configured.
+
+`required` is the default and fails closed: a control that cannot be applied
+raises before the worker starts, as `sandbox_network_denial_unavailable`,
+`sandbox_privileged_executor` (a root executor that named no worker user),
+`sandbox_user_unavailable`, `sandbox_job_directory_unreachable` (a state root
+the worker user cannot traverse), `sandbox_unsupported_platform`, or
+`sandbox_unsupported_architecture`. `off` applies nothing and exists for hosts
+that cannot provide the Linux controls at all.
+
+A root executor keeps four capabilities to build that sandbox and one to see
+its results: `CAP_CHOWN` to hand the job directory over, `CAP_SETUID` and
+`CAP_SETGID` to switch the worker, `CAP_SETPCAP` to drop the worker's bounding
+set, and `CAP_DAC_OVERRIDE` to read back what the worker published into a
+directory it now owns.
+
+Switching users hands the job directory over with it: every staged file becomes
+read-only and owned by the worker user, and the directory itself stays `0700`,
+so the handover narrows who can reach the job rather than widening it. A job
+directory containing a symbolic link is refused rather than followed.
+
+One worker uid is shared by concurrent jobs, so a compromised worker could read
+a concurrently running job's directory. ADR 0003 records that residual risk and
+what closing it would take.
 
 ## Output controls
 
@@ -108,6 +150,11 @@ limits are milliseconds.
 | `ORCA_WEB_MAX_EVENT_LINE_BYTES` | 65536 | One NDJSON record |
 | `ORCA_WEB_MAX_EVENTS` | 4096 | Parsed record count |
 | `ORCA_WEB_MAX_LOG_BYTES` | 1048576 | Total worker stderr |
+
+| Environment variable | Default | Enforcement |
+| --- | --- | --- |
+| `ORCA_WEB_WORKER_SANDBOX` | `required` | `required` fails closed, `off` applies nothing |
+| `ORCA_WEB_WORKER_USER` | unset | Numeric `uid[:gid]`; required of a root executor, ignored by an unprivileged one |
 
 The command-line wrapper prints one compact executor summary. The
 [API](api.md) imports `execute_worker` directly and receives the validated

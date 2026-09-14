@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 from web_job_directory import JobDirectoryLimits, limits_from_environment as job_limits_from_environment
 from web_profile_catalog import vendors_from_environment
 from web_worker_executor import ExecutorLimits, limits_from_environment as executor_limits_from_environment
+from web_worker_sandbox import SandboxError, SandboxPolicy, policy_from_environment
 
 from . import REPO_ROOT
 from .errors import ApiError
@@ -27,6 +28,7 @@ class ApiConfig:
     max_concurrent_jobs: int = 2
     executor_limits: ExecutorLimits = dataclasses.field(default_factory=ExecutorLimits)
     job_limits: JobDirectoryLimits = dataclasses.field(default_factory=JobDirectoryLimits)
+    sandbox: SandboxPolicy = dataclasses.field(default_factory=SandboxPolicy)
     # Serving the built browser screen from the API keeps the app on one origin.
     # When it is absent the API is a bare JSON service and the Vite dev server
     # proxies to it instead.
@@ -47,6 +49,10 @@ class ApiConfig:
             raise ApiError("invalid_api_configuration", "A worker command must be configured.", 500)
         self.executor_limits.validate()
         self.job_limits.validate()
+        try:
+            self.sandbox.validate()
+        except SandboxError as error:
+            raise ApiError("invalid_api_configuration", str(error), 500) from error
 
 
 def from_environment() -> ApiConfig:
@@ -62,6 +68,10 @@ def from_environment() -> ApiConfig:
         ) from error
 
     dist = Path(os.environ.get("ORCA_WEB_FRONTEND_DIST") or repo_root / "web" / "frontend" / "dist")
+    try:
+        sandbox = policy_from_environment()
+    except SandboxError as error:
+        raise ApiError("invalid_api_configuration", str(error), 500) from error
     config = ApiConfig(
         repo_root=repo_root,
         state_root=state_root,
@@ -70,6 +80,7 @@ def from_environment() -> ApiConfig:
         max_concurrent_jobs=max_concurrent_jobs,
         executor_limits=executor_limits_from_environment(),
         job_limits=job_limits_from_environment(),
+        sandbox=sandbox,
         frontend_dist=dist if dist.is_dir() else None,
     )
     config.validate()

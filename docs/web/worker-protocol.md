@@ -173,6 +173,11 @@ contract before returning it to a future API.
 
 ## Event transport
 
+Stdout carries events and nothing else. The worker registers a stderr logging
+sink before it can emit a record, because Boost.Log installs its own default
+sink on the first record when none is registered and that sink writes to
+stdout; one engine diagnostic would otherwise corrupt the event stream.
+
 Each stdout line is one complete compact JSON object. Every event contains
 `protocol_version`, `job_id`, a zero-based monotonically increasing `sequence`,
 and `type`. State values are `accepted`, `running`, `succeeded`, `failed`, and

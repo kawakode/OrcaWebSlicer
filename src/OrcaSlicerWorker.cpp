@@ -26,6 +26,8 @@
 #include <string_view>
 #include <vector>
 
+#include <boost/log/trivial.hpp>
+#include <boost/log/utility/setup/console.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 
@@ -249,6 +251,31 @@ nlohmann::json request_validation_response(const Slic3r::Web::SinglePlateSliceRe
             });
     }
     return response;
+}
+
+// Boost.Log installs its default sink on the first record when no sink is
+// registered, and in this build that sink writes to stdout, which this process
+// reserves for the protocol stream. Registering one stderr sink up front
+// replaces it, so an engine diagnostic can never corrupt an event.
+void route_engine_logs_to_stderr()
+{
+    boost::log::add_console_log(std::cerr, boost::log::keywords::auto_flush = true);
+}
+
+// The 3MF importer writes a backup tree under `temporary_dir()`, which the
+// desktop sets and a worker otherwise leaves empty. Empty resolves to
+// "/orcaslicer_model" at the filesystem root: unwritable for an unprivileged
+// worker, and shared between jobs for a privileged one. The process temporary
+// directory is neither, and the executor points it inside the job.
+void initialize_temporary_dir()
+{
+    std::error_code failure;
+    const std::filesystem::path temporary = std::filesystem::temp_directory_path(failure);
+    if (failure) {
+        BOOST_LOG_TRIVIAL(warning) << "No usable temporary directory: " << failure.message();
+        return;
+    }
+    Slic3r::set_temporary_dir(temporary.string());
 }
 
 bool initialize_resources(const char *executable, std::string &error)
@@ -502,6 +529,9 @@ void finish_timing(Slic3r::Web::WorkerResult &result,
 
 int main(int argc, char **argv)
 {
+    route_engine_logs_to_stderr();
+    initialize_temporary_dir();
+
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::cout << "orca-slicer-worker " << SLIC3R_VERSION
                   << " (worker protocol " << Slic3r::Web::WORKER_PROTOCOL_VERSION << ")\n";

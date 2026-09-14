@@ -3,11 +3,13 @@
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
 
 from web_worker_executor import ExecutorError, execute_worker, limits_from_environment
+from web_worker_sandbox import SandboxError, policy_from_environment
 
 
 def require(condition, message):
@@ -43,7 +45,10 @@ def main():
             f"G28 ; {gcode_sentinel}"
         )
         manifest.write_text(json.dumps(request), encoding="utf-8")
-        execution = execute_worker([str(worker)], manifest, limits_from_environment())
+        policy = policy_from_environment()
+        execution = execute_worker(
+            [str(worker)], manifest, limits_from_environment(), sandbox=policy
+        )
 
         require(execution.status == "completed", execution.summary())
         require(execution.succeeded, execution.summary())
@@ -58,6 +63,18 @@ def main():
         for sentinel in (model_sentinel, gcode_sentinel, credential_sentinel):
             require(sentinel not in captured, "Worker diagnostics exposed job content.")
 
+        # The real worker slices the same way inside its sandbox, and that
+        # sandbox is the one the environment configured rather than a default.
+        expected = {"environment", "no_new_privileges", "network", "capabilities", "user"}
+        require(expected <= set(execution.sandbox), execution.summary())
+        require((job_root / "tmp").is_dir(), "Worker ran without its private temporary directory.")
+        if policy.user is not None and os.geteuid() == 0:
+            published = (job_root / "result.gcode").stat()
+            require(
+                published.st_uid == policy.user[0],
+                "The worker did not publish its artifacts as the configured user.",
+            )
+
         print(json.dumps(execution.summary(), separators=(",", ":")))
     return 0
 
@@ -65,6 +82,6 @@ def main():
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (ExecutorError, OSError, RuntimeError, json.JSONDecodeError) as error:
+    except (ExecutorError, SandboxError, OSError, RuntimeError, json.JSONDecodeError) as error:
         print(f"executor integration check failed: {error}", file=sys.stderr)
         raise SystemExit(1)

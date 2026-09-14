@@ -14,7 +14,14 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from web_worker_sandbox import (
+    SandboxError,
+    SandboxPolicy,
+    policy_from_environment as sandbox_policy_from_environment,
+    prepare as prepare_sandbox,
+)
 
 
 TERMINAL_STATES = {"succeeded", "failed", "canceled"}
@@ -66,6 +73,7 @@ class ExecutionResult:
     stderr: str
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    sandbox: Tuple[str, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -84,6 +92,7 @@ class ExecutionResult:
             "event_bytes": self.event_bytes,
             "log_bytes": self.log_bytes,
             "stderr_truncated": self.log_bytes > self.captured_log_bytes,
+            "sandbox": list(self.sandbox),
             "outcome": self.result.get("outcome") if self.result else None,
             "error": (
                 {"code": self.error_code, "message": self.error_message}
@@ -397,6 +406,7 @@ def execute_worker(
     cancellation_requested: Optional[threading.Event] = None,
     event_observer: Optional[Callable[[Dict[str, Any]], None]] = None,
     manifest_flag: str = "--slice-manifest",
+    sandbox: Optional[SandboxPolicy] = None,
 ) -> ExecutionResult:
     """Run one worker to completion and return its validated terminal contract.
 
@@ -409,6 +419,10 @@ def execute_worker(
     (`--slice-manifest` or `--inspect-manifest`); the envelope, event stream,
     result.json, and exit-code contract validated below are identical either
     way, so only the flag passed to the worker process changes.
+
+    `sandbox` is the confinement the worker must run under, defaulting to the
+    required one. A control that cannot be applied fails the job here rather
+    than starting a worker with more reach than the deployment promised.
     """
     limits.validate()
     if not worker_command:
@@ -420,12 +434,22 @@ def execute_worker(
         raise ExecutorError(
             "job_directory_not_fresh", "Executor job directory already contains result.json."
         )
-    preexec_fn = _linux_limit_setup(limits)
+    apply_limits = _linux_limit_setup(limits)
+    try:
+        setup = prepare_sandbox(sandbox if sandbox is not None else SandboxPolicy(), job_root)
+    except SandboxError as error:
+        raise ExecutorError(error.code, str(error)) from error
+
+    def preexec_fn() -> None:
+        apply_limits()
+        if setup.child_setup is not None:
+            setup.child_setup()
 
     try:
         process = subprocess.Popen(
             [*worker_command, manifest_flag, str(manifest_path)],
             cwd=job_root,
+            env=setup.environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -508,6 +532,7 @@ def execute_worker(
             event_bytes=protocol.total_bytes,
             log_bytes=logs.total_bytes,
             captured_log_bytes=logs.captured_bytes,
+            sandbox=setup.controls,
             stderr=stderr,
             error_code=termination_code,
             error_message=termination_message,
@@ -527,6 +552,7 @@ def execute_worker(
             event_bytes=protocol.total_bytes,
             log_bytes=logs.total_bytes,
             captured_log_bytes=logs.captured_bytes,
+            sandbox=setup.controls,
             stderr=stderr,
             error_code=error.code,
             error_message=str(error),
@@ -541,6 +567,7 @@ def execute_worker(
         event_bytes=protocol.total_bytes,
         log_bytes=logs.total_bytes,
         captured_log_bytes=logs.captured_bytes,
+        sandbox=setup.controls,
         stderr=stderr,
     )
 
@@ -561,9 +588,13 @@ def main() -> int:
 
     try:
         execution = execute_worker(
-            [str(args.worker.resolve())], args.manifest, limits_from_environment(), cancellation
+            [str(args.worker.resolve())],
+            args.manifest,
+            limits_from_environment(),
+            cancellation,
+            sandbox=sandbox_policy_from_environment(),
         )
-    except ExecutorError as error:
+    except (ExecutorError, SandboxError) as error:
         print(json.dumps({"status": "failed", "error": {"code": error.code, "message": str(error)}}))
         return 2
 

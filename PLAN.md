@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-09
+Last updated: 2026-09-14
 
 ## Objective
 
@@ -35,7 +35,8 @@ The foundation is complete:
 
 Multi-filament landed after G5 closed and is described in section 18.
 
-The active gate is G6, production readiness. Nothing in it has started.
+The active gate is G6, production readiness. Its first batch, the worker
+sandbox, is described in section 14.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -251,11 +252,25 @@ verified in a browser the release depends on.
 
 ### 14. Harden isolation and deployment
 
-- [ ] Run workers as an unprivileged user with a read-only root filesystem,
+- [x] Run workers as an unprivileged user with a read-only root filesystem,
   private temporary storage, no network, dropped capabilities, and bounded
-  resources.
-- [ ] Select and document the production container/runtime isolation model.
-- [ ] Scan images and dependencies and generate an SBOM.
+  resources. The executor applies everything a process can apply to itself —
+  a seccomp filter that denies every address family but `AF_UNIX`,
+  `PR_SET_NO_NEW_PRIVS`, capability drop, the user switch with the job
+  directory handed over, `TMPDIR` and `HOME` inside the job, and an
+  allowlisted environment — and fails the job closed when one cannot hold. The
+  read-only root filesystem stays the container's, because a process cannot
+  give itself one without namespaces the runtime refuses.
+- [x] Select and document the production container/runtime isolation model:
+  [ADR 0003](docs/web/adr/0003-worker-sandbox.md). It also records the residual
+  shared-uid risk, and the two engine defects that running a worker
+  unprivileged for the first time surfaced — a 3MF backup tree written to
+  `/orcaslicer_model` at the filesystem root, and Boost.Log's default sink
+  writing engine diagnostics onto the protocol's stdout.
+- [x] Scan the canonical web image and frontend dependencies with pinned Syft
+  and Grype versions, retain CycloneDX SBOMs and complete JSON findings, and
+  fail the release gate on fixable High or Critical vulnerabilities. Static
+  custom-CMake dependencies remain an explicitly documented cataloger gap.
 - [ ] Add health checks, graceful shutdown, deployment rollback, and disaster
   recovery procedures.
 
@@ -350,7 +365,9 @@ A choice is made only when its phase begins. These are the ones still open:
 - Database, queue, and object-store products. Job state and artifacts live on
   the job-directory filesystem behind `JobService` until local throughput and
   artifact sizes are measured.
-- Production hosting and sandbox technology.
+- Production hosting, and with it whether each job gets its own container or
+  its own uid. The in-process sandbox in
+  [ADR 0003](docs/web/adr/0003-worker-sandbox.md) composes with either.
 - Authentication provider and billing model.
 
 Settled since: the frontend and API frameworks in

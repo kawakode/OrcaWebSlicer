@@ -58,19 +58,26 @@ RUN case "$(uname -m)" in \
 # the smoke services, and the baseline tooling all share one environment. This
 # layer stays last so a dependency bump never rebuilds the C++ toolchain.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends python3-pip \
-    && pip3 install --break-system-packages --no-cache-dir \
-        "fastapi==0.115.6" \
-        "uvicorn==0.34.0" \
+    && python3 -m pip install --break-system-packages --ignore-installed --no-cache-dir \
+        "pip==26.2" \
+        "setuptools==83.0.0" \
+        "wheel==0.46.2" \
+        "Mako==1.3.12" \
+        "fastapi==0.141.1" \
+        "starlette==1.6.0" \
+        "uvicorn==0.53.0" \
         "httpx==0.28.1" \
-        "python-multipart==0.0.20" \
+        "python-multipart==0.0.32" \
+    && apt-get purge -y python3-mako python3-pip python3-setuptools python3-wheel \
     && rm -rf /var/lib/apt/lists/*
 
 # Node builds and tests the browser screen only. It is pinned and installed from
 # the official tarball for the same reason CMake is: the distribution package
 # would drift from what CI uses. Declared here, not at the top, so bumping it
 # never invalidates the C++ toolchain layers.
-ARG NODE_VERSION=22.14.0
+ARG NODE_VERSION=22.23.2
 
 RUN case "$(uname -m)" in \
         x86_64|amd64) node_arch="x64" ;; \

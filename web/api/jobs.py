@@ -543,6 +543,7 @@ class JobService:
                 record.cancellation,
                 lambda event: self._observe(record, event),
                 manifest_flag=manifest_flag,
+                sandbox=self._config.sandbox,
             )
         except ExecutorError as error:
             self._log.warning("job executor failure job_id=%s code=%s", job_id, error.code)

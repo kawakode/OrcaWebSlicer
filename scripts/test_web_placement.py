@@ -59,6 +59,7 @@ from web.api.app import create_app  # noqa: E402
 from web_baseline import summarize_gcode  # noqa: E402
 from web_job_directory import JobDirectoryLimits  # noqa: E402
 from web_worker_executor import ExecutorLimits  # noqa: E402
+from web_worker_sandbox import policy_from_environment  # noqa: E402
 
 TERMINAL_STATES = {"succeeded", "failed", "canceled"}
 
@@ -271,6 +272,9 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="orca-web-placement-") as workspace:
         root = Path(workspace)
+        # A deployment's state root is traversable; this stand-in has to be too,
+        # or a worker handed its job directory cannot reach it.
+        root.chmod(0o755)
         config = ApiConfig(
             repo_root=REPO_ROOT,
             state_root=root / "state",
@@ -282,6 +286,7 @@ def main():
                 cpu_time_ms=int(args.timeout_seconds * 1000),
             ),
             job_limits=JobDirectoryLimits(),
+            sandbox=policy_from_environment(),
         )
         with TestClient(create_app(config)) as client:
             upload_id = upload_fixture(client)

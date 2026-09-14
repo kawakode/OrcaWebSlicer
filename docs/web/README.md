@@ -15,8 +15,10 @@ This directory is the source of truth for the web effort:
 - [Browser screen](frontend.md)
 - [Layer preview format version 1](preview-format.md)
 - [Scene format version 1](scene-format.md)
+- [Image and dependency scanning](security-scanning.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
+- [ADR 0003: worker sandbox and production isolation](adr/0003-worker-sandbox.md)
 
 ## Delivery gates
 
@@ -32,7 +34,7 @@ prerequisites pass.
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
 | G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Complete |
-| G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
+| G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | In progress |
 
 ## Engineering rules
 
@@ -70,6 +72,16 @@ produced G-code by `scripts/test_web_placement.py`, and the fixture matrix now
 covers support, multipart, invalid configuration, Unicode 3MF, and the
 output-size limit across all three [baseline lanes](baseline.md). G5 is
 complete; G6, production readiness, is the next gate.
+
+G6 has begun with the worker sandbox and a reproducible SBOM and vulnerability
+scan. Every worker now runs with no network, no
+capabilities, no privileges to gain, a temporary directory inside its own job,
+an environment rebuilt from an allowlist, and never as root; a control that
+cannot be applied fails the job before the worker starts.
+[ADR 0003](adr/0003-worker-sandbox.md) records why the mechanism is a seccomp
+filter rather than a namespace — every `unshare` flag returns `EPERM` under the
+canonical runtime, including as root — and the two engine defects that running
+a worker unprivileged for the first time surfaced.
 
 Multi-filament landed after that gate closed: a slice request names 1-16
 filament profiles and assigns each placed object to one of them, from the
