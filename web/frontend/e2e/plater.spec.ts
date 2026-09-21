@@ -205,6 +205,10 @@ test("the placement the plater shows is the placement that gets sliced", async (
   }
 
   // A pure translation is the exact check: every extrusion-width effect cancels.
+  // The finished slice opened Preview; the plate is back under Prepare, with
+  // the placement it was sliced at.
+  await page.getByTestId("tab-prepare").click();
+  await expect(page.getByTestId("plater-x")).toHaveValue("60");
   await page.getByTestId("plater-x").fill("100");
   const second = await slice(page, first);
   const after = extrudedBounds(await (await page.request.get(`/api/v1/jobs/${second}/artifacts/gcode`)).text());

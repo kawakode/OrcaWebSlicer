@@ -1,5 +1,6 @@
 import { useId, useMemo } from "react";
 
+import { groupIcon } from "./icons";
 import type { SettingDefinition, SettingsCatalog } from "./types";
 
 /**
@@ -37,7 +38,10 @@ export function SettingsForm(props: {
     <div className="settings">
       {grouped.map((group) => (
         <fieldset key={group.id} data-testid={`setting-group-${group.id}`}>
-          <legend>{group.label}</legend>
+          <legend>
+            <img src={groupIcon(group.id)} alt="" width={18} height={18} />
+            {group.label}
+          </legend>
           {group.settings.map((setting) => {
             // A setting the engine gates on another one is disabled only once
             // the user has switched that other one off here. While it is
@@ -109,7 +113,7 @@ function SettingControl(props: {
         </p>
       )}
       {reasonId && (
-        <p className="tooltip" id={reasonId}>
+        <p className="tooltip reason" id={reasonId}>
           {disabledReason}
         </p>
       )}

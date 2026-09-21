@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import {
   artifactUrl,
@@ -11,6 +11,7 @@ import {
   uploadModel,
 } from "./api";
 import { filamentCss } from "./filamentColors";
+import { icons } from "./icons";
 import { LayerPreviewPanel } from "./LayerPreview";
 import { Plater } from "./Plater";
 import { SettingsForm } from "./SettingsForm";
@@ -58,6 +59,7 @@ export default function App() {
   const [job, setJob] = useState<Job | null>(null);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<View>("prepare");
 
   // The printer list is the unnarrowed one; the rest is filtered per printer.
   useEffect(() => {
@@ -126,6 +128,7 @@ export default function App() {
   // immutable upload.
   const chooseFile = useCallback(async (chosen: File | null) => {
     setFile(chosen);
+    setView("prepare");
     setUpload(null);
     setPlacements(null);
     setJob(null);
@@ -219,21 +222,31 @@ export default function App() {
         ? "Wait for the current job to finish before retrying."
         : undefined;
 
-  return (
-    <main>
-      <header>
-        <h1>OrcaWebSlicer</h1>
-        <p className="subtitle">
-          Upload one model, pick bundled profiles, and slice it in an isolated native worker.
-        </p>
-      </header>
 
-      <section>
-        <h2>Model</h2>
-        {/* Wrapped in its own label like every other control here: a bare file
-            input has no accessible name at all, which the axe pass flags. */}
-        <label>
-          <span>Model file</span>
+  // The desktop's two workspace tabs. Preview only exists once a job has
+  // published one; until then the plate is the only thing to show.
+  const previewJobId = job?.artifacts.some((artifact) => artifact.name === "preview") ? job.job_id : null;
+  const shown: View = previewJobId ? view : "prepare";
+  // A new preview is what a slice was for, so it is shown as soon as it
+  // exists, the way the desktop switches to Preview after slicing.
+  useEffect(() => {
+    if (previewJobId) setView("preview");
+  }, [previewJobId]);
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <img src={icons.logo} alt="" width={24} height={24} />
+          <h1>OrcaWebSlicer</h1>
+        </div>
+
+        {/* A styled label around a visually hidden file input: the input is
+            still the real, focusable control (its focus ring is drawn on the
+            label), and the label text is its accessible name. */}
+        <label className="import" title="Import an STL, OBJ, or 3MF model">
+          <img src={icons.open} alt="" width={20} height={20} />
+          <span>Import model</span>
           <input
             type="file"
             accept=".stl,.obj,.3mf"
@@ -241,167 +254,292 @@ export default function App() {
             onChange={(event) => void chooseFile(event.target.files?.[0] ?? null)}
           />
         </label>
-        {file && (
-          <p data-testid="selected-file">
-            {file.name} — {file.size.toLocaleString()} bytes
-          </p>
-        )}
-      </section>
 
-      <section>
-        <h2>Profiles</h2>
-        <ProfileSelect
-          label="Printer"
-          testId="printer-select"
-          value={machine}
-          entries={printers}
-          onChange={setMachine}
-        />
-        <ProfileSelect
-          label="Process"
-          testId="process-select"
-          value={process}
-          entries={catalog.process}
-          onChange={setProcess}
-        />
-        <div className="filament-slots" data-testid="filament-slots">
-          {filaments.map((value, index) => (
-            <div className="filament-slot" key={index}>
-              <FilamentSlotSelect
-                index={index}
-                total={filaments.length}
-                value={value}
-                entries={catalog.filament}
-                onChange={(next) => updateFilament(index, next)}
-              />
-              {filaments.length > 1 && (
-                <button
-                  type="button"
-                  data-testid={`filament-remove-${index}`}
-                  onClick={() => removeFilament(index)}
-                >
-                  Remove
-                </button>
-              )}
-            </div>
-          ))}
+        <p className="project" title={file?.name}>
+          {file ? (
+            <span data-testid="selected-file">
+              {file.name} — {file.size.toLocaleString()} bytes
+            </span>
+          ) : (
+            "No model imported"
+          )}
+        </p>
+
+        <div className="tabs" role="tablist" aria-label="Workspace">
+          <WorkspaceTab id="prepare" icon={icons.prepare} label="Prepare" shown={shown} onSelect={setView} />
+          <WorkspaceTab
+            id="preview"
+            icon={icons.preview}
+            label="Preview"
+            shown={shown}
+            disabled={!previewJobId}
+            onSelect={setView}
+          />
+        </div>
+
+        <div className="topbar-actions">
           <button
             type="button"
-            data-testid="filament-add"
-            disabled={filaments.length >= MAX_FILAMENTS || catalog.filament.length === 0}
-            onClick={addFilament}
+            className="primary"
+            data-testid="slice"
+            disabled={!ready}
+            aria-describedby={sliceHint ? "slice-hint" : undefined}
+            onClick={slice}
           >
-            Add filament
+            Slice plate
           </button>
+          <button
+            type="button"
+            data-testid="cancel"
+            disabled={!active || busy}
+            aria-describedby={cancelHint ? "cancel-hint" : undefined}
+            onClick={() => job && run(() => cancelJob(job.job_id))}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="retry"
+            disabled={!job || active || busy}
+            aria-describedby={retryHint ? "retry-hint" : undefined}
+            onClick={() => job && run(() => retryJob(job.job_id))}
+          >
+            Retry
+          </button>
+          {succeeded && (
+            <a className="button primary" data-testid="download-gcode" href={artifactUrl(job.job_id, "gcode")} download>
+              Export G-code
+            </a>
+          )}
+          {job?.artifacts.some((artifact) => artifact.name === "result") && (
+            <a className="button" data-testid="download-result" href={artifactUrl(job.job_id, "result")} download>
+              Report
+            </a>
+          )}
         </div>
-      </section>
+      </header>
 
-      {upload && machine && process && filamentsChosen && (
-        <section>
-          <h2>Plate</h2>
-          <Plater
-            uploadId={upload.upload_id}
-            profiles={{
-              machine_profile: machine,
-              process_profile: process,
-              // Scene inspection names one filament regardless of how many
-              // slots the slice request will carry; the first slot answers.
-              filament_profile: filaments[0],
-            }}
-            disabled={active}
-            filamentSlots={filamentNames}
-            onPlacements={setPlacements}
-          />
-        </section>
-      )}
+      <div className="workspace">
+        <aside className="sidebar" aria-label="Printer, filament, and process">
+          <Panel id="printer" icon={icons.printer} title="Printer">
+            <ProfileSelect
+              label="Printer"
+              testId="printer-select"
+              value={machine}
+              entries={printers}
+              onChange={setMachine}
+            />
+          </Panel>
 
-      <section>
-        <h2>Overrides</h2>
-        {settingsCatalog ? (
-          <SettingsForm
-            catalog={settingsCatalog}
-            values={settings}
-            disabled={active}
-            onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
-          />
-        ) : (
-          <p data-testid="settings-unavailable" role="status">
-            This deployment&rsquo;s slicing engine did not describe its settings, so the selected
-            profiles are used unchanged.
-          </p>
-        )}
-      </section>
+          <Panel
+            id="filament"
+            icon={icons.filament}
+            title="Filament"
+            action={
+              <button
+                type="button"
+                className="icon-button"
+                data-testid="filament-add"
+                title="Add filament"
+                aria-label="Add filament"
+                disabled={filaments.length >= MAX_FILAMENTS || catalog.filament.length === 0}
+                onClick={addFilament}
+              >
+                <img src={icons.addFilament} alt="" width={16} height={16} />
+              </button>
+            }
+          >
+            <div className="filament-slots" data-testid="filament-slots">
+              {filaments.map((value, index) => (
+                <div className="filament-slot" key={index}>
+                  <FilamentSlotSelect
+                    index={index}
+                    total={filaments.length}
+                    value={value}
+                    entries={catalog.filament}
+                    onChange={(next) => updateFilament(index, next)}
+                  />
+                  {filaments.length > 1 && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      data-testid={`filament-remove-${index}`}
+                      title={`Remove filament ${index + 1}`}
+                      aria-label={`Remove filament ${index + 1}`}
+                      onClick={() => removeFilament(index)}
+                    >
+                      <img src={icons.removeFilament} alt="" width={16} height={16} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </Panel>
 
-      <section className="actions">
-        <button
-          type="button"
-          data-testid="slice"
-          disabled={!ready}
-          aria-describedby={sliceHint ? "slice-hint" : undefined}
-          onClick={slice}
+          <Panel id="process" icon={icons.process} title="Process">
+            <ProfileSelect
+              label="Process"
+              testId="process-select"
+              value={process}
+              entries={catalog.process}
+              onChange={setProcess}
+            />
+            {settingsCatalog ? (
+              <SettingsForm
+                catalog={settingsCatalog}
+                values={settings}
+                disabled={active}
+                onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
+              />
+            ) : (
+              <p className="note" data-testid="settings-unavailable" role="status">
+                This deployment&rsquo;s slicing engine did not describe its settings, so the selected
+                profiles are used unchanged.
+              </p>
+            )}
+          </Panel>
+        </aside>
+
+        <main
+          className="viewport"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            // Dropping a model onto the plate imports it, as on the desktop.
+            event.preventDefault();
+            const dropped = event.dataTransfer.files?.[0];
+            if (dropped) void chooseFile(dropped);
+          }}
         >
-          Slice
-        </button>
-        <button
-          type="button"
-          data-testid="cancel"
-          disabled={!active || busy}
-          aria-describedby={cancelHint ? "cancel-hint" : undefined}
-          onClick={() => job && run(() => cancelJob(job.job_id))}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          data-testid="retry"
-          disabled={!job || active || busy}
-          aria-describedby={retryHint ? "retry-hint" : undefined}
-          onClick={() => job && run(() => retryJob(job.job_id))}
-        >
-          Retry
-        </button>
-        {succeeded && (
-          <a data-testid="download-gcode" href={artifactUrl(job.job_id, "gcode")} download>
-            Download G-code
-          </a>
-        )}
-        {job?.artifacts.some((artifact) => artifact.name === "result") && (
-          <a data-testid="download-result" href={artifactUrl(job.job_id, "result")} download>
-            Download report
-          </a>
-        )}
-      </section>
-      {sliceHint && (
-        <p className="hint" id="slice-hint">
-          {sliceHint}
-        </p>
-      )}
-      {cancelHint && (
-        <p className="hint" id="cancel-hint">
-          {cancelHint}
-        </p>
-      )}
-      {retryHint && (
-        <p className="hint" id="retry-hint">
-          {retryHint}
-        </p>
-      )}
+          <div
+            className="view"
+            role="tabpanel"
+            id="panel-prepare"
+            aria-labelledby="tab-prepare"
+            hidden={shown !== "prepare"}
+          >
+            {upload && machine && process && filamentsChosen ? (
+              // Stays mounted while Preview is showing, so returning to the
+              // plate keeps every edit made on it.
+              <Plater
+                uploadId={upload.upload_id}
+                profiles={{
+                  machine_profile: machine,
+                  process_profile: process,
+                  // Scene inspection names one filament regardless of how many
+                  // slots the slice request will carry; the first slot answers.
+                  filament_profile: filaments[0],
+                }}
+                disabled={active}
+                filamentSlots={filamentNames}
+                onPlacements={setPlacements}
+              />
+            ) : (
+              <div className="empty-plate">
+                <img src={icons.open} alt="" width={48} height={48} />
+                <p>
+                  {upload
+                    ? "Choose a printer, process, and filament to lay out the plate."
+                    : "Import a model, or drop one here, to place it on the plate."}
+                </p>
+              </div>
+            )}
+          </div>
 
-      {failure && (
-        <p className="failure" data-testid="failure" role="alert">
-          <strong>{failure.code}</strong> {failure.message}
-        </p>
-      )}
+          <div
+            className="view"
+            role="tabpanel"
+            id="panel-preview"
+            aria-labelledby="tab-preview"
+            hidden={shown !== "preview"}
+          >
+            {previewJobId && <LayerPreviewPanel jobId={previewJobId} />}
+          </div>
 
-      {job && <JobPanel job={job} />}
+          <div className="status-dock">
+            {(sliceHint || cancelHint || retryHint) && (
+              <div className="action-hints">
+                {sliceHint && (
+                  <p className="hint" id="slice-hint">
+                    <strong>Slice:</strong> {sliceHint}
+                  </p>
+                )}
+                {cancelHint && (
+                  <p className="hint" id="cancel-hint">
+                    <strong>Cancel:</strong> {cancelHint}
+                  </p>
+                )}
+                {retryHint && (
+                  <p className="hint" id="retry-hint">
+                    <strong>Retry:</strong> {retryHint}
+                  </p>
+                )}
+              </div>
+            )}
 
-      {job?.artifacts.some((artifact) => artifact.name === "preview") && (
-        <section>
-          <h2>Layer preview</h2>
-          <LayerPreviewPanel jobId={job.job_id} />
-        </section>
-      )}
-    </main>
+            {failure && (
+              <p className="failure notice" data-testid="failure" role="alert">
+                <strong>{failure.code}</strong> {failure.message}
+              </p>
+            )}
+
+            {job && <JobPanel job={job} />}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+type View = "prepare" | "preview";
+
+/** One of the desktop's top-bar workspace tabs. */
+function WorkspaceTab(props: {
+  id: View;
+  icon: string;
+  label: string;
+  shown: View;
+  disabled?: boolean;
+  onSelect: (view: View) => void;
+}) {
+  const selected = props.shown === props.id;
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={`tab-${props.id}`}
+      data-testid={`tab-${props.id}`}
+      aria-selected={selected}
+      aria-controls={`panel-${props.id}`}
+      disabled={props.disabled}
+      title={props.disabled ? "Slice the plate to preview it." : undefined}
+      onClick={() => props.onSelect(props.id)}
+    >
+      <img src={props.icon} alt="" width={18} height={18} />
+      {props.label}
+    </button>
+  );
+}
+
+/** A sidebar section, titled the way the desktop's Printer/Filament/Process panels are. */
+function Panel(props: {
+  id: string;
+  icon: string;
+  title: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const headingId = `panel-${props.id}-title`;
+  return (
+    <section className="panel" aria-labelledby={headingId}>
+      <div className="panel-title">
+        <h2 id={headingId}>
+          <img src={props.icon} alt="" width={16} height={16} />
+          {props.title}
+        </h2>
+        {props.action}
+      </div>
+      <div className="panel-body">{props.children}</div>
+    </section>
   );
 }
 

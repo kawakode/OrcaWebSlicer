@@ -149,10 +149,15 @@ export function LayerPreviewPanel({ jobId }: { jobId: string }) {
     context.globalAlpha = 1;
   }, [index, segments, showTravels]);
 
+  // Redrawn whenever the canvas itself changes size, not only the window: a
+  // canvas in a workspace tab that was hidden has no size until it is shown.
   useEffect(() => {
     draw();
-    window.addEventListener("resize", draw);
-    return () => window.removeEventListener("resize", draw);
+    const element = canvas.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [draw]);
 
   const current: PreviewLayer | undefined = index?.layers[layer];

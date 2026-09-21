@@ -486,6 +486,12 @@ services:
 
   frontend-e2e:
     <<: *build-environment
+    environment:
+      <<: *build-environment-values
+      # The suite drives the browser screen against an API it starts itself,
+      # with no authenticating edge in front of it — the same explicit,
+      # local-development-only mode as the reference `api` service.
+      ORCA_WEB_AUTH_MODE: disabled
     working_dir: /workspace/web/frontend
     # Playwright needs its browsers and their system libraries; the cache volume
     # keeps that download out of every later run. Chrome, Edge, and Firefox are

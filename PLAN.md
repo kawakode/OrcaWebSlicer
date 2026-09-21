@@ -382,6 +382,106 @@ Deliberately not done, and why:
   that was not established, so no claim is made. It is upstream work the web
   tier does not depend on.
 
+### 19. Desktop-style interface
+
+The browser screen is rebuilt to look and work like the OrcaSlicer desktop
+application's Prepare/Preview workspace. No desktop UI code runs in the
+browser: wxWidgets and the desktop OpenGL viewer cannot, and compiling the
+desktop app to WebAssembly or streaming it over VNC would give up the
+per-owner isolation and quotas the service is built on.
+
+#### Step 1: layout and theme (done 2026-09-21)
+
+- [x] Dark title bar holding Import, the model name, the Prepare/Preview
+  workspace tabs, and the plate actions (Slice plate, Cancel, Retry, Export
+  G-code, Report).
+- [x] Sidebar with the desktop's Printer, Filament, and Process panels in the
+  desktop's order, with settings grouped under the engine's group titles and
+  the desktop's own group icons.
+- [x] Viewport with a canvas toolbar, the plate, and an Objects/Object
+  transform panel. The layer preview has a floating legend, and a status dock
+  holds hints, errors, and the job report.
+- [x] Slicing switches to Preview, and the plate stays mounted so it keeps
+  every edit. A model dropped on the viewport is imported.
+- [x] Icons imported from `resources/images`, not copied. Colors follow the
+  desktop palette in light and dark themes and are checked against WCAG AA.
+- [x] Every `data-testid` kept. The keyboard walk and the placement test are
+  updated for the new order, and the axe pass is unchanged.
+
+#### Step 2: a WebGL 3D plate and preview (planned)
+
+The 2D canvas stays. Headless Firefox, a release-blocking browser, has no
+WebGL in the test container, so the 2D renderers remain both the fallback and
+the renderer Firefox is verified with. WebGL is an enhancement chosen at run
+time, never a requirement.
+
+2a. Decision and renderer seam
+
+- [ ] Record ADR 0005: three.js (pinned, MIT, scanned by the existing Grype
+  gate) against raw WebGL2. The recommendation is three.js, for its camera,
+  picking, and line/instancing support. Record the bundle-size budget it may
+  add.
+- [ ] Extract the interface `PlaterCanvas` already implies (bed, draw items,
+  camera, select, move) so `Plater` keeps owning all state and either
+  renderer can be mounted. Do the same for the layer preview.
+- [ ] Choose the renderer by probing for a `webgl2` context, with a
+  `?renderer=2d|webgl` override so both paths can be tested in one browser.
+  The active renderer is exposed as a `data-renderer` attribute for tests.
+
+2b. 3D plate at parity
+
+- [ ] A perspective camera with orbit, pan, and zoom, and the desktop's view
+  presets (top, bottom, front, rear, left, right, isometric).
+- [ ] Shaded meshes with one buffer per source object, drawn instanced for
+  duplicates, which replaces the 20,000-triangle bounding-box budget. Measure
+  a frame-time budget up to the worker's million-triangle ceiling.
+- [ ] Selection outline, click-to-select by ray picking, and drag on the bed
+  plane, feeding the same `onSelect`/`onMove` the 2D canvas does.
+- [ ] The bed drawn as a grid within the printable-area shape the scene
+  already carries, with the printable-height volume outlined. Objects outside
+  it are tinted, matching the existing outside-the-build-volume notice.
+
+2c. Printer bed models and textures
+
+- [ ] Serve a printer profile's `bed_model` and `bed_texture` through a new,
+  owner-agnostic, allowlisted catalog route. Only files the bundled profile
+  tree names are served, with the same path-containment checks the catalog
+  applies, and a missing or unsupported file falls back to the grid.
+
+2d. 3D layer preview
+
+- [ ] Draw a contiguous range of layers stacked in 3D, with the desktop's
+  two-handled vertical layer-range slider and the horizontal within-layer
+  move slider. Layers are still fetched one at a time, now progressively and
+  under a memory budget, so a tall print never loads whole.
+- [ ] Extrusions drawn as instanced quads or tubes, using each batch's own
+  width and height, colored by feature type or by tool, with travels behind
+  the existing toggle.
+- [ ] Speed, fan, and temperature color schemes are not planned here: the
+  preview format does not carry them. They would need a `preview_version` 2
+  in the engine, which is its own batch.
+
+2e. Gizmos (optional, last)
+
+- [ ] On-canvas move arrows, a Z-rotation ring, and a uniform-scale handle,
+  limited to the transforms a slice request can express. Every gizmo action
+  stays a real control too, so the plate remains fully keyboard-operable.
+
+Step 2 exit criteria
+
+- [ ] The Playwright matrix passes with the 2D renderer everywhere and the
+  WebGL renderer in Chromium, Edge, and WebKit. That includes the placement
+  test (displayed placement equals sliced placement) under WebGL.
+- [ ] Firefox without WebGL selects the 2D renderer automatically, and a test
+  proves it.
+- [ ] The axe pass and the keyboard walk are unchanged under both renderers.
+- [ ] The added bundle size and the measured frame times are recorded in
+  `docs/web/frontend.md`, and ADR 0005 is accepted.
+
+Still out of scope: painting tools (supports, seams, colors), cut, text,
+measure, variable layer height, and multiple plates. Each needs engine or
+request-format support that a slice request cannot yet express.
+
 ## Required checks for every implementation batch
 
 - [ ] Add focused tests for every behavior change.

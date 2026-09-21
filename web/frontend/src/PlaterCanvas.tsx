@@ -328,10 +328,15 @@ export function PlaterCanvas(props: {
     }
   }, [bed, items, camera, onCamera]);
 
+  // Redrawn whenever the canvas itself changes size, not only the window: a
+  // canvas in a workspace tab that was hidden has no size until it is shown.
   useEffect(() => {
     draw();
-    window.addEventListener("resize", draw);
-    return () => window.removeEventListener("resize", draw);
+    const element = canvas.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => draw());
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [draw]);
 
   // Zoom needs a non-passive listener to keep the wheel from scrolling the page

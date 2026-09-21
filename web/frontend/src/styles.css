@@ -1,99 +1,258 @@
+/*
+ * OrcaSlicer's desktop look: a dark title bar holding the Prepare/Preview
+ * tabs and the slice action, a settings sidebar on the left, and the plate
+ * filling the rest.
+ *
+ * Colors follow the desktop's own palette (src/slic3r/GUI/Widgets/StateColor.cpp).
+ * Orca's brand teal, #009688, only reaches 3.7:1 against white text, below
+ * WCAG AA for body text, so it marks borders, focus, and selection, while
+ * filled buttons and teal text use the desktop's pressed shade (5.3:1).
+ */
 :root {
+  --brand: #009688;
+  --accent: #00796b;
+  --accent-hover: #00675b;
+  --on-accent: #ffffff;
+  /* Teal text on the page itself; the dark theme needs a lighter shade. */
+  --accent-text: #00796b;
+
+  --topbar: #262e30;
+  --topbar-raised: #3b4446;
+  --topbar-ink: #ffffff;
+  --topbar-muted: #c7cccd;
+
   --surface: #ffffff;
-  --ink: #14181d;
-  --muted: #5a6472;
-  --line: #d7dce3;
-  --accent: #00696e;
-  --failure: #a3202b;
+  --panel-title: #f4f4f4;
+  --canvas: #e8e8e8;
+  --raised: #ffffff;
+  --ink: #262e30;
+  --muted: #5f6566;
+  --line: #dbdbdb;
+  --field: #ffffff;
+  --failure: #c62828;
+  --shadow: 0 1px 4px rgb(0 0 0 / 0.14);
+
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --surface: #14181d;
-    --ink: #eef2f6;
-    --muted: #9aa5b4;
-    --line: #2c333c;
-    --accent: #5fd3d8;
-    --failure: #ff8a8a;
+    --accent-text: #4db6ac;
+    --surface: #2d2d31;
+    --panel-title: #36363c;
+    --canvas: #242428;
+    --raised: #36363c;
+    --ink: #efeff0;
+    --muted: #b2b3b9;
+    --line: #4a4a51;
+    --field: #242428;
+    --failure: #ff8a80;
+    --shadow: 0 1px 4px rgb(0 0 0 / 0.5);
   }
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   background: var(--surface);
   color: var(--ink);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
-main {
-  margin: 0 auto;
-  max-width: 46rem;
-  padding: 2rem 1.25rem 4rem;
-}
+/* ---- Application frame --------------------------------------------------- */
 
-h1 {
-  margin: 0;
-  font-size: 1.6rem;
-}
-
-h2 {
-  margin: 0 0 0.75rem;
-  font-size: 1rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.subtitle {
-  margin: 0.25rem 0 0;
-  color: var(--muted);
-}
-
-section {
-  margin-top: 2rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--line);
-}
-
-label {
+.app {
   display: grid;
-  grid-template-columns: 10rem 1fr;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(20rem, 24rem) 1fr;
+  min-height: 0;
+}
+
+.sidebar {
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.viewport {
+  display: flex;
+  flex-direction: column;
   gap: 0.75rem;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 0.75rem;
+  background: var(--canvas);
+}
+
+/* Narrow screens stack the sidebar above the plate and let the page scroll. */
+@media (max-width: 60rem) {
+  .app {
+    height: auto;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+/* ---- Title bar ----------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
   align-items: center;
-  margin-bottom: 0.6rem;
+  min-height: 3rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--topbar);
+  color: var(--topbar-ink);
 }
 
-label > span {
-  color: var(--muted);
+.brand {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 
-input,
-select {
-  padding: 0.45rem 0.5rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+.brand h1 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.import {
+  position: relative;
+  margin: 0;
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.import > span {
+  color: var(--topbar-ink);
+}
+
+.import img {
+  border-radius: 3px;
+  background: #ffffff;
+}
+
+.import:hover {
+  background: var(--topbar-raised);
+}
+
+/* The real file input covers its label, invisible but still the focusable,
+   clickable control; the label draws its focus ring instead. */
+.import input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.import:focus-within {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.project {
+  flex: 1 1 10rem;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--topbar-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  align-self: stretch;
+}
+
+.tabs [role="tab"] {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0 1rem;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--topbar-muted);
+  font-weight: 600;
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--brand);
+  background: var(--topbar-raised);
+  color: var(--topbar-ink);
+}
+
+.tabs [role="tab"]:hover:not(:disabled) {
+  color: var(--topbar-ink);
+}
+
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.topbar-actions button:not(.primary),
+.topbar-actions .button:not(.primary) {
+  border-color: var(--topbar-muted);
+  background: transparent;
+  color: var(--topbar-ink);
+}
+
+/* ---- Controls ------------------------------------------------------------ */
+
+button,
+.button {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
   background: transparent;
   color: inherit;
   font: inherit;
-  min-width: 0;
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  align-items: center;
-}
-
-button {
-  padding: 0.5rem 1.1rem;
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--surface);
-  font: inherit;
+  text-decoration: none;
   cursor: pointer;
+}
+
+button.primary,
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled),
+.button.primary:hover {
+  background: var(--accent-hover);
 }
 
 button:disabled {
@@ -101,19 +260,53 @@ button:disabled {
   cursor: not-allowed;
 }
 
-button[data-testid="cancel"],
-button[data-testid="retry"] {
-  background: transparent;
-  color: var(--accent);
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.icon-button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-color: transparent;
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--panel-title);
+}
+
+input,
+select {
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--field);
+  color: inherit;
+  font: inherit;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: var(--brand);
+}
+
+label {
+  display: grid;
+  grid-template-columns: minmax(6rem, 40%) 1fr;
+  gap: 0.25rem 0.75rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+label > span {
+  color: var(--muted);
 }
 
 a {
-  color: var(--accent);
-}
-
-progress {
-  width: 100%;
-  height: 0.6rem;
+  color: var(--accent-text);
 }
 
 code {
@@ -125,60 +318,159 @@ code {
   color: var(--failure);
 }
 
-ul {
+/* ---- Sidebar panels ------------------------------------------------------ */
+
+.panel + .panel {
+  border-top: 1px solid var(--line);
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 2.25rem;
+  padding: 0 0.5rem 0 0.75rem;
+  background: var(--panel-title);
+}
+
+.panel-title h2 {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.panel-body {
+  padding: 0.75rem;
+}
+
+.note {
   margin: 0.5rem 0 0;
-  padding-left: 1.25rem;
   color: var(--muted);
 }
 
-/* The generated settings form: one grid row per engine-declared setting. */
+/* One row per filament slot, its own select plus a remove button that only
+   exists once there is a second slot to remove. */
+.filament-slot {
+  display: flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.filament-slot label {
+  flex: 1;
+}
+
+.filament-slot .icon-button {
+  margin-bottom: 0.5rem;
+}
+
+/* A swatch identifying a filament slot's color, matching the plate exactly:
+   bordered so it stays legible against a same-toned background in either
+   theme. */
+.swatch {
+  display: inline-block;
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 2px;
+}
+
+.filament-swatch {
+  margin-right: 0.4rem;
+  vertical-align: -1px;
+  border: 1px solid var(--ink);
+}
+
+/* ---- Generated settings, laid out like the desktop's settings pages ------ */
+
+.settings {
+  margin-top: 0.75rem;
+}
+
 .settings fieldset {
-  margin: 0 0 1rem;
-  padding: 0.75rem 1rem 0.25rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border: 0;
 }
 
 .settings legend {
-  padding: 0 0.4rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 0.4rem;
+  padding: 0 0 0.3rem;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
 }
 
 .setting {
+  position: relative;
   display: grid;
-  grid-template-columns: 12rem 1fr;
-  gap: 0.5rem 0.75rem;
+  grid-template-columns: minmax(6rem, 50%) 1fr;
+  gap: 0.25rem 0.75rem;
   align-items: center;
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.4rem;
+  padding-left: 0.4rem;
 }
 
 .setting > label {
   display: block;
   margin: 0;
-  color: var(--muted);
+  color: var(--ink);
 }
 
 .setting .unit {
   color: var(--muted);
 }
 
-.setting .tooltip {
-  grid-column: 2;
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
 .setting :disabled {
   opacity: 0.5;
 }
 
-/* A disabled control's explanation: same quiet register as .tooltip, used
-   outside .setting too (profile selects, the Slice/Cancel/Retry buttons), so
-   dimming a control is never the only signal something changed. */
+/* The engine's tooltip is shown the way the desktop shows it: on hover or
+   focus, floating over the rows below. It stays in the DOM (and in the
+   control's accessible description) the whole time. */
+.setting .tooltip {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  left: 0.4rem;
+  z-index: 2;
+  display: none;
+  margin: 0.15rem 0 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 0.85rem;
+}
+
+.setting:hover .tooltip,
+.setting:focus-within .tooltip {
+  display: block;
+}
+
+/* Why a control is disabled is never hidden: it stays inline. */
+.setting .tooltip.reason {
+  position: static;
+  grid-column: 2;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+}
+
+/* A disabled control's explanation, used outside .setting too (profile
+   selects, the Slice/Cancel/Retry buttons), so dimming a control is never the
+   only signal something changed. */
 .hint {
   grid-column: 2;
   margin: 0.25rem 0 0;
@@ -186,15 +478,288 @@ ul {
   font-size: 0.85rem;
 }
 
+/* ---- Viewport ------------------------------------------------------------ */
+
+.view {
+  flex: 1 0 auto;
+}
+
+.empty-plate {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 0.75rem;
+  min-height: 24rem;
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.notice {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.status-dock {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.action-hints {
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.action-hints .hint {
+  margin: 0;
+}
+
+/* ---- The plate ----------------------------------------------------------- */
+
+.plater {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.canvas-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.segmented {
+  display: flex;
+}
+
+.segmented button {
+  border-color: var(--line);
+  border-radius: 0;
+}
+
+.segmented button + button {
+  border-left: 0;
+}
+
+.segmented button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.segmented button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 1.5rem;
+  margin: 0 0.35rem;
+  background: var(--line);
+}
+
+.plater-summary {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.plater-body {
+  display: grid;
+  grid-template-columns: 1fr minmax(14rem, 18rem);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+@media (max-width: 75rem) {
+  .plater-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+.plater-stage {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.plater-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  touch-action: none;
+}
+
+.object-panel {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.object-panel h2 {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.plater-objects {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
+.plater-objects button {
+  justify-content: flex-start;
+  width: 100%;
+  border-color: transparent;
+  text-align: left;
+}
+
+.plater-objects button:hover {
+  background: var(--panel-title);
+}
+
+.plater-objects button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.plater-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The object's bed position, quieter than its name but still the button's own
+   color: a muted grey fails contrast against the selected accent background. */
+.plater-position {
+  font-size: 0.85em;
+}
+
+.plater-transform {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.plater-transform p {
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+}
+
+/* ---- Layer preview ------------------------------------------------------- */
+
+.preview {
+  position: relative;
+  display: grid;
+  gap: 0.5rem;
+  justify-items: center;
+}
+
+.preview canvas {
+  display: block;
+  width: min(100%, calc(100vh - 16rem));
+  aspect-ratio: 1;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.preview input[type="range"] {
+  width: min(100%, calc(100vh - 16rem));
+  accent-color: var(--accent);
+}
+
+.preview label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0;
+  color: var(--muted);
+}
+
+/* The desktop's legend panel, floating over the preview's top-left corner. */
+.legend {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  list-style: none;
+}
+
+.preview .legend {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+}
+
+.legend li {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+/* ---- Job status ---------------------------------------------------------- */
+
+.job {
+  padding: 0.5rem 0.75rem 0.75rem;
+  border-radius: 6px;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.job h2 {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.job p {
+  margin: 0.25rem 0;
+}
+
+.job ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+}
+
+progress {
+  width: 100%;
+  height: 0.5rem;
+  accent-color: var(--accent);
+}
+
 details[data-testid="job-report"] {
-  margin-top: 1rem;
+  margin-top: 0.5rem;
+}
+
+details[data-testid="job-report"] summary {
+  cursor: pointer;
+  color: var(--accent-text);
 }
 
 details[data-testid="job-report"] dt {
   color: var(--muted);
   font-size: 0.85rem;
-  text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 details[data-testid="job-report"] dd {
@@ -204,120 +769,4 @@ details[data-testid="job-report"] dd {
 .chain {
   color: var(--muted);
   font-size: 0.9em;
-}
-
-/* The layer preview: one canvas, one layer at a time. */
-.preview canvas {
-  display: block;
-  width: 100%;
-  aspect-ratio: 1;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
-}
-
-.preview input[type="range"] {
-  width: 100%;
-}
-
-.preview label {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin: 0.6rem 0 0.25rem;
-  color: var(--muted);
-}
-
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-  padding: 0;
-  list-style: none;
-}
-
-.legend li {
-  display: flex;
-  gap: 0.4rem;
-  align-items: center;
-}
-
-.swatch {
-  display: inline-block;
-  width: 0.75rem;
-  height: 0.75rem;
-  border-radius: 2px;
-}
-
-/* The plate: one canvas showing the bed, and the controls that edit it. */
-.plater-canvas {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
-  touch-action: none;
-}
-
-.plater-views {
-  margin-top: 0.75rem;
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
-.plater-objects {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin: 1rem 0;
-  padding: 0;
-  list-style: none;
-}
-
-.plater-objects button {
-  background: transparent;
-  color: var(--accent);
-}
-
-.plater-objects button[aria-pressed="true"] {
-  background: var(--accent);
-  color: var(--surface);
-}
-
-/* The object's bed position, quieter than its name but still the button's own
-   color: the muted grey `.chain` uses fails contrast against the selected
-   button's accent background. */
-.plater-position {
-  font-size: 0.9em;
-}
-
-.plater-transform {
-  margin-bottom: 1rem;
-}
-
-.plater-transform p {
-  margin: 0 0 0.6rem;
-  color: var(--muted);
-}
-
-/* One row per filament slot, its own select plus a Remove button that only
-   exists once there is a second slot to remove. */
-.filament-slot {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.filament-slot label {
-  flex: 1;
-}
-
-/* A swatch identifying a filament slot's color, matching the plate exactly:
-   bordered so it stays legible against a same-toned page background in
-   either theme. */
-.filament-swatch {
-  margin-right: 0.4rem;
-  vertical-align: -1px;
-  border: 1px solid var(--ink);
 }

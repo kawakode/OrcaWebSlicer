@@ -29,6 +29,44 @@ Every failure the user sees is the API's stable code plus its message.
 Framework schema rejections are reduced to the same shape, so the screen has one
 error path rather than two.
 
+## Layout
+
+The screen follows the OrcaSlicer desktop application's Prepare/Preview
+workspace. It is the same layout rebuilt in React; no desktop UI code runs in
+the browser.
+
+- **Title bar.** Import, the imported model's name, the **Prepare** and
+  **Preview** workspace tabs, and the plate actions: Slice plate, Cancel,
+  Retry, Export G-code, and Report.
+- **Sidebar.** The desktop's Printer, Filament, and Process panels, in that
+  order. Filament slots are added and removed from the Filament panel's
+  header. The Process panel holds the generated settings, grouped under the
+  engine's own group titles.
+- **Viewport.** Prepare shows the plate: a canvas toolbar (views, Duplicate,
+  Delete, Arrange), the canvas, and an Objects/Object panel with the selected
+  object's transform. Preview shows the layer preview, with its legend
+  floating over the corner. Below both, a status dock holds the explanations
+  for disabled actions, errors, and the job's progress and report.
+
+Finishing a slice switches to Preview, as the desktop does. Preview is
+disabled until a job has published one. The Prepare panel stays mounted while
+Preview is showing, so the plate keeps every edit. Both canvases redraw when
+their own size changes, because a canvas in a hidden tab has no size until it
+is shown. Dropping a model file anywhere on the viewport imports it.
+
+Icons are the desktop's own, imported directly from `resources/images` by
+`src/icons.ts` rather than copied, so the two applications cannot drift apart.
+Colors follow the desktop palette (`StateColor.cpp`) in light and dark themes.
+The brand teal `#009688` gives only 3.7:1 contrast against white text, so it
+is used for borders, focus, and selection, and filled buttons use the
+desktop's darker `#00796b` (5.3:1). Setting tooltips appear on hover or focus,
+as on the desktop, and stay in the control's accessible description. A
+disabled control's reason is always shown inline.
+
+The top of the Tab order is the title bar, as on the desktop. A keyboard user
+therefore reaches Slice plate by Shift+Tab from the sidebar; the keyboard test
+walks exactly that path.
+
 ## The plate
 
 `Plater` is the browser half of [scene-format.md](scene-format.md). Choosing a
@@ -203,10 +241,11 @@ the real built bundle and the real native worker.
   finished job with its layer preview open, over a plate with several
   filament slots and an object reassigned off the default one, and over a
   screen showing an error, each asserting zero violations.
-- A keyboard-only walk of the whole flow — the file input, the profile
-  selects, the generated settings controls, Slice, and the layer preview's
-  slider and travel toggle — asserting forward focus order and that every one
-  of those controls is reachable and operable without a mouse.
+- A keyboard-only walk of the whole flow — Import, the Printer, Filament, and
+  Process selects, the generated settings controls, the plate's object list,
+  transform fields, and toolbar, Slice plate, and the layer preview's slider
+  and travel toggle — asserting focus order and that every one of those
+  controls is reachable and operable without a mouse.
 
 ### Browser matrix
 

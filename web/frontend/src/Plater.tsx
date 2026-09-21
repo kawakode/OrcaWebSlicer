@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { readJob, readScene, sceneObject, submitScene, type ProfileSelection } from "./api";
 import { filamentColor, filamentCss } from "./filamentColors";
+import { icons } from "./icons";
 import {
   ISOMETRIC_VIEW,
   PlaterCanvas,
@@ -324,135 +325,42 @@ export function Plater(props: {
 
   return (
     <div className="plater">
-      <PlaterCanvas
-        bed={scene.index.bed.shape}
-        items={items}
-        camera={camera}
-        disabled={disabled}
-        label={`Build plate, ${placements.length} object${placements.length === 1 ? "" : "s"} on a ${
-          bed.maxX - bed.minX
-        } by ${bed.maxY - bed.minY} millimetre bed`}
-        onCamera={setCamera}
-        onSelect={(item) => setSelected(item === null ? null : placements[item].id)}
-        onMove={(item, dx, dy) =>
-          update(placements[item].id, { x: placements[item].x + dx, y: placements[item].y + dy })
-        }
-      />
-
-      <div className="actions plater-views">
-        <button type="button" data-testid="plater-view-top" onClick={() => setCamera({ ...TOP_VIEW, zoom: 0 })}>
-          Top view
-        </button>
-        <button type="button" data-testid="plater-view-3d" onClick={() => setCamera({ ...ISOMETRIC_VIEW, zoom: 0 })}>
-          3D view
-        </button>
-        <button type="button" data-testid="plater-fit" onClick={() => setCamera({ ...camera, zoom: 0 })}>
-          Fit
-        </button>
-        <span data-testid="plater-summary">
-          {placements.length} object{placements.length === 1 ? "" : "s"} on a{" "}
-          {bed.maxX - bed.minX} × {bed.maxY - bed.minY} mm bed
-        </span>
-      </div>
-
-      {outside > 0 && (
-        <p className="failure" data-testid="plater-outside-bed" role="status">
-          {outside} object{outside === 1 ? " reaches" : "s reach"} outside the build volume and will
-          be refused when sliced.
-        </p>
-      )}
-
-      <ul className="plater-objects" data-testid="plater-objects">
-        {placements.map((placement, index) => (
-          <li key={placement.id}>
-            <button
-              type="button"
-              data-testid={`plater-select-${index}`}
-              aria-pressed={placement.id === selected}
-              onClick={() => setSelected(placement.id)}
-            >
-              {filamentCount > 1 && (
-                <span
-                  className="swatch filament-swatch"
-                  style={{ backgroundColor: filamentCss(placement.filament - 1) }}
-                  aria-hidden="true"
-                />
-              )}
-              {scene.index.objects[placement.source].name || `Object ${placement.source + 1}`}
-              <span className="plater-position">
-                {" "}
-                {placed[index].box.min[0].toFixed(1)}, {placed[index].box.min[1].toFixed(1)} mm
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      {/* Keyed by the selection, so switching objects starts the fields fresh
-          rather than carrying a half-typed value across. */}
-      {selection && size && (
-        <div className="plater-transform" key={selection.id}>
-          <p data-testid="plater-bounds">
-            {(size.max[0] - size.min[0]).toFixed(2)} × {(size.max[1] - size.min[1]).toFixed(2)} ×{" "}
-            {(size.max[2] - size.min[2]).toFixed(2)} mm
-          </p>
-          <Field
-            label="X"
-            testId="plater-x"
-            value={selection.x}
-            disabled={disabled}
-            onChange={(value) => update(selection.id, { x: value })}
-          />
-          <Field
-            label="Y"
-            testId="plater-y"
-            value={selection.y}
-            disabled={disabled}
-            onChange={(value) => update(selection.id, { y: value })}
-          />
-          <Field
-            label="Rotation"
-            unit="°"
-            testId="plater-rotation"
-            value={selection.rotation}
-            disabled={disabled}
-            onChange={(value) => update(selection.id, { rotation: value })}
-          />
-          <Field
-            label="Scale"
-            unit="%"
-            testId="plater-scale"
-            value={selection.scale * 100}
-            disabled={disabled}
-            min={1}
-            onChange={(value) => update(selection.id, { scale: Math.max(0.01, value / 100) })}
-          />
-          {/* Only shown once there is something to choose between: with a
-              single slot every object is implicitly on it. */}
-          {filamentCount > 1 && (
-            <label>
-              <span>Filament</span>
-              <select
-                data-testid="plater-filament"
-                value={selection.filament}
-                disabled={disabled}
-                onChange={(event) => update(selection.id, { filament: Number(event.target.value) })}
-              >
-                {filamentSlots.map((name, index) => (
-                  <option key={index} value={index + 1}>
-                    {index + 1}. {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+      {/* The desktop's canvas toolbar: camera views, then the object
+          operations, then what is on the plate. */}
+      <div className="canvas-toolbar">
+        <div className="segmented">
+          <button
+            type="button"
+            data-testid="plater-view-top"
+            title="Top view"
+            onClick={() => setCamera({ ...TOP_VIEW, zoom: 0 })}
+          >
+            Top
+          </button>
+          <button
+            type="button"
+            data-testid="plater-view-3d"
+            title="Isometric view"
+            onClick={() => setCamera({ ...ISOMETRIC_VIEW, zoom: 0 })}
+          >
+            3D
+          </button>
+          <button
+            type="button"
+            data-testid="plater-fit"
+            title="Fit the plate to the view"
+            onClick={() => setCamera({ ...camera, zoom: 0 })}
+          >
+            Fit
+          </button>
         </div>
-      )}
-
-      <div className="actions">
+        <span className="toolbar-separator" aria-hidden="true" />
         <button
           type="button"
+          className="icon-button"
           data-testid="plater-duplicate"
+          title="Duplicate"
+          aria-label="Duplicate"
           disabled={disabled || !selection}
           onClick={() => {
             if (!selection) return;
@@ -461,11 +369,14 @@ export function Plater(props: {
             setSelected(copy.id);
           }}
         >
-          Duplicate
+          <img src={icons.duplicate} alt="" width={18} height={18} />
         </button>
         <button
           type="button"
+          className="icon-button"
           data-testid="plater-delete"
+          title="Delete"
+          aria-label="Delete"
           disabled={disabled || !selection}
           onClick={() => {
             if (!selection) return;
@@ -474,16 +385,140 @@ export function Plater(props: {
             setSelected(next.length ? next[0].id : null);
           }}
         >
-          Delete
+          <img src={icons.remove} alt="" width={18} height={18} />
         </button>
         <button
           type="button"
+          className="icon-button"
           data-testid="plater-arrange"
+          title="Arrange all objects"
+          aria-label="Arrange all objects"
           disabled={disabled || placements.length === 0}
           onClick={() => setPlacements(arrange(scene, placements))}
         >
-          Arrange
+          <img src={icons.arrange} alt="" width={22} height={22} />
         </button>
+        <span className="plater-summary" data-testid="plater-summary">
+          {placements.length} object{placements.length === 1 ? "" : "s"} on a{" "}
+          {bed.maxX - bed.minX} × {bed.maxY - bed.minY} mm bed
+        </span>
+      </div>
+
+      <div className="plater-body">
+        <div className="plater-stage">
+          <PlaterCanvas
+            bed={scene.index.bed.shape}
+            items={items}
+            camera={camera}
+            disabled={disabled}
+            label={`Build plate, ${placements.length} object${placements.length === 1 ? "" : "s"} on a ${
+              bed.maxX - bed.minX
+            } by ${bed.maxY - bed.minY} millimetre bed`}
+            onCamera={setCamera}
+            onSelect={(item) => setSelected(item === null ? null : placements[item].id)}
+            onMove={(item, dx, dy) =>
+              update(placements[item].id, { x: placements[item].x + dx, y: placements[item].y + dy })
+            }
+          />
+          {outside > 0 && (
+            <p className="failure notice" data-testid="plater-outside-bed" role="status">
+              {outside} object{outside === 1 ? " reaches" : "s reach"} outside the build volume and will
+              be refused when sliced.
+            </p>
+          )}
+        </div>
+
+        <div className="object-panel">
+          <h2>Objects</h2>
+          <ul className="plater-objects" data-testid="plater-objects">
+            {placements.map((placement, index) => (
+              <li key={placement.id}>
+                <button
+                  type="button"
+                  data-testid={`plater-select-${index}`}
+                  aria-pressed={placement.id === selected}
+                  onClick={() => setSelected(placement.id)}
+                >
+                  {filamentCount > 1 && (
+                    <span
+                      className="swatch filament-swatch"
+                      style={{ backgroundColor: filamentCss(placement.filament - 1) }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span className="plater-name">
+                    {scene.index.objects[placement.source].name || `Object ${placement.source + 1}`}
+                  </span>
+                  <span className="plater-position">
+                    {placed[index].box.min[0].toFixed(1)}, {placed[index].box.min[1].toFixed(1)} mm
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          {/* Keyed by the selection, so switching objects starts the fields fresh
+              rather than carrying a half-typed value across. */}
+          {selection && size && (
+            <div className="plater-transform" key={selection.id}>
+              <h2>Object</h2>
+              <p data-testid="plater-bounds">
+                {(size.max[0] - size.min[0]).toFixed(2)} × {(size.max[1] - size.min[1]).toFixed(2)} ×{" "}
+                {(size.max[2] - size.min[2]).toFixed(2)} mm
+              </p>
+              <Field
+                label="X"
+                testId="plater-x"
+                value={selection.x}
+                disabled={disabled}
+                onChange={(value) => update(selection.id, { x: value })}
+              />
+              <Field
+                label="Y"
+                testId="plater-y"
+                value={selection.y}
+                disabled={disabled}
+                onChange={(value) => update(selection.id, { y: value })}
+              />
+              <Field
+                label="Rotation"
+                unit="°"
+                testId="plater-rotation"
+                value={selection.rotation}
+                disabled={disabled}
+                onChange={(value) => update(selection.id, { rotation: value })}
+              />
+              <Field
+                label="Scale"
+                unit="%"
+                testId="plater-scale"
+                value={selection.scale * 100}
+                disabled={disabled}
+                min={1}
+                onChange={(value) => update(selection.id, { scale: Math.max(0.01, value / 100) })}
+              />
+              {/* Only shown once there is something to choose between: with a
+                  single slot every object is implicitly on it. */}
+              {filamentCount > 1 && (
+                <label>
+                  <span>Filament</span>
+                  <select
+                    data-testid="plater-filament"
+                    value={selection.filament}
+                    disabled={disabled}
+                    onChange={(event) => update(selection.id, { filament: Number(event.target.value) })}
+                  >
+                    {filamentSlots.map((name, index) => (
+                      <option key={index} value={index + 1}>
+                        {index + 1}. {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

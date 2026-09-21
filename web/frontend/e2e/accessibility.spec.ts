@@ -105,10 +105,11 @@ test.describe("accessibility: keyboard navigation", () => {
     await page.goto("/");
     await waitForProfiles(page);
 
-    // Repeatedly presses Tab, recording the data-testid of whatever gains
-    // focus, until the target is reached. The recorded list doubles as proof
-    // that everything in between was itself a real, reachable tab stop.
-    async function tabUntil(targetTestId: string, maxSteps = 250): Promise<string[]> {
+    // Repeatedly presses Tab (or Shift+Tab, going backwards), recording the
+    // data-testid of whatever gains focus, until the target is reached. The
+    // recorded list doubles as proof that everything in between was itself a
+    // real, reachable tab stop.
+    async function walkUntil(targetTestId: string, key: "Tab" | "Shift+Tab", maxSteps = 250): Promise<string[]> {
       const seen: string[] = [];
       for (let step = 0; step < maxSteps; step += 1) {
         const testId = await page.evaluate(
@@ -116,37 +117,28 @@ test.describe("accessibility: keyboard navigation", () => {
         );
         if (testId) seen.push(testId);
         if (testId === targetTestId) return seen;
-        await page.keyboard.press("Tab");
+        await page.keyboard.press(key);
       }
       throw new Error(
-        `Tab order never reached [data-testid="${targetTestId}"]; visited ${JSON.stringify(seen)}`,
+        `${key} order never reached [data-testid="${targetTestId}"]; visited ${JSON.stringify(seen)}`,
       );
     }
+    const tabUntil = (targetTestId: string) => walkUntil(targetTestId, "Tab");
+    // The title bar (Slice) and the plate's toolbar sit above the controls a
+    // user fills in first, as on the desktop, so they are reached by walking
+    // backwards rather than by wrapping around the document.
+    const shiftTabUntil = (targetTestId: string) => walkUntil(targetTestId, "Shift+Tab");
 
-    // The file input is first in the DOM and the flow's first stop.
+    // The title bar's Import is first in the DOM and the flow's first stop.
     await tabUntil("file-input");
     await page.getByTestId("file-input").setInputFiles(CUBE);
 
-    // Printer, process, and filament follow in the order the screen presents
-    // them — each call only succeeds if the previous target was truly reached
-    // first, so this also asserts forward focus order.
+    // Printer, filament, and process follow in the order the sidebar presents
+    // them, which is the desktop's — each call only succeeds if the previous
+    // target was truly reached first, so this also asserts forward focus order.
     await tabUntil("printer-select");
-    await tabUntil("process-select");
     await tabUntil("filament-select");
-
-    // The plate is editable without a mouse: every operation the canvas offers
-    // by pointer — select, move, rotate, scale — is also a real control here.
-    await expect(page.getByTestId("plater-canvas")).toBeVisible();
-    await tabUntil("plater-view-top");
-    await tabUntil("plater-select-0");
-    await page.keyboard.press("Enter");
-    await expect(page.getByTestId("plater-select-0")).toHaveAttribute("aria-pressed", "true");
-    await tabUntil("plater-x");
-    await page.keyboard.press("ArrowUp");
-    expect(Number(await page.getByTestId("plater-x").inputValue())).toBeGreaterThan(100);
-    await tabUntil("plater-duplicate");
-    await page.keyboard.press("Enter");
-    await expect(page.getByTestId("plater-summary")).toContainText("2 objects");
+    await tabUntil("process-select");
 
     // The overrides form is generated from the engine's own settings; tabbing
     // to two curated settings that are guaranteed present (see slice.spec.ts)
@@ -161,16 +153,33 @@ test.describe("accessibility: keyboard navigation", () => {
     await page.keyboard.type("2");
     await expect(page.getByTestId("setting-wall_loops")).toHaveValue("2");
 
+    // The plate is editable without a mouse: every operation the canvas offers
+    // by pointer — select, move, rotate, scale — is also a real control here.
+    await expect(page.getByTestId("plater-canvas")).toBeVisible();
+    await tabUntil("plater-view-top");
+    await tabUntil("plater-select-0");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("plater-select-0")).toHaveAttribute("aria-pressed", "true");
+    await tabUntil("plater-x");
+    await page.keyboard.press("ArrowUp");
+    expect(Number(await page.getByTestId("plater-x").inputValue())).toBeGreaterThan(100);
+    // The object operations live in the toolbar above the plate.
+    await shiftTabUntil("plater-duplicate");
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("plater-summary")).toContainText("2 objects");
+
     // Slice is reached and activated with the keyboard, not a click.
-    await tabUntil("slice");
+    await shiftTabUntil("slice");
     await page.keyboard.press("Enter");
 
     // Submitting disables the (still-focused) Slice button, which the browser
     // resolves by moving focus to <body> — correct behavior for a control
     // that genuinely stopped being interactive, not a trap. The next Tab
     // resumes at the top of the document, same as for any keyboard user.
+    // A finished slice opens the Preview tab, as on the desktop.
     await expect(page.getByTestId("job-state")).toHaveText("succeeded");
     await expect(page.getByTestId("preview-canvas")).toBeVisible();
+    await expect(page.getByTestId("tab-preview")).toHaveAttribute("aria-selected", "true");
 
     // The layer preview's slider is reachable and operable with arrow keys,
     // exactly like any native range input.
