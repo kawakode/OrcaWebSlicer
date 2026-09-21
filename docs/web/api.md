@@ -174,9 +174,60 @@ stopped is not resumed. A graceful stop cancels it (`job_canceled`), and after
 a crash it is reported as `failed` with `internal` / `job_interrupted` and no
 artifacts. Either way, a retry reruns the same inputs.
 
-A finished job is kept as long as the retention window keeps its directory.
-After that, its ID returns `unknown_job`. This also applies to a failed or
-canceled job, which has no directory.
+A finished job is kept for the retention window, counted from when it
+finished, and its `expires_at` says when that ends. After that, its ID returns
+`unknown_job`. This also applies to a failed or canceled job, which has no
+directory. See [Retention and deletion audit](#retention-and-deletion-audit).
+
+## Retention and deletion audit
+
+Retention is deletion policy. The default window is 24 hours
+(`ORCA_WEB_JOB_RETENTION_SECONDS`):
+
+- A job expires `retention_seconds` after it finished. Its directory, every
+  artifact in it, its preview and scene, and its stored record are deleted
+  together. A finished job's description carries `expires_at` (Unix seconds);
+  it is `null` while the job is queued or running, and a running job never
+  expires.
+- An upload expires `retention_seconds` after it was created. A job copies its
+  upload when it is staged, so a retry after the upload expired fails with
+  `unknown_upload`.
+- A job directory no record claims, such as one a crash left between staging
+  and recording, expires by its last modification.
+
+The window is configuration, not stored state. Restarting with a shorter
+window applies it to jobs that already finished.
+
+Retention is enforced by a sweep that runs at startup, before each submission,
+and every `ORCA_WEB_RETENTION_SWEEP_SECONDS` (default 300) while the API runs,
+so an idle instance still deletes on time. Data therefore outlives its
+`expires_at` by at most one sweep interval.
+
+Every deletion the service performs is recorded in the `deletions` table of
+`metadata.sqlite3`. That includes expiry, a failed or canceled job's
+directory, a job interrupted by a restart, a job refused after staging, and an
+orphaned directory. One row holds:
+
+| Column | Meaning |
+| --- | --- |
+| `deleted_at` | Unix seconds when the deletion was attempted |
+| `kind` | `job_directory` (a job's files), `job_record` (its metadata), or `upload` |
+| `subject_id` | The job ID, upload ID, or orphaned directory name |
+| `owner_id` | The opaque owner digest, or `NULL` when no record names one |
+| `reason` | `retention_expired`, `job_failed`, `job_canceled`, `job_interrupted`, `job_refused`, or `orphaned` |
+| `outcome` | `removed`, or `failed` when something was left behind (a later sweep retries it) |
+| `bytes` | Bytes of regular files the subject held |
+| `created_at` | When the subject was created, when known |
+
+The audit never holds a filename, a request, a setting, or file content. It is
+not exposed over HTTP. Operators read it from the state volume, as described in
+[operations.md](operations.md#deletion-audit). Rows are kept for
+`ORCA_WEB_AUDIT_RETENTION_SECONDS` (default 30 days, never less than the
+retention window) and then pruned by the same sweep. Each deletion is also
+logged as `deleted kind=… subject=… reason=… outcome=… bytes=…`, without the
+owner. When the metadata store itself is unavailable, the deletion still
+happens and is still logged, but its audit row is lost; the failed write is
+logged as an error.
 
 ## Artifacts
 
@@ -370,6 +421,8 @@ The API adds these settings to the worker and executor variables listed in
 | `ORCA_WEB_WORKER` | `<repo>/build-worker/src/Release/orca-slicer-worker` | Worker executable |
 | `ORCA_WEB_PROFILE_VENDORS` | `Anycubic` | Comma-separated bundled vendors |
 | `ORCA_WEB_MAX_CONCURRENT_JOBS` | 2 | Workers running at once |
+| `ORCA_WEB_RETENTION_SWEEP_SECONDS` | 300 | Interval between retention sweeps while the API runs |
+| `ORCA_WEB_AUDIT_RETENTION_SECONDS` | 2592000 (30 days) | How long deletion audit rows are kept; at least `ORCA_WEB_JOB_RETENTION_SECONDS` |
 | `ORCA_WEB_FRONTEND_DIST` | `<repo>/web/frontend/dist` | Built browser screen |
 | `ORCA_WEB_AUTH_MODE` | `required` | `required` or `disabled` (see above) |
 | `ORCA_WEB_AUTH_ISSUER` | none | Required assertion issuer in `required` mode |
@@ -389,8 +442,8 @@ When the frontend build exists it is mounted after every API route, so the
 [browser screen](frontend.md) is served from this same origin. When it does not,
 the API is a bare JSON service.
 
-Uploads and job directories are reclaimed by the same retention window as the
-job-directory sweep, which runs at startup and before each submission.
+Uploads, jobs, and their directories are deleted by the retention sweep
+described in [Retention and deletion audit](#retention-and-deletion-audit).
 
 During graceful shutdown the service closes upload, scene, slice, and retry
 admission with `service_draining` (HTTP 503), cancels queued jobs without
@@ -425,6 +478,5 @@ Job metadata is stored in SQLite and artifacts stay in the job directories on
 the state volume ([ADR 0005](adr/0005-job-metadata-storage.md)). A database
 server, an object store, and a queue are not selected, and running more than one
 API instance against the same state root is still unsupported. Authentication,
-per-owner enforcement, per-owner quotas, abuse controls, and rate limiting are
-implemented. Retention tied to completion and its deletion audit remain G6
-work.
+per-owner enforcement, per-owner quotas, abuse controls, rate limiting, and
+retention with its deletion audit are implemented.

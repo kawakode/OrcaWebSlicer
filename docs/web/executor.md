@@ -119,11 +119,14 @@ failure removes the entire directory rather than leaving a partial job.
 Reclamation is by explicit sweep. A directory is removed once its last
 modification is older than the retention window, which also covers directories
 abandoned by a crash before their manifest was written. Job IDs the caller
-reports as running are never swept, so a long, quiet slice is safe. Stray files
-and links in the job root are never jobs and are removed on sight.
+names are never swept, so a long, quiet slice is safe. Stray files and links in
+the job root are never jobs and are removed on sight. The sweep reports the
+bytes each removed entry held.
 
-Retention measured from last modification is a deliberate G4 simplification. The
-24-hour policy tied to completion, and its deletion audit, are G6 work.
+The API names every job it still holds a record for. It expires those jobs
+itself, counted from when each finished, so last modification only decides the
+fate of directories no record claims. The API also audits each deletion; see
+[api.md](api.md#retention-and-deletion-audit).
 
 ## Configuration
 
@@ -135,7 +138,7 @@ limits are milliseconds.
 | `ORCA_WEB_MAX_INPUT_BYTES` | 262144000 | Largest single staged file |
 | `ORCA_WEB_MAX_TOTAL_INPUT_BYTES` | 536870912 | All staged files in one job |
 | `ORCA_WEB_MAX_JOB_INPUTS` | 16 | Declared files in one job |
-| `ORCA_WEB_JOB_RETENTION_SECONDS` | 86400 | Sweep age threshold |
+| `ORCA_WEB_JOB_RETENTION_SECONDS` | 86400 | Retention window: after a job finishes, after an upload is created, or after an unclaimed directory was last modified |
 
 | Environment variable | Default | Enforcement |
 | --- | ---: | --- |

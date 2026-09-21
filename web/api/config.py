@@ -29,6 +29,10 @@ class ApiConfig:
     worker_command: Tuple[str, ...]
     profile_vendors: Tuple[str, ...]
     max_concurrent_jobs: int = 2
+    # How often retention is enforced when no request triggers a sweep, and
+    # how long the deletion audit itself is kept.
+    retention_sweep_seconds: int = 300
+    audit_retention_seconds: int = 30 * 24 * 60 * 60
     executor_limits: ExecutorLimits = dataclasses.field(default_factory=ExecutorLimits)
     job_limits: JobDirectoryLimits = dataclasses.field(default_factory=JobDirectoryLimits)
     sandbox: SandboxPolicy = dataclasses.field(default_factory=SandboxPolicy)
@@ -64,6 +68,15 @@ class ApiConfig:
             raise ApiError("invalid_api_configuration", "A worker command must be configured.", 500)
         self.executor_limits.validate()
         self.job_limits.validate()
+        if self.retention_sweep_seconds <= 0:
+            raise ApiError("invalid_api_configuration", "retention_sweep_seconds must be positive.", 500)
+        if self.audit_retention_seconds < self.job_limits.retention_seconds:
+            # Otherwise an owner could ask about a deletion the audit already forgot.
+            raise ApiError(
+                "invalid_api_configuration",
+                "the deletion audit must be kept at least as long as the retention window.",
+                500,
+            )
         try:
             self.sandbox.validate()
         except SandboxError as error:
@@ -112,13 +125,12 @@ def from_environment() -> ApiConfig:
     repo_root = Path(os.environ.get("ORCA_WEB_REPO_ROOT") or REPO_ROOT).resolve()
     state_root = Path(os.environ.get("ORCA_WEB_STATE_ROOT") or repo_root / "build" / "web-state")
     worker = os.environ.get("ORCA_WEB_WORKER") or str(repo_root / DEFAULT_WORKER)
-    concurrency = os.environ.get("ORCA_WEB_MAX_CONCURRENT_JOBS", "")
-    try:
-        max_concurrent_jobs = int(concurrency) if concurrency else 2
-    except ValueError as error:
-        raise ApiError(
-            "invalid_api_configuration", "ORCA_WEB_MAX_CONCURRENT_JOBS must be a positive integer.", 500
-        ) from error
+    def read_int(name: str, default: int) -> int:
+        serialized = os.environ.get(name, "")
+        try:
+            return int(serialized) if serialized else default
+        except ValueError as error:
+            raise ApiError("invalid_api_configuration", f"{name} must be a positive integer.", 500) from error
 
     dist = Path(os.environ.get("ORCA_WEB_FRONTEND_DIST") or repo_root / "web" / "frontend" / "dist")
     try:
@@ -132,7 +144,9 @@ def from_environment() -> ApiConfig:
         state_root=state_root,
         worker_command=(worker,),
         profile_vendors=vendors_from_environment(),
-        max_concurrent_jobs=max_concurrent_jobs,
+        max_concurrent_jobs=read_int("ORCA_WEB_MAX_CONCURRENT_JOBS", 2),
+        retention_sweep_seconds=read_int("ORCA_WEB_RETENTION_SWEEP_SECONDS", ApiConfig.retention_sweep_seconds),
+        audit_retention_seconds=read_int("ORCA_WEB_AUDIT_RETENTION_SECONDS", ApiConfig.audit_retention_seconds),
         executor_limits=executor_limits_from_environment(),
         job_limits=job_limits_from_environment(),
         sandbox=sandbox,

@@ -17,7 +17,7 @@ holds three things:
 | --- | --- |
 | `uploads/` | One directory per upload: the model and its metadata |
 | `jobs/` | One directory per job: staged inputs, the worker's report, and its artifacts |
-| `metadata.sqlite3` (and its `-wal` and `-shm` files) | The job table |
+| `metadata.sqlite3` (and its `-wal` and `-shm` files) | The job table and the deletion audit |
 
 The running API holds the job table in memory and writes every change through
 to `metadata.sqlite3`. It reads the table back once at startup. Two API
@@ -134,7 +134,7 @@ On shutdown the server stops accepting HTTP connections, then the application:
 
 1. closes job and upload admission;
 2. marks queued jobs canceled without launching their workers and attempts to
-   remove their staged directories, logging a cleanup failure for operations;
+   remove their staged directories, auditing each removal;
 3. signals running workers for cancellation;
 4. lets the executor escalate from `SIGTERM` to `SIGKILL` after its configured
    grace period;
@@ -160,6 +160,37 @@ docker compose -f docker/web/compose.yml ps api
 After restart, wait for healthy status and run the full deployment probe. Job
 URLs from before the restart keep working until retention reclaims them. Jobs
 the stop canceled can be retried.
+
+## Deletion audit
+
+Every deletion the API performs, by retention or because a job failed, was
+canceled, was interrupted, or was refused, is recorded in the `deletions`
+table of `metadata.sqlite3`. The columns and reasons are listed in
+[api.md](api.md#retention-and-deletion-audit). Rows hold IDs, the opaque owner
+digest, sizes, and times, never filenames or content. They are kept for
+`ORCA_WEB_AUDIT_RETENTION_SECONDS` (default 30 days).
+
+The database is readable only by the API user. Read it read-only, from inside
+the running container, so the service keeps writing while you query:
+
+```powershell
+docker compose -f docker/web/compose.yml exec api python3 -c "import json, sqlite3; c = sqlite3.connect('file:/var/lib/orca-web/metadata.sqlite3?mode=ro', uri=True); c.row_factory = sqlite3.Row; [print(json.dumps(dict(r))) for r in c.execute('SELECT * FROM deletions WHERE subject_id = ? ORDER BY id', ('JOB_OR_UPLOAD_ID',))]"
+```
+
+To answer "what was deleted for this owner", filter on `owner_id` instead. The
+owner digest is derived from the assertion's issuer and subject as described in
+[ADR 0004](adr/0004-service-identity.md#ownership-is-attached-at-creation-and-enforced-at-every-lookup); the audit never stores
+the raw identity.
+
+A row whose `outcome` is `failed` means files were left behind, for example
+because of a permission error on the state volume. The next sweep, at most
+`ORCA_WEB_RETENTION_SWEEP_SECONDS` later, retries the directory as `orphaned`
+and records a second row. Repeated `failed` rows for one subject need an
+operator. So does the log line `deletion audit write failed`: it means the
+deletion happened but its row could not be stored.
+
+The audit lives on the state volume. An empty-state rebuild or a destructive
+reset loses it along with the data it describes.
 
 ## Rollback
 
@@ -220,7 +251,7 @@ also makes known upload IDs reusable and preserves files for authorized manual
 investigation.
 Routine snapshots are deliberately not prescribed: retaining raw models and
 G-code beyond their deletion window changes the privacy policy and must be
-designed together with persistent storage, deletion auditing, and access
+designed together with persistent storage, the deletion audit, and access
 control.
 
 ## Destructive reset

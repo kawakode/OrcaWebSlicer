@@ -71,7 +71,7 @@ class JobServiceTests(unittest.TestCase):
             service.shutdown()
         self.temporary.cleanup()
 
-    def service(self, mode="success", max_concurrent_jobs=2, retention_seconds=3600, quotas=None):
+    def service(self, mode="success", max_concurrent_jobs=2, retention_seconds=3600, quotas=None, **overrides):
         """A service on this test's state root. Calling it again is a restart:
         the new service recovers whatever the earlier one persisted."""
         config = ApiConfig(
@@ -85,6 +85,7 @@ class JobServiceTests(unittest.TestCase):
             quotas=quotas or QuotaLimits(),
             # This suite exercises job execution, not identity.
             auth_mode="disabled",
+            **overrides,
         )
         config.validate()
         self.config = config
@@ -494,17 +495,43 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(retried["retry_of"], first["job_id"])
         self.assertEqual(self.wait(service, retried["job_id"])["state"], "failed")
 
-    def test_reclaims_expired_jobs_and_uploads(self):
-        service = self.service(retention_seconds=1)
+    # Retention and the deletion audit
+
+    def expire(self, service, job_id):
+        """Move one finished job's completion back past the retention window."""
+        with service._lock:
+            service._jobs[job_id].finished_at -= self.config.job_limits.retention_seconds + 1
+
+    def backdate_uploads(self):
+        """Move every upload's recorded creation back past the retention window."""
+        for directory in self.config.uploads_root.iterdir():
+            metadata_path = directory / "upload.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["created_at"] -= self.config.job_limits.retention_seconds + 1
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    def audit(self, **filters):
+        store = JobStore(self.config.metadata_path)
+        try:
+            return store.deletions(**filters)
+        finally:
+            store.close()
+
+    def test_expires_a_job_by_when_it_finished_and_audits_the_deletion(self):
+        service = self.service()
         job = self.wait(service, self.submit(service)["job_id"])
         directory = self.config.jobs_root / job["job_id"]
-        self.assertTrue(directory.is_dir())
+        self.assertAlmostEqual(job["expires_at"], job["finished_at"] + 3600)
+        size = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
 
-        expired = time.time() - 3600
-        os.utime(directory, (expired, expired))
-        for upload in self.config.uploads_root.iterdir():
-            os.utime(upload, (expired, expired))
+        # An old directory does not expire a job that finished recently.
+        stale = time.time() - 7200
+        os.utime(directory, (stale, stale))
+        self.assertEqual(service.sweep()["jobs_removed"], [])
+        self.assertEqual(service.get(job["job_id"], OWNER_ID)["state"], "succeeded")
 
+        self.expire(service, job["job_id"])
+        self.backdate_uploads()
         report = service.sweep()
         self.assertEqual(report["jobs_removed"], [job["job_id"]])
         self.assertEqual(len(report["uploads_removed"]), 1)
@@ -512,6 +539,80 @@ class JobServiceTests(unittest.TestCase):
         with self.assertRaises(ApiError) as raised:
             service.get(job["job_id"], OWNER_ID)
         self.assertEqual(raised.exception.code, "unknown_job")
+
+        rows = self.audit(subject_id=job["job_id"])
+        self.assertEqual([(row["kind"], row["reason"], row["outcome"]) for row in rows], [
+            ("job_directory", "retention_expired", "removed"),
+            ("job_record", "retention_expired", "removed"),
+        ])
+        self.assertEqual(rows[0]["bytes"], size)
+        self.assertEqual({row["owner_id"] for row in rows}, {OWNER_ID})
+        self.assertEqual(rows[0]["created_at"], job["created_at"])
+        upload_rows = self.audit(subject_id=job["request"]["upload_id"])
+        self.assertEqual([(row["kind"], row["owner_id"]) for row in upload_rows], [("upload", OWNER_ID)])
+        self.assertGreater(upload_rows[0]["bytes"], 0)
+        # Nothing but identifiers, sizes, and times is recorded.
+        self.assertNotIn("cube", json.dumps(self.audit()))
+
+    def test_audits_the_directory_a_failed_or_canceled_job_loses(self):
+        service = self.service("crash")
+        crashed = self.wait(service, self.submit(service)["job_id"])
+        self.assertIsNotNone(crashed["expires_at"])
+        [row] = self.audit(subject_id=crashed["job_id"])
+        self.assertEqual((row["kind"], row["reason"], row["outcome"]), ("job_directory", "job_failed", "removed"))
+        self.assertGreater(row["bytes"], 0)
+
+        slow = self.service("slow", max_concurrent_jobs=1)
+        running = self.submit(slow)
+        queued = self.submit(slow)
+        slow.cancel(queued["job_id"], OWNER_ID)
+        slow.cancel(running["job_id"], OWNER_ID)
+        self.wait(slow, running["job_id"])
+        for job_id in (queued["job_id"], running["job_id"]):
+            self.assertEqual([row["reason"] for row in self.audit(subject_id=job_id)], ["job_canceled"])
+
+    def test_audits_an_orphaned_directory_no_record_claims(self):
+        service = self.service()
+        orphan = self.config.jobs_root / "job-orphan"
+        orphan.mkdir(parents=True)
+        (orphan / "request.json").write_text("{}", encoding="utf-8")
+        stale = time.time() - 7200
+        os.utime(orphan, (stale, stale))
+
+        self.assertEqual(service.sweep()["jobs_removed"], ["job-orphan"])
+        [row] = self.audit(subject_id="job-orphan")
+        self.assertEqual((row["reason"], row["owner_id"], row["bytes"]), ("orphaned", None, 2))
+
+    def test_enforces_retention_without_any_request(self):
+        service = self.service(retention_sweep_seconds=1)
+        job = self.wait(service, self.submit(service)["job_id"])
+        self.expire(service, job["job_id"])
+        service.start_sweeper()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with service._lock:
+                if job["job_id"] not in service._jobs:
+                    break
+            time.sleep(0.05)
+        self.assertFalse((self.config.jobs_root / job["job_id"]).exists())
+        self.assertEqual(len(self.audit(subject_id=job["job_id"])), 2)
+
+    def test_refuses_retention_settings_that_cannot_hold(self):
+        for overrides in ({"audit_retention_seconds": 3599}, {"retention_sweep_seconds": 0}):
+            with self.assertRaises(ApiError) as raised:
+                self.service(**overrides)
+            self.assertEqual(raised.exception.code, "invalid_api_configuration")
+
+    def test_prunes_audit_rows_older_than_the_audit_retention(self):
+        service = self.service(audit_retention_seconds=7200)
+        old = time.time() - 7201
+        with service._lock:
+            service._store.record_deletion(
+                {"deleted_at": old, "kind": "upload", "subject_id": "0" * 32, "owner_id": None,
+                 "reason": "retention_expired", "outcome": "removed", "bytes": 1, "created_at": None}
+            )
+        service.sweep()
+        self.assertEqual(self.audit(subject_id="0" * 32), [])
 
     def test_never_sweeps_a_job_that_is_still_running(self):
         service = self.service("slow", retention_seconds=1)
@@ -605,7 +706,7 @@ class JobServiceTests(unittest.TestCase):
         job = self.wait(service, self.submit(service)["job_id"])
         # A crashed job's directory is already gone; only its record remains.
         self.assertFalse((self.config.jobs_root / job["job_id"]).exists())
-        time.sleep(1.1)
+        self.expire(service, job["job_id"])
         service.sweep()
         with self.assertRaises(ApiError) as raised:
             service.get(job["job_id"], OWNER_ID)

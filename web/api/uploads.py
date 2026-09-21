@@ -184,29 +184,51 @@ class UploadStore:
                 total += size if isinstance(size, int) and size > 0 else 0
         return total
 
-    def sweep(self, retention_seconds: int, now: Optional[float] = None) -> List[str]:
-        """Reclaim uploads older than the retention window."""
+    def sweep(self, retention_seconds: int, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Reclaim uploads older than the retention window.
+
+        Age is measured from the `created_at` an upload's metadata records, or
+        from the directory's last modification when it has none (an upload
+        still streaming, or one a crash abandoned). Returns one entry per
+        removal attempt, naming its id, owner, size, and outcome, for the
+        deletion audit.
+        """
         deadline = (time.time() if now is None else now) - retention_seconds
-        removed: List[str] = []
+        swept: List[Dict[str, Any]] = []
         try:
             entries = sorted(self._root.iterdir())
         except (FileNotFoundError, NotADirectoryError):
-            return removed
+            return swept
         except OSError as error:
             raise ApiError("upload_root_unavailable", "The upload root could not be listed.", 500) from error
         for entry in entries:
+            outcome: Dict[str, Any] = {"upload_id": entry.name, "owner_id": None, "bytes": 0, "created_at": None}
             try:
                 if entry.is_symlink() or not entry.is_dir():
                     entry.unlink()
-                    removed.append(entry.name)
+                    swept.append(dict(outcome, removed=True))
                     continue
-                if entry.stat().st_mtime > deadline:
+                try:
+                    metadata = json.loads((entry / _METADATA_NAME).read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    metadata = None
+                if isinstance(metadata, dict) and isinstance(metadata.get("created_at"), (int, float)):
+                    created_at = float(metadata["created_at"])
+                    size = metadata.get("size_bytes", 0)
+                    outcome.update(
+                        owner_id=self._stored_owner(metadata),
+                        bytes=size if isinstance(size, int) and size > 0 else 0,
+                        created_at=created_at,
+                    )
+                else:
+                    created_at = entry.stat().st_mtime
+                if created_at > deadline:
                     continue
-                shutil.rmtree(entry)
-                removed.append(entry.name)
             except OSError:
                 continue
-        return removed
+            shutil.rmtree(entry, ignore_errors=True)
+            swept.append(dict(outcome, removed=not entry.exists()))
+        return swept
 
     def _stored_owner(self, metadata: Dict[str, Any]) -> Optional[str]:
         """The owner a stored record belongs to, or `None` when it has none.

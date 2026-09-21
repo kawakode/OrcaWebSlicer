@@ -68,6 +68,9 @@ class SweepReport:
     removed: List[str] = dataclasses.field(default_factory=list)
     retained: List[str] = dataclasses.field(default_factory=list)
     failed: Dict[str, str] = dataclasses.field(default_factory=dict)
+    # Bytes each removed or unremovable entry held, measured just before the
+    # attempt, so a caller can audit what a deletion reclaimed.
+    sizes: Dict[str, int] = dataclasses.field(default_factory=dict)
 
 
 def _validate_job_id(job_id: str) -> None:
@@ -204,6 +207,20 @@ def prepare_job_directory(
     return PreparedJob(job_id=job_id, path=path, manifest_path=manifest_path, staged_bytes=staged_bytes)
 
 
+def directory_bytes(root: Path) -> int:
+    """Bytes of the regular files under a directory, never following links."""
+    total = 0
+    for directory, _, files in os.walk(root):
+        for name in files:
+            try:
+                status = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode):
+                total += status.st_size
+    return total
+
+
 def remove_job_directory(path: Path) -> bool:
     """Delete one job directory and everything it holds. Never raises.
 
@@ -228,12 +245,12 @@ def sweep_job_directories(
     active_job_ids: Iterable[str] = (),
     now: Optional[float] = None,
 ) -> SweepReport:
-    """Reclaim expired and abandoned job directories, keeping running jobs.
+    """Reclaim expired and abandoned job directories, keeping the caller's jobs.
 
     Expiry is measured from a directory's last modification, so a job that is
-    still writing stays young. Jobs the caller reports as running are never
-    swept, which covers a worker that is quiet for longer than the retention
-    window.
+    still writing stays young. Job IDs the caller names are never swept: that
+    covers a worker that is quiet for longer than the retention window, and
+    lets a caller that knows when a job finished expire it by that instead.
     """
     limits = limits or JobDirectoryLimits()
     limits.validate()
@@ -256,6 +273,7 @@ def sweep_job_directories(
         # A stray file or symlink in the job root is not a job directory and is
         # removed on sight rather than left to accumulate.
         if entry.is_symlink() or not entry.is_dir():
+            report.sizes[name] = 0
             if remove_job_directory(entry):
                 report.removed.append(name)
             else:
@@ -269,6 +287,7 @@ def sweep_job_directories(
         if modified > deadline:
             report.retained.append(name)
             continue
+        report.sizes[name] = directory_bytes(entry)
         if remove_job_directory(entry):
             report.removed.append(name)
         else:

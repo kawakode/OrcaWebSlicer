@@ -7,9 +7,7 @@ import functools
 import json
 import logging
 import math
-import os
 import re
-import stat
 import tempfile
 import threading
 import time
@@ -24,6 +22,7 @@ from web_job_directory import (
     MANIFEST_NAME,
     JobDirectoryError,
     JobInput,
+    directory_bytes,
     prepare_job_directory,
     remove_job_directory,
     sweep_job_directories,
@@ -85,20 +84,6 @@ _EXECUTOR_FAILURES = {
     "output_limit": ("resource_limit", None),
     "failed": ("internal", None),
 }
-
-
-def _directory_bytes(root: Path) -> int:
-    """Bytes of the regular files under a job directory, never following links."""
-    total = 0
-    for directory, _, files in os.walk(root):
-        for name in files:
-            try:
-                status = os.lstat(os.path.join(directory, name))
-            except OSError:
-                continue
-            if stat.S_ISREG(status.st_mode):
-                total += status.st_size
-    return total
 
 
 def _requires_admission(method):
@@ -205,6 +190,10 @@ class JobRecord:
     # and when, so a restart can replay the charge into the quota window.
     cpu_charged_ms: int = 0
     cpu_charged_at: Optional[float] = None
+    # The deployment's retention window, which starts when the job finishes.
+    # Configuration, not state, so it is never stored: a restart with a
+    # shorter window applies it to jobs already finished.
+    retention_seconds: int = 24 * 60 * 60
     # Parsed once and kept, so paging through layers/objects never re-reads
     # the index.
     preview_index: Optional[Dict[str, Any]] = None
@@ -227,8 +216,16 @@ class JobRecord:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "expires_at": self.expires_at,
             "timing": (self.result or {}).get("timing"),
         }
+
+    @property
+    def expires_at(self) -> Optional[float]:
+        """When retention deletes this job, its artifacts, and its record; `None` until it finishes."""
+        if self.state not in TERMINAL_STATES:
+            return None
+        return (self.finished_at or self.created_at) + self.retention_seconds
 
     def to_stored(self) -> Dict[str, Any]:
         """The durable part of the record. Caches and the cancellation event
@@ -257,7 +254,7 @@ class JobRecord:
         }
 
     @classmethod
-    def from_stored(cls, stored: Dict[str, Any], jobs_root: Path) -> "JobRecord":
+    def from_stored(cls, stored: Dict[str, Any], jobs_root: Path, retention_seconds: int) -> "JobRecord":
         """Rebuild a record `to_stored` wrote. Raises `ValueError`, `KeyError`,
         or `TypeError` for anything else, so a damaged row is never served."""
         if stored.get("record_version") != RECORD_VERSION:
@@ -301,6 +298,7 @@ class JobRecord:
             overrides=list(stored.get("overrides") or []),
             cpu_charged_ms=int(stored.get("cpu_charged_ms", 0)),
             cpu_charged_at=stored.get("cpu_charged_at"),
+            retention_seconds=retention_seconds,
         )
 
     def _describe_artifacts(self) -> List[Dict[str, Any]]:
@@ -375,6 +373,11 @@ class JobService:
         self._pool = ThreadPoolExecutor(
             max_workers=config.max_concurrent_jobs, thread_name_prefix="orca-slice-job"
         )
+        # One sweep at a time, so a periodic sweep and a submission's sweep
+        # never both try to delete (and audit) the same directory.
+        self._sweep_lock = threading.Lock()
+        self._sweeper: Optional[threading.Thread] = None
+        self._stop_sweeping = threading.Event()
         # Write-through copy of `_jobs`, read back once here so jobs outlive a
         # restart of this process.
         self._store = store or JobStore(config.metadata_path)
@@ -665,10 +668,7 @@ class JobService:
                 # returns without launching one.
                 record.stored_bytes = 0
                 self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
-                if not remove_job_directory(record.path):
-                    self._log.warning(
-                        "queued job cleanup failed job_id=%s path=%s", job_id, record.path
-                    )
+                self._remove_job(record, "job_canceled")
             self._log.info("job cancellation requested job_id=%s state=%s", job_id, record.state)
             return record.describe()
 
@@ -688,48 +688,92 @@ class JobService:
         return self.submit(request, correlation_id, original_owner, retry_of=job_id)
 
     def sweep(self) -> Dict[str, Any]:
-        """Reclaim expired jobs and uploads, and forget the jobs that went away."""
+        """Enforce retention: delete expired jobs, abandoned directories, and
+        expired uploads, auditing each deletion.
+
+        A known job expires `retention_seconds` after it finished, and its
+        directory, artifacts, and record go together. A directory no record
+        claims (a crash between staging and recording, or a record already
+        gone) falls back to its last modification, which also keeps a job
+        still being staged. Audit rows older than the audit's own retention
+        are pruned here too.
+        """
+        with self._sweep_lock:
+            now = time.time()
+            with self._lock:
+                expired = [
+                    record
+                    for record in self._jobs.values()
+                    if record.expires_at is not None and record.expires_at <= now
+                ]
+                for record in expired:
+                    del self._jobs[record.job_id]
+                known = list(self._jobs)
+                if expired:
+                    gone = {record.job_id for record in expired}
+                    # Never point a future scene request at a job that is gone.
+                    self._scenes = {key: job_id for key, job_id in self._scenes.items() if job_id not in gone}
+            # The record is out of the table, so nothing can start serving
+            # these files while they are being deleted.
+            forgotten = True
+            try:
+                self._store.delete(record.job_id for record in expired)
+            except ApiError:
+                forgotten = False
+                self._log.error("job metadata delete failed count=%d", len(expired))
+            for record in expired:
+                if record.path.exists() or record.path.is_symlink():
+                    self._remove_job(record, "retention_expired")
+                self._audit("job_record", record.job_id, record.owner_id, "retention_expired", forgotten, 0, record.created_at)
+
+            try:
+                report = sweep_job_directories(self._config.jobs_root, self._config.job_limits, known)
+            except JobDirectoryError as error:
+                raise from_job_directory_error(error) from error
+            for name in report.removed + list(report.failed):
+                self._audit("job_directory", name, None, "orphaned", name in report.removed, report.sizes.get(name, 0), None)
+
+            uploads = self._uploads.sweep(self._config.job_limits.retention_seconds, now)
+            for swept in uploads:
+                self._audit(
+                    "upload", swept["upload_id"], swept["owner_id"], "retention_expired",
+                    swept["removed"], swept["bytes"], swept["created_at"],
+                )
+            try:
+                self._store.prune_deletions(now - self._config.audit_retention_seconds)
+            except ApiError:
+                self._log.error("deletion audit prune failed")
+        return {
+            "jobs_removed": [record.job_id for record in expired] + report.removed,
+            "jobs_retained": report.retained,
+            "uploads_removed": [swept["upload_id"] for swept in uploads if swept["removed"]],
+        }
+
+    def start_sweeper(self) -> None:
+        """Enforce retention every `retention_sweep_seconds` until shutdown, even with no traffic."""
         with self._lock:
-            active = [
-                record.job_id for record in self._jobs.values() if record.state not in TERMINAL_STATES
-            ]
-        try:
-            report = sweep_job_directories(self._config.jobs_root, self._config.job_limits, active)
-        except JobDirectoryError as error:
-            raise from_job_directory_error(error) from error
-        # A finished job's record is kept exactly as long as its directory
-        # would be. Without this, jobs whose directories were removed when they
-        # failed or were canceled would be remembered forever.
-        horizon = time.time() - self._config.job_limits.retention_seconds
-        with self._lock:
-            removed = set(report.removed)
-            removed.update(
-                job_id
-                for job_id, record in self._jobs.items()
-                if record.state in TERMINAL_STATES and (record.finished_at or record.created_at) <= horizon
-            )
-            for job_id in removed:
-                self._jobs.pop(job_id, None)
-            if removed:
-                # Never point a future scene request at a job directory that
-                # is gone.
-                self._scenes = {
-                    key: job_id for key, job_id in self._scenes.items() if job_id not in removed
-                }
-                try:
-                    self._store.delete(removed)
-                except ApiError:
-                    self._log.error("job metadata delete failed count=%d", len(removed))
-        uploads = self._uploads.sweep(self._config.job_limits.retention_seconds)
-        return {"jobs_removed": report.removed, "jobs_retained": report.retained, "uploads_removed": uploads}
+            if self._sweeper is not None or not self._accepting:
+                return
+            self._sweeper = threading.Thread(target=self._sweep_periodically, name="orca-retention-sweep", daemon=True)
+            self._sweeper.start()
+
+    def _sweep_periodically(self) -> None:
+        while not self._stop_sweeping.wait(self._config.retention_sweep_seconds):
+            try:
+                self.sweep()
+            except Exception:
+                # A sweep that fails (an unlistable job root) is retried on the
+                # next tick; it must never end enforcement for good.
+                self._log.exception("retention sweep failed")
 
     def begin_shutdown(self) -> None:
         """Close admission and request cancellation without waiting for workers."""
-        queued_paths: List[Path] = []
+        queued: List[JobRecord] = []
         with self._lock:
             if not self._accepting:
                 return
             self._accepting = False
+            self._stop_sweeping.set()
             for record in self._jobs.values():
                 if record.state in TERMINAL_STATES:
                     continue
@@ -741,11 +785,10 @@ class JobService:
                         "canceled",
                         self._error("cancellation", "job_canceled", "The job was canceled."),
                     )
-                    queued_paths.append(record.path)
-        for path in queued_paths:
-            if not remove_job_directory(path):
-                self._log.warning("shutdown job cleanup failed path=%s", path)
-        self._log.info("job service draining queued_canceled=%d", len(queued_paths))
+                    queued.append(record)
+        for record in queued:
+            self._remove_job(record, "job_canceled")
+        self._log.info("job service draining queued_canceled=%d", len(queued))
 
     def shutdown(self) -> None:
         """Drain active work, escalating worker cancellation in the executor."""
@@ -759,6 +802,8 @@ class JobService:
             # Queued records were made terminal above; canceling their futures
             # ensures they never consume a worker slot just to observe that state.
             self._pool.shutdown(wait=True, cancel_futures=True)
+            if self._sweeper is not None:
+                self._sweeper.join()
             self._store.close()
             self._shutdown_complete = True
 
@@ -795,6 +840,7 @@ class JobService:
             profiles=profiles,
             overrides=overrides,
             stored_bytes=staged_bytes,
+            retention_seconds=self._config.job_limits.retention_seconds,
         )
         rejected: Optional[ApiError] = None
         with self._lock:
@@ -829,7 +875,7 @@ class JobService:
                 # report the job as accepted even if it starts immediately.
                 accepted = record.describe()
         if rejected is not None:
-            remove_job_directory(record.path)
+            self._remove_job(record, "job_refused")
             raise rejected
         self._log.info(
             "job accepted job_id=%s operation=%s correlation_id=%s retry_of=%s staged_bytes=%d",
@@ -897,7 +943,7 @@ class JobService:
             result = execution.result
             outcome = str(result.get("outcome"))
             error = result.get("error")
-            stored_bytes = _directory_bytes(record.path)
+            stored_bytes = directory_bytes(record.path)
             with self._lock:
                 record.result = result
                 record.stored_bytes = stored_bytes
@@ -923,13 +969,13 @@ class JobService:
         )
         # A forcibly terminated worker may have left files the executor never
         # validated, so nothing from this job is ever downloadable.
-        remove_job_directory(record.path)
+        self._remove_job(record, "job_canceled" if state == "canceled" else "job_failed")
         with self._lock:
             record.stored_bytes = 0
             self._finish(record, state, self._error(category, code, execution.error_message or "The job failed."))
 
     def _fail(self, record: JobRecord, category: str, code: str, message: str) -> None:
-        remove_job_directory(record.path)
+        self._remove_job(record, "job_failed")
         with self._lock:
             record.stored_bytes = 0
             self._finish(record, "failed", self._error(category, code, message))
@@ -971,12 +1017,14 @@ class JobService:
         with self._lock:
             for stored in self._store.load():
                 try:
-                    record = JobRecord.from_stored(stored, self._config.jobs_root)
+                    record = JobRecord.from_stored(
+                        stored, self._config.jobs_root, self._config.job_limits.retention_seconds
+                    )
                 except (KeyError, TypeError, ValueError):
                     self._log.warning("unreadable job record skipped")
                     continue
                 if record.state not in TERMINAL_STATES:
-                    remove_job_directory(record.path)
+                    self._remove_job(record, "job_interrupted")
                     record.stored_bytes = 0
                     self._finish(
                         record,
@@ -1002,6 +1050,47 @@ class JobService:
             self._log.info("job metadata recovered jobs=%d interrupted=%d", len(records), interrupted)
 
     # Helpers
+
+    def _remove_job(self, record: JobRecord, reason: str) -> None:
+        """Delete one job's directory and audit it. Never raises."""
+        size = directory_bytes(record.path)
+        remove_job_directory(record.path)
+        removed = not (record.path.exists() or record.path.is_symlink())
+        if not removed:
+            self._log.warning("job directory cleanup failed job_id=%s reason=%s", record.job_id, reason)
+        self._audit("job_directory", record.job_id, record.owner_id, reason, removed, size, record.created_at)
+
+    def _audit(
+        self,
+        kind: str,
+        subject_id: str,
+        owner_id: Optional[str],
+        reason: str,
+        removed: bool,
+        size: int,
+        created_at: Optional[float],
+    ) -> None:
+        """Append one deletion audit row. A failed write is logged, never raised:
+        a deletion that already happened must not be undone or reported as failed."""
+        outcome = "removed" if removed else "failed"
+        try:
+            self._store.record_deletion(
+                {
+                    "deleted_at": time.time(),
+                    "kind": kind,
+                    "subject_id": subject_id,
+                    "owner_id": owner_id,
+                    "reason": reason,
+                    "outcome": outcome,
+                    "bytes": size,
+                    "created_at": created_at,
+                }
+            )
+        except ApiError:
+            self._log.error("deletion audit write failed kind=%s subject=%s", kind, subject_id)
+        self._log.info(
+            "deleted kind=%s subject=%s reason=%s outcome=%s bytes=%d", kind, subject_id, reason, outcome, size
+        )
 
     @staticmethod
     def _error(category: str, code: str, message: str) -> Dict[str, str]:

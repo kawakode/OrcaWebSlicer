@@ -16,6 +16,7 @@ from web_job_directory import (  # noqa: E402
     JobInput,
     _resolve_staged_path,
     create_job_directory,
+    directory_bytes,
     prepare_job_directory,
     remove_job_directory,
     sweep_job_directories,
@@ -173,10 +174,13 @@ class JobDirectoryTests(unittest.TestCase):
         recent = self.prepare(job_id="job-recent")
         limits = JobDirectoryLimits(retention_seconds=60)
         os.utime(expired.path, (0, 0))
+        size = directory_bytes(expired.path)
+        self.assertGreater(size, 0)
 
         report = sweep_job_directories(self.root, limits)
         self.assertEqual(report.removed, ["job-expired"])
         self.assertEqual(report.retained, ["job-recent"])
+        self.assertEqual(report.sizes, {"job-expired": size})
         self.assertFalse(expired.path.exists())
         self.assertTrue(recent.path.exists())
 

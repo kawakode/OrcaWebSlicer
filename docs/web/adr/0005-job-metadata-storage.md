@@ -59,9 +59,13 @@ runs. The store is a write-through copy, read once at startup:
   same inputs.
 - The quota windows are rebuilt from the records: each job's submission time,
   and the CPU charge and charge time now stored on it.
-- A finished record is kept exactly as long as its directory would be. The
-  sweep drops records older than the retention window, including records for
-  failed and canceled jobs whose directories were removed when they finished.
+- A finished record, its directory, and its artifacts expire together, one
+  retention window after the job finished. That includes records for failed
+  and canceled jobs, whose directories were removed when they finished.
+- The deletion audit is a second, append-only table, `deletions`, in the same
+  database. It is additive, so it does not change the schema version, and a
+  release that predates it ignores it. See
+  [api.md](../api.md#retention-and-deletion-audit).
 
 WAL with `synchronous=NORMAL` is chosen over `FULL` because it is a hundred
 times cheaper and every record write happens under the job table's lock. A

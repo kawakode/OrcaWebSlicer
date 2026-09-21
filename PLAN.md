@@ -40,8 +40,10 @@ reference single-instance lifecycle, per-owner authentication and
 authorization, per-owner quotas, and abuse controls with a per-owner request
 rate are implemented and tested. Job metadata is stored in SQLite and artifacts
 stay in the job directories on the state volume, so jobs and quota windows
-survive a restart. The 24-hour retention policy and its deletion audit are
-next. An immutable production release unit remains a G6 exit gate.
+survive a restart. Jobs and uploads expire 24 hours after they finish or are
+created, a periodic sweep enforces that without traffic, and every deletion is
+audited. Structured, job-linked observability (section 16) is next. An
+immutable production release unit remains a G6 exit gate.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -345,7 +347,21 @@ verified in a browser the release depends on.
   Artifacts stay in the executor-validated job directories. A database server,
   an object store, and a queue are rejected until several API instances or
   hosts must share state.
-- [ ] Enforce the default 24-hour artifact retention policy and deletion audit.
+- [x] Enforce the default 24-hour artifact retention policy and deletion audit.
+  A job expires 24 hours after it finished, and its directory, artifacts,
+  and record are deleted together. Its description carries `expires_at`. An
+  upload expires 24 hours after it was created. A directory no record claims
+  falls back to its last modification. The sweep runs at startup, before each
+  submission, and every `ORCA_WEB_RETENTION_SWEEP_SECONDS` (default 300), so
+  an idle instance still deletes on time. Every deletion is appended to a
+  `deletions` table in `metadata.sqlite3`: expiry, and the directories of
+  failed, canceled, interrupted, refused, and orphaned jobs. Each row records
+  the kind, ID, opaque owner, reason, outcome, bytes, and times, and never a
+  filename or content. Rows are kept for `ORCA_WEB_AUDIT_RETENTION_SECONDS`
+  (default 30 days). The table is additive, so the schema version and
+  rollback are unchanged. See
+  [the API contract](docs/web/api.md#retention-and-deletion-audit) and
+  [the runbook](docs/web/operations.md#deletion-audit).
 
 ### 16. Add observability and operations
 

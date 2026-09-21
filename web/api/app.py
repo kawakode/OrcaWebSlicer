@@ -275,8 +275,10 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         app.state.settings = settings
         app.state.uploads = uploads
         app.state.jobs = service
-        # Reclaim whatever an earlier process left behind before serving.
+        # Reclaim whatever an earlier process left behind before serving, then
+        # keep enforcing retention even while no request arrives.
         service.sweep()
+        service.start_sweeper()
         logger.info(
             "api ready profiles=%d settings=%d state_root=%s",
             len(catalog),

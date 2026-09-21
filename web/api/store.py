@@ -10,6 +10,12 @@ Each record is one JSON document keyed by job ID, with the owner and state
 lifted into columns so an operator can inspect the table without parsing it.
 The schema version lives in `PRAGMA user_version`; a database written by a
 newer schema is refused rather than read.
+
+The same database holds the deletion audit: one append-only row per job
+directory, job record, or upload the service deleted, saying when, why, whose,
+and how many bytes. It never holds a filename, a request, or any content. It is
+an additive table the jobs schema does not depend on, so it does not change
+the schema version, and a release that predates it simply leaves it alone.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from .errors import ApiError
 
@@ -34,7 +40,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     record TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jobs_owner ON jobs (owner_id);
+CREATE TABLE IF NOT EXISTS deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deleted_at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    owner_id TEXT,
+    reason TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS deletions_time ON deletions (deleted_at);
+CREATE INDEX IF NOT EXISTS deletions_owner ON deletions (owner_id);
 """
+_DELETION_COLUMNS = ("deleted_at", "kind", "subject_id", "owner_id", "reason", "outcome", "bytes", "created_at")
 
 
 def _unavailable() -> ApiError:
@@ -113,6 +133,41 @@ class JobStore:
         try:
             with self._lock:
                 self._connection.executemany("DELETE FROM jobs WHERE job_id = ?", batch)
+        except sqlite3.Error as error:
+            raise _unavailable() from error
+
+    def record_deletion(self, entry: Dict[str, Any]) -> None:
+        """Append one deletion audit row; `entry` names every `_DELETION_COLUMNS` field."""
+        try:
+            with self._lock:
+                self._connection.execute(
+                    f"INSERT INTO deletions ({', '.join(_DELETION_COLUMNS)}) VALUES ({', '.join('?' * len(_DELETION_COLUMNS))})",
+                    tuple(entry[column] for column in _DELETION_COLUMNS),
+                )
+        except sqlite3.Error as error:
+            raise _unavailable() from error
+
+    def deletions(
+        self, since: float = 0.0, owner_id: Optional[str] = None, subject_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Audit rows deleted at or after `since`, oldest first, optionally for one owner or subject."""
+        query = f"SELECT {', '.join(_DELETION_COLUMNS)} FROM deletions WHERE deleted_at >= ?"
+        parameters: List[Any] = [since]
+        if owner_id is not None:
+            query += " AND owner_id = ?"
+            parameters.append(owner_id)
+        if subject_id is not None:
+            query += " AND subject_id = ?"
+            parameters.append(subject_id)
+        with self._lock:
+            rows = self._connection.execute(query + " ORDER BY id", parameters).fetchall()
+        return [dict(zip(_DELETION_COLUMNS, row)) for row in rows]
+
+    def prune_deletions(self, before: float) -> int:
+        """Drop audit rows older than the audit's own retention; returns how many."""
+        try:
+            with self._lock:
+                return self._connection.execute("DELETE FROM deletions WHERE deleted_at < ?", (before,)).rowcount
         except sqlite3.Error as error:
             raise _unavailable() from error
 

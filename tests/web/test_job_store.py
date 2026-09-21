@@ -72,6 +72,47 @@ class JobStoreTests(unittest.TestCase):
             JobStore(self.path)
         self.assertEqual(raised.exception.code, "invalid_api_configuration")
 
+    def test_appends_filters_and_prunes_the_deletion_audit(self):
+        store = JobStore(self.path)
+        owner = "2" * 64
+        for deleted_at, subject, owner_id in ((10.0, "job-a", owner), (20.0, "job-b", None), (30.0, "job-a", owner)):
+            store.record_deletion(
+                {
+                    "deleted_at": deleted_at,
+                    "kind": "job_directory",
+                    "subject_id": subject,
+                    "owner_id": owner_id,
+                    "reason": "retention_expired",
+                    "outcome": "removed",
+                    "bytes": 7,
+                    "created_at": 1.0,
+                }
+            )
+        store.close()
+
+        reopened = JobStore(self.path)
+        self.assertEqual([row["deleted_at"] for row in reopened.deletions()], [10.0, 20.0, 30.0])
+        self.assertEqual([row["deleted_at"] for row in reopened.deletions(owner_id=owner)], [10.0, 30.0])
+        self.assertEqual([row["subject_id"] for row in reopened.deletions(since=15.0)], ["job-b", "job-a"])
+        self.assertEqual(reopened.deletions(subject_id="job-b")[0]["owner_id"], None)
+        self.assertEqual(reopened.prune_deletions(before=25.0), 2)
+        self.assertEqual([row["deleted_at"] for row in reopened.deletions()], [30.0])
+        reopened.close()
+
+    def test_adds_the_audit_to_a_database_without_changing_its_schema_version(self):
+        # A database the release before the audit wrote.
+        self.path.parent.mkdir(parents=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript(
+                "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, state TEXT NOT NULL,"
+                " created_at REAL NOT NULL, record TEXT NOT NULL); PRAGMA user_version = 1;"
+            )
+        store = JobStore(self.path)
+        self.assertEqual(store.deletions(), [])
+        store.close()
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+
     def test_reports_a_write_to_a_closed_store_as_unavailable(self):
         store = JobStore(self.path)
         store.close()
