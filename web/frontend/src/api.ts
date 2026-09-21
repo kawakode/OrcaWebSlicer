@@ -10,11 +10,29 @@ import {
 } from "./types";
 
 const PREFIX = "/api/v1";
+const MAX_RATE_LIMIT_RETRIES = 3;
+const MAX_RETRY_DELAY_MS = 10_000;
+
+/**
+ * `fetch`, resent after the advertised delay when the API refused it with
+ * `request_rate_limited`. That refusal happens before any route runs, so
+ * resending is safe for every method, uploads and submissions included.
+ */
+async function send(path: string, init?: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(`${PREFIX}${path}`, init);
+    if (response.status !== 429 || attempt >= MAX_RATE_LIMIT_RETRIES) return response;
+    const body = await response.clone().json().catch(() => null);
+    if (body?.error?.code !== "request_rate_limited") return response;
+    const seconds = Number(response.headers.get("Retry-After")) || 1;
+    await new Promise((resolve) => window.setTimeout(resolve, Math.min(seconds * 1000, MAX_RETRY_DELAY_MS)));
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${PREFIX}${path}`, init);
+    response = await send(path, init);
   } catch {
     throw new ApiError("network_unavailable", "The slicing service could not be reached.", 0);
   }
@@ -78,7 +96,7 @@ export const readScene = (jobId: string): Promise<SceneIndex> =>
 
 /** One object's triangle soup. Only the objects drawn are ever fetched. */
 export async function sceneObject(jobId: string, index: number): Promise<ArrayBuffer> {
-  const response = await fetch(`${PREFIX}/scenes/${jobId}/objects/${index}`);
+  const response = await send(`/scenes/${jobId}/objects/${index}`);
   if (!response.ok) {
     throw new ApiError("scene_unavailable", "That scene object is unavailable.", response.status);
   }
@@ -123,7 +141,7 @@ export const readPreview = (jobId: string): Promise<PreviewIndex> =>
 
 /** One layer's toolpaths. Only the selected layer is ever fetched. */
 export async function previewLayer(jobId: string, layer: number): Promise<ArrayBuffer> {
-  const response = await fetch(`${PREFIX}/jobs/${jobId}/preview/layers/${layer}`);
+  const response = await send(`/jobs/${jobId}/preview/layers/${layer}`);
   if (!response.ok) {
     throw new ApiError("preview_unavailable", "That preview layer is unavailable.", response.status);
   }

@@ -13,6 +13,7 @@ from web_worker_executor import ExecutorLimits, limits_from_environment as execu
 from web_worker_sandbox import SandboxError, SandboxPolicy, policy_from_environment
 
 from . import REPO_ROOT
+from .abuse import RateLimits, limits_from_environment as rate_limits_from_environment
 from .auth import AUTH_MODE_REQUIRED, AUTH_MODES
 from .errors import ApiError
 from .quotas import QuotaLimits, limits_from_environment as quota_limits_from_environment
@@ -32,6 +33,7 @@ class ApiConfig:
     job_limits: JobDirectoryLimits = dataclasses.field(default_factory=JobDirectoryLimits)
     sandbox: SandboxPolicy = dataclasses.field(default_factory=SandboxPolicy)
     quotas: QuotaLimits = dataclasses.field(default_factory=QuotaLimits)
+    rate_limits: RateLimits = dataclasses.field(default_factory=RateLimits)
     # Serving the built browser screen from the API keeps the app on one origin.
     # When it is absent the API is a bare JSON service and the Vite dev server
     # proxies to it instead.
@@ -70,6 +72,7 @@ class ApiConfig:
                 "the storage quota must be at least the maximum input size.",
                 500,
             )
+        self.rate_limits.validate()
         self._validate_auth()
 
     def _validate_auth(self) -> None:
@@ -130,6 +133,7 @@ def from_environment() -> ApiConfig:
         job_limits=job_limits_from_environment(),
         sandbox=sandbox,
         quotas=quota_limits_from_environment(),
+        rate_limits=rate_limits_from_environment(),
         frontend_dist=dist if dist.is_dir() else None,
         auth_mode=os.environ.get("ORCA_WEB_AUTH_MODE") or AUTH_MODE_REQUIRED,
         auth_issuer=os.environ.get("ORCA_WEB_AUTH_ISSUER") or None,

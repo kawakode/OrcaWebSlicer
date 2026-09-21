@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from starlette.responses import JSONResponse
+
 from web_job_directory import JobDirectoryError
 from web_profile_catalog import ProfileCatalogError
 from web_settings_catalog import SettingsCatalogError
@@ -17,8 +19,23 @@ class ApiError(RuntimeError):
         self.code = code
         self.status = status
         # Whole seconds a client should wait before retrying, sent as
-        # `Retry-After`; only a windowed quota knows one.
+        # `Retry-After`; only a windowed quota or the request rate knows one.
         self.retry_after: Optional[int] = None
+
+
+def error_response(error: ApiError, correlation_id: str) -> JSONResponse:
+    """The one rendering of an `ApiError`, shared by the route handler and the
+    abuse guard, which refuses a request before it reaches any route."""
+    headers = {"X-Correlation-Id": correlation_id} if correlation_id else {}
+    if error.code == "authentication_required":
+        headers["WWW-Authenticate"] = "Bearer"
+    if error.retry_after is not None:
+        headers["Retry-After"] = str(error.retry_after)
+    return JSONResponse(
+        status_code=error.status,
+        content={"error": {"code": error.code, "message": str(error)}, "correlation_id": correlation_id},
+        headers=headers or None,
+    )
 
 
 # Lower layers already produce stable codes. Only the codes whose HTTP meaning

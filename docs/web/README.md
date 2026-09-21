@@ -102,7 +102,8 @@ subject, and every lookup, cancellation, retry, artifact, preview, and scene
 access enforces it. `ORCA_WEB_AUTH_MODE` stays `disabled` in the reference
 Compose file until an authenticating edge is added in front of it. Per-owner
 concurrency, storage, CPU-time, and submission quotas are enforced on that same
-owner key. Abuse controls and rate limiting, persistent metadata storage,
+owner key, and every authenticated request is charged to a per-owner rate
+limit and a body cap before its body is read. Persistent metadata storage,
 retention, observability, and the remaining release and compliance work are
 still open.
 

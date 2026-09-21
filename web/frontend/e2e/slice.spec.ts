@@ -160,3 +160,31 @@ test("an unsupported model is refused before a job is created", async ({ page })
   await expect(page.getByTestId("failure")).toContainText("unsupported_model_format");
   await expect(page.getByTestId("job-state")).toHaveCount(0);
 });
+
+test("a request refused by the rate limit is resent and the slice still succeeds", async ({ page }) => {
+  // The first job poll and the first job submission are each refused once,
+  // exactly as the API's abuse guard would refuse them.
+  const refused = new Set<string>();
+  await page.route(/\/api\/v1\/jobs(\/job-[0-9a-f]+)?$/, async (route) => {
+    const key = `${route.request().method()} ${new URL(route.request().url()).pathname.replace(/job-[0-9a-f]+/, "{id}")}`;
+    if (refused.has(key)) return route.fallback();
+    refused.add(key);
+    await route.fulfill({
+      status: 429,
+      headers: { "Retry-After": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        error: { code: "request_rate_limited", message: "Too many requests." },
+        correlation_id: "e2e",
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await waitForProfiles(page);
+  await page.getByTestId("file-input").setInputFiles(CUBE);
+  await page.getByTestId("slice").click();
+
+  await expect(page.getByTestId("job-state")).toHaveText("succeeded");
+  await expect(page.getByTestId("failure")).toHaveCount(0);
+  expect([...refused].sort()).toEqual(["GET /api/v1/jobs/{id}", "POST /api/v1/jobs"]);
+});

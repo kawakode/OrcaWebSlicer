@@ -25,9 +25,10 @@ from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
 from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
 
 from . import API_VERSION, PROTOCOL_VERSION
+from .abuse import MULTIPART_OVERHEAD_BYTES, AbuseGuard, RateLimiter
 from .auth import AUTH_MODE_DISABLED, AuthConfigurationError, LOCAL_DEVELOPMENT_OWNER_ID, Principal, create_authenticator
 from .config import ApiConfig, from_environment
-from .errors import ApiError, from_catalog_error
+from .errors import ApiError, error_response, from_catalog_error
 from .jobs import (
     ARTIFACT_NAMES,
     MAX_FILAMENT_PROFILES,
@@ -44,6 +45,8 @@ from .uploads import UploadStore
 CORRELATION_HEADER = "X-Correlation-Id"
 CORRELATION_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 PREFIX = f"/api/{API_VERSION}"
+# The only `/api/v1` routes reachable without a principal.
+PUBLIC_PATHS = (f"{PREFIX}/health", f"{PREFIX}/health/live", f"{PREFIX}/health/ready")
 # A print taller than this has no browsable preview anyway, and the bound keeps
 # an absurd path parameter from reaching the job service at all.
 MAX_PREVIEW_LAYER = 1_000_000
@@ -179,10 +182,13 @@ def get_principal(request: Request) -> Principal:
 
     Attached to the `protected` router below rather than to individual routes,
     so a route added to it can never accidentally skip authentication. The
-    concrete check (fixed disabled-mode principal, or real JWKS verification)
-    lives in `request.app.state.authenticate`, built once in `create_app`.
+    principal itself is authenticated by `AbuseGuard` before the request body
+    is read; a request that guard did not authenticate fails closed here.
     """
-    return request.app.state.authenticate(request)
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(principal, Principal):
+        raise ApiError("authentication_required", "A valid bearer assertion is required.", 401)
+    return principal
 
 
 def require_admission(request: Request):
@@ -299,9 +305,18 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
     )
-    # Built once per app instance (tests create several with different
-    # configs), stored on state so `get_principal` reaches it per request.
-    app.state.authenticate = authenticate
+    # Added before the correlation middleware, so it runs inside it and its
+    # refusals carry the request's correlation ID like any other error.
+    app.add_middleware(
+        AbuseGuard,
+        prefix=PREFIX,
+        public_paths=PUBLIC_PATHS,
+        upload_path=f"{PREFIX}/uploads",
+        max_upload_body_bytes=resolved.job_limits.max_input_bytes + MULTIPART_OVERHEAD_BYTES,
+        max_json_body_bytes=resolved.rate_limits.max_json_body_bytes,
+        authenticate=authenticate,
+        limiter=RateLimiter(resolved.rate_limits),
+    )
 
     @app.middleware("http")
     async def attach_correlation_id(request: Request, call_next):
@@ -317,19 +332,7 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
         identifier = correlation_id(request)
         logger.info("request failed code=%s correlation_id=%s", error.code, identifier)
-        headers = {CORRELATION_HEADER: identifier} if identifier else {}
-        if error.code == "authentication_required":
-            headers["WWW-Authenticate"] = "Bearer"
-        if error.retry_after is not None:
-            headers["Retry-After"] = str(error.retry_after)
-        return JSONResponse(
-            status_code=error.status,
-            content={
-                "error": {"code": error.code, "message": str(error)},
-                "correlation_id": identifier,
-            },
-            headers=headers or None,
-        )
+        return error_response(error, identifier)
 
     if not docs_enabled:
         # The built frontend is mounted as a catch-all below. Reserve these

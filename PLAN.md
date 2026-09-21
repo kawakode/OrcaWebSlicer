@@ -37,9 +37,10 @@ Multi-filament landed after G5 closed and is described in section 18.
 
 The active gate is G6, production readiness. Isolation, security scanning, the
 reference single-instance lifecycle, per-owner authentication and
-authorization, and per-owner quotas are implemented and tested. Abuse controls
-and rate limiting are next; an immutable production release unit and durable recovery remain G6
-exit gates.
+authorization, per-owner quotas, and abuse controls with a per-owner request
+rate are implemented and tested. Persistent metadata and artifact storage is
+next; an immutable production release unit and durable recovery remain G6 exit
+gates.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -313,7 +314,20 @@ verified in a browser the release depends on.
   measured. `GET /api/v1/quota` reports limits and usage. The rolling windows
   are process-local until persistent metadata is selected; see
   [the API contract](docs/web/api.md#quotas).
-- [ ] Add abuse controls and rate limiting without weakening stable job errors.
+- [x] Add abuse controls and rate limiting without weakening stable job errors.
+  One ASGI guard runs ahead of every protected route and, before reading a
+  byte of the body, refuses an oversized declared length
+  (`request_body_too_large`, 413), authenticates the caller, and charges one
+  request to a per-owner token bucket (`request_rate_limited`, 429 with
+  `Retry-After`). Authenticating there, rather than only in a route
+  dependency, stops an unauthenticated caller from making the API spool a
+  full-size upload, because the framework reads a body before it resolves
+  dependencies. A chunked body is counted as it streams. A refusal happens
+  before any route runs, so it has no side effect and never changes a job's
+  state or error code; the browser resends such a request after
+  `Retry-After`. Unauthenticated floods and per-address limits are left to the
+  authenticating edge. See
+  [the API contract](docs/web/api.md#abuse-controls-and-rate-limiting).
 - [ ] Select persistent metadata and artifact storage based on measured needs.
 - [ ] Enforce the default 24-hour artifact retention policy and deletion audit.
 

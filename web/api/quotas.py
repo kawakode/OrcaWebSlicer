@@ -20,12 +20,13 @@ import os
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, Tuple
+from typing import Any, Callable, Deque, Dict, Tuple, Type, TypeVar
 
 from .errors import ApiError
 
 
 QUOTA_STATUS = 429
+_Limits = TypeVar("_Limits")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -38,10 +39,7 @@ class QuotaLimits:
     window_seconds: int = 3_600
 
     def validate(self) -> None:
-        for field in dataclasses.fields(self):
-            value = getattr(self, field.name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ApiError("invalid_api_configuration", f"quota {field.name} must be a positive integer.", 500)
+        validate_positive_ints(self, "quota")
 
     def describe(self) -> Dict[str, int]:
         return dataclasses.asdict(self)
@@ -56,9 +54,18 @@ _ENVIRONMENT = {
 }
 
 
-def limits_from_environment() -> QuotaLimits:
+def validate_positive_ints(limits: Any, label: str) -> None:
+    """Every field of a limits dataclass must be a positive integer."""
+    for field in dataclasses.fields(limits):
+        value = getattr(limits, field.name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ApiError("invalid_api_configuration", f"{label} {field.name} must be a positive integer.", 500)
+
+
+def positive_ints_from_environment(cls: Type[_Limits], variables: Dict[str, str]) -> _Limits:
+    """Build a limits dataclass from its environment variables; unset keeps a default."""
     values = {}
-    for field, variable in _ENVIRONMENT.items():
+    for field, variable in variables.items():
         raw = os.environ.get(variable, "")
         if not raw:
             continue
@@ -66,9 +73,13 @@ def limits_from_environment() -> QuotaLimits:
             values[field] = int(raw)
         except ValueError as error:
             raise ApiError("invalid_api_configuration", f"{variable} must be a positive integer.", 500) from error
-    limits = QuotaLimits(**values)
+    limits = cls(**values)
     limits.validate()
     return limits
+
+
+def limits_from_environment() -> QuotaLimits:
+    return positive_ints_from_environment(QuotaLimits, _ENVIRONMENT)
 
 
 def quota_error(code: str, message: str, retry_after: float = 0.0) -> ApiError:

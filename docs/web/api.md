@@ -294,6 +294,47 @@ restart empty.
 }
 ```
 
+## Abuse controls and rate limiting
+
+One guard runs ahead of every protected route. The framework reads and spools a
+request body before it resolves any route dependency, so checking identity in a
+dependency alone would let an unauthenticated caller make the API store a
+full-size upload before refusing it. The guard therefore handles each request,
+in this order, before reading a byte of its body:
+
+1. A declared `Content-Length` over the route's cap is refused with
+   `request_body_too_large` (HTTP 413). The cap is `ORCA_WEB_MAX_INPUT_BYTES`
+   plus 1 MiB of multipart framing for `POST /uploads`, and
+   `ORCA_WEB_MAX_JSON_BODY_BYTES` for every other route. A chunked body is
+   counted as it streams and cut off with the same error. The file part of an
+   upload is still held to `ORCA_WEB_MAX_INPUT_BYTES` by the upload store, with
+   its own `upload_size_limit_exceeded` code.
+2. The caller is authenticated, as described
+   [above](#authentication-and-authorization).
+3. One request is charged to the caller's `owner_id` in a token bucket that
+   holds `ORCA_WEB_RATE_REQUEST_BURST` requests and refills at
+   `ORCA_WEB_RATE_REQUESTS_PER_MINUTE`. An empty bucket is refused with
+   `request_rate_limited` (HTTP 429) and a `Retry-After` in whole seconds.
+
+These refusals happen before any route runs, so they have no side effect. A
+client may always resend a request refused with `request_rate_limited`, even
+an upload or a submission, and the browser screen does this after the
+`Retry-After` delay, up to three times. Rate limiting never touches jobs: a
+queued or running job keeps its own state, and a finished one keeps its stable
+error code, however many of its owner's reads are refused. It is also distinct
+from the job quotas above. A submission can be refused by the request rate
+before it reaches the quota checks.
+
+The three health endpoints are not guarded. The limiter tracks at most
+`ORCA_WEB_RATE_TRACKED_OWNERS` owners and forgets the least recently seen first.
+Like the quota windows it is process-local and restarts empty. In `disabled`
+mode every request shares the one `local-development` bucket.
+
+Only callers with a valid assertion are rate-limited. Floods of
+unauthenticated requests, per-address limits, and connection limits belong at
+the authenticating edge that ADR 0004 places in front of the API. Because the
+edge proxies every request, the API sees only the edge's address.
+
 ## Correlation IDs
 
 Every request carries a correlation ID: the supplied `X-Correlation-Id` when it
@@ -322,6 +363,10 @@ The API adds these settings to the worker and executor variables listed in
 | `ORCA_WEB_QUOTA_CPU_TIME_MS` | 3600000 | Worker time one owner may be charged per window |
 | `ORCA_WEB_QUOTA_SUBMISSIONS` | 120 | Jobs one owner may submit per window |
 | `ORCA_WEB_QUOTA_WINDOW_SECONDS` | 3600 | Length of the rolling CPU and submission window |
+| `ORCA_WEB_RATE_REQUESTS_PER_MINUTE` | 600 | Rate at which one owner's request bucket refills |
+| `ORCA_WEB_RATE_REQUEST_BURST` | 300 | Requests one owner may make at once |
+| `ORCA_WEB_RATE_TRACKED_OWNERS` | 100000 | Owners the rate limiter remembers at once |
+| `ORCA_WEB_MAX_JSON_BODY_BYTES` | 4194304 (4 MiB) | Body cap for every route but `POST /uploads` |
 
 When the frontend build exists it is mounted after every API route, so the
 [browser screen](frontend.md) is served from this same origin. When it does not,

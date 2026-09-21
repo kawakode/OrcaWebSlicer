@@ -385,6 +385,11 @@ services:
       ORCA_WEB_QUOTA_CPU_TIME_MS: ${ORCA_WEB_QUOTA_CPU_TIME_MS:-}
       ORCA_WEB_QUOTA_SUBMISSIONS: ${ORCA_WEB_QUOTA_SUBMISSIONS:-}
       ORCA_WEB_QUOTA_WINDOW_SECONDS: ${ORCA_WEB_QUOTA_WINDOW_SECONDS:-}
+      # Per-owner request rate and body caps; empty keeps the application defaults.
+      ORCA_WEB_RATE_REQUESTS_PER_MINUTE: ${ORCA_WEB_RATE_REQUESTS_PER_MINUTE:-}
+      ORCA_WEB_RATE_REQUEST_BURST: ${ORCA_WEB_RATE_REQUEST_BURST:-}
+      ORCA_WEB_RATE_TRACKED_OWNERS: ${ORCA_WEB_RATE_TRACKED_OWNERS:-}
+      ORCA_WEB_MAX_JSON_BODY_BYTES: ${ORCA_WEB_MAX_JSON_BODY_BYTES:-}
     # This service alone receives mutable user state. Build and test services
     # retain the anchor's cache volumes without gaining access to uploads.
     volumes:
