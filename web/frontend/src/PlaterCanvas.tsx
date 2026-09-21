@@ -47,12 +47,11 @@ const SIMPLIFIED_ALPHA = 0.55;
 const LIGHT: Vector = [0.35, -0.5, 0.79];
 const AMBIENT = 0.38;
 /**
- * Selection is drawn as a two-tone wireframe halo over the item's own fill
- * rather than a color swap: a fill now carries meaning (which filament), so
- * swapping it away on selection would hide that and could also collide with
- * another slot's own color. Stroking every edge in both a near-black and a
- * near-white line guarantees at least one of the two contrasts with any fill
- * color underneath, light or dark.
+ * Selection is drawn as a two-tone outline around the item rather than a color
+ * swap: a fill now carries meaning (which filament), so swapping it away on
+ * selection would hide that and could also collide with another slot's own
+ * color. A near-black and a near-white band guarantee at least one of the two
+ * contrasts with whatever surrounds the object, light or dark.
  */
 const SELECTION_HALO_OUTER = "#10131a";
 const SELECTION_HALO_INNER = "#ffffff";
@@ -296,36 +295,41 @@ export function PlaterCanvas(props: {
 
     const scene = project(items, camera, center.current, width, height);
     projected.current = scene;
-    for (let triangle = 0; triangle < scene.owner.length; triangle += 1) {
+    const trace = (target: CanvasRenderingContext2D | Path2D, triangle: number) => {
       const base = triangle * 6;
+      target.moveTo(scene.points[base], scene.points[base + 1]);
+      target.lineTo(scene.points[base + 2], scene.points[base + 3]);
+      target.lineTo(scene.points[base + 4], scene.points[base + 5]);
+      target.closePath();
+    };
+
+    // Selection halo: every edge of the selected object is stroked wide
+    // *before* the fills, which then cover all of it but the band outside the
+    // silhouette. Stroking on top instead drew a wireframe of every triangle,
+    // hidden ones included, which buried a detailed mesh in lines.
+    const selection = new Path2D();
+    for (let triangle = 0; triangle < scene.owner.length; triangle += 1)
+      if (items[scene.owner[triangle]].selected) trace(selection, triangle);
+    context.lineJoin = "round";
+    context.strokeStyle = SELECTION_HALO_OUTER;
+    context.lineWidth = 6;
+    context.stroke(selection);
+    context.strokeStyle = SELECTION_HALO_INNER;
+    context.lineWidth = 3.5;
+    context.stroke(selection);
+
+    // Each fill is also stroked in its own color: antialiased neighbours
+    // otherwise leave hairline seams that show whatever lies underneath.
+    context.lineWidth = 0.75;
+    for (let triangle = 0; triangle < scene.owner.length; triangle += 1) {
       context.globalAlpha = items[scene.owner[triangle]].simplified ? SIMPLIFIED_ALPHA : 1;
-      context.fillStyle = scene.fill[triangle];
+      context.fillStyle = context.strokeStyle = scene.fill[triangle];
       context.beginPath();
-      context.moveTo(scene.points[base], scene.points[base + 1]);
-      context.lineTo(scene.points[base + 2], scene.points[base + 3]);
-      context.lineTo(scene.points[base + 4], scene.points[base + 5]);
-      context.closePath();
+      trace(context, triangle);
       context.fill();
+      if (!items[scene.owner[triangle]].simplified) context.stroke();
     }
     context.globalAlpha = 1;
-
-    // Selection halo: a second pass, on top of every fill, so it reads
-    // clearly regardless of paint order or which filament color it sits on.
-    for (let triangle = 0; triangle < scene.owner.length; triangle += 1) {
-      if (!items[scene.owner[triangle]].selected) continue;
-      const base = triangle * 6;
-      context.beginPath();
-      context.moveTo(scene.points[base], scene.points[base + 1]);
-      context.lineTo(scene.points[base + 2], scene.points[base + 3]);
-      context.lineTo(scene.points[base + 4], scene.points[base + 5]);
-      context.closePath();
-      context.strokeStyle = SELECTION_HALO_OUTER;
-      context.lineWidth = 3;
-      context.stroke();
-      context.strokeStyle = SELECTION_HALO_INNER;
-      context.lineWidth = 1.25;
-      context.stroke();
-    }
   }, [bed, items, camera, onCamera]);
 
   // Redrawn whenever the canvas itself changes size, not only the window: a

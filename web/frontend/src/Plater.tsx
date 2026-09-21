@@ -12,6 +12,7 @@ import {
 } from "./PlaterCanvas";
 import {
   boxMesh,
+  decimate,
   multiply,
   rotationZ,
   transformBox,
@@ -25,9 +26,9 @@ import { ApiError, TERMINAL_STATES, type ObjectPlacement, type SceneIndex } from
 
 const POLL_INTERVAL_MS = 300;
 /**
- * How many triangles the canvas draws before objects fall back to their
- * bounding boxes. A 2D canvas paints one path per triangle, so this is a
- * budget on frame time; the ceiling the worker enforces is a million.
+ * How many triangles the canvas draws before objects are decimated to fit.
+ * A 2D canvas paints one path per triangle, so this is a budget on frame
+ * time; the ceiling the worker enforces is a million.
  */
 const TRIANGLE_BUDGET = 20_000;
 /**
@@ -271,21 +272,31 @@ export function Plater(props: {
     );
   }, [scene, placements, placed, filamentCount, onPlacements]);
 
+  // Decimated once per scene and budget rather than per frame or selection.
+  // Only a mesh no grid can bring under the budget falls back to its box.
+  const budget = Math.max(1, Math.floor(TRIANGLE_BUDGET / Math.max(1, placements.length)));
+  const meshes = useMemo(
+    () =>
+      scene?.meshes.map((mesh, source) => decimate(mesh, scene.index.objects[source].bounding_box, budget)) ??
+      [],
+    [scene, budget],
+  );
+
   const items = useMemo<DrawItem[]>(() => {
     if (!scene) return [];
-    const budget = Math.max(1, Math.floor(TRIANGLE_BUDGET / Math.max(1, placements.length)));
     return placements.map((placement, index) => {
       const object = scene.index.objects[placement.source];
-      const simplified = object.triangle_count > budget;
+      const mesh = meshes[placement.source];
+      const simplified = mesh === null;
       return {
-        vertices: simplified ? boxMesh(object.bounding_box) : scene.meshes[placement.source],
+        vertices: mesh ?? boxMesh(object.bounding_box),
         matrix: placed[index].matrix,
         color: filamentColor(placement.filament - 1),
         selected: placement.id === selected,
         simplified,
       };
     });
-  }, [scene, placements, placed, selected]);
+  }, [scene, meshes, placements, placed, selected]);
 
   const update = useCallback(
     (id: number, change: Partial<Placement>) =>

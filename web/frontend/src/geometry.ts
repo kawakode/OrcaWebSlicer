@@ -106,3 +106,74 @@ export function boxMesh(box: Box): Float32Array {
   });
   return vertices;
 }
+
+/** Merges the soup's vertices per cell of a `cells`-wide grid over `box`. */
+function cluster(vertices: Float32Array, box: Box, cells: number): Float32Array {
+  const vertexCount = vertices.length / 3;
+  const size = Math.max(...[0, 1, 2].map((axis) => box.max[axis] - box.min[axis]), 1e-6) / cells;
+  const span = cells + 1;
+  const cellOf = new Int32Array(vertexCount);
+  const clusters = new Map<number, number>();
+  const sums: number[] = [];
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    let key = 0;
+    for (let axis = 2; axis >= 0; axis -= 1) {
+      const offset = Math.floor((vertices[vertex * 3 + axis] - box.min[axis]) / size);
+      key = key * span + Math.min(cells, Math.max(0, offset));
+    }
+    let index = clusters.get(key);
+    if (index === undefined) {
+      index = sums.length / 4;
+      clusters.set(key, index);
+      sums.push(0, 0, 0, 0);
+    }
+    cellOf[vertex] = index;
+    for (let axis = 0; axis < 3; axis += 1) sums[index * 4 + axis] += vertices[vertex * 3 + axis];
+    sums[index * 4 + 3] += 1;
+  }
+
+  const kept: number[] = [];
+  const seen = new Set<string>();
+  for (let vertex = 0; vertex < vertexCount; vertex += 3) {
+    const [a, b, c] = [cellOf[vertex], cellOf[vertex + 1], cellOf[vertex + 2]];
+    if (a === b || b === c || a === c) continue;
+    const key = [a, b, c].sort((left, right) => left - right).join();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(a, b, c);
+  }
+  const result = new Float32Array(kept.length * 3);
+  kept.forEach((index, position) => {
+    for (let axis = 0; axis < 3; axis += 1)
+      result[position * 3 + axis] = sums[index * 4 + axis] / sums[index * 4 + 3];
+  });
+  return result;
+}
+
+/**
+ * Vertex-clustering decimation of a local-frame triangle soup: vertices are
+ * merged per cell of a uniform grid, each at its cell's mean, and triangles
+ * that collapse or repeat are dropped. The finest grid that fits `budget` is
+ * searched for, so an object over the draw budget keeps its shape instead of
+ * turning into its bounding box. Null when no grid fits.
+ */
+export function decimate(vertices: Float32Array, box: Box, budget: number): Float32Array | null {
+  const triangles = vertices.length / 9;
+  if (triangles <= budget) return vertices;
+  let best: Float32Array | null = null;
+  // Fewer cells never keep more triangles, so the finest fitting grid is
+  // bisected for; a surface's triangles grow with the square of the cells.
+  let low = 2;
+  let high = Math.ceil(4 * Math.sqrt(triangles));
+  while (low <= high) {
+    const cells = Math.floor((low + high) / 2);
+    const result = cluster(vertices, box, cells);
+    if (result.length / 9 <= budget) {
+      best = result;
+      low = cells + 1;
+    } else {
+      high = cells - 1;
+    }
+  }
+  return best && best.length > 0 ? best : null;
+}

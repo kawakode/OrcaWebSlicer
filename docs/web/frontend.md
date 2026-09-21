@@ -146,8 +146,9 @@ a browser the release depends on. Canvas 2D also matches how the layer preview
 is already drawn, and adds no dependency.
 
 Because a 2D canvas paints one path per triangle, drawing is bounded: past
-20,000 triangles across the plate, objects are drawn as their bounding boxes
-instead. The ceiling the worker enforces is a million, so this is a frame-time
+20,000 triangles across the plate, objects are decimated by vertex clustering
+until they fit, and only one that cannot fit is drawn as its bounding box. The
+ceiling the worker enforces is a million, so this is a frame-time
 budget for the view and never a limit on what can be sliced.
 
 Pointer gestures — click to select, drag an object to move it on the bed, drag
