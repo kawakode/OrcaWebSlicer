@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from web_job_directory import JOB_ID_PATTERN
 from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
 from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
+from web_structured_log import configure as configure_logging, log_event
 
 from . import API_VERSION, PROTOCOL_VERSION
 from .abuse import MULTIPART_OVERHEAD_BYTES, AbuseGuard, RateLimiter
@@ -177,6 +179,39 @@ def correlation_id(request: Request) -> str:
     return getattr(request.state, "correlation_id", "")
 
 
+# Path parameters naming a job or an upload are copied onto request records, so
+# an operator can follow one job from its HTTP calls to its worker run.
+_IDENTIFYING_PATH_PARAMS = ("job_id", "upload_id")
+
+
+def _path_identifiers(request: Request) -> Dict[str, str]:
+    params = request.scope.get("path_params") or {}
+    return {name: str(params[name]) for name in _IDENTIFYING_PATH_PARAMS if name in params}
+
+
+def _log_request(request: Request, status: int, started: float) -> None:
+    """One record per request, keyed by its route template and never its query.
+
+    Probes and the static browser shell are recorded at debug level: probes are
+    polled every few seconds, and neither touches a job.
+    """
+    template = getattr(request.scope.get("route"), "path", None)
+    routine = template in PUBLIC_PATHS or not request.url.path.startswith(PREFIX + "/")
+    principal = getattr(request.state, "principal", None)
+    log_event(
+        logger,
+        logging.DEBUG if routine else logging.INFO,
+        "request.completed",
+        method=request.method,
+        route=template or "unmatched",
+        status=status,
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+        correlation_id=correlation_id(request),
+        owner_id=principal.owner_id if isinstance(principal, Principal) else None,
+        **_path_identifiers(request),
+    )
+
+
 def get_principal(request: Request) -> Principal:
     """The one dependency every protected route requires.
 
@@ -245,15 +280,17 @@ def _load_engine_metadata(config: ApiConfig, catalog):
             lambda request: evaluate_compatibility(config.worker_command, str(request))
         )
     except (SettingsCatalogError, ProfileCatalogError) as error:
-        logger.warning("engine metadata unavailable code=%s", getattr(error, "code", "unknown"))
+        log_event(logger, logging.WARNING, "engine_metadata.unavailable", code=getattr(error, "code", "unknown"))
         return None
-    logger.info("engine metadata loaded settings=%d conditional_profiles=%d", len(settings), resolved)
+    log_event(logger, logging.INFO, "engine_metadata.loaded", settings=len(settings), conditional_profiles=resolved)
     return settings
 
 
 def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     resolved = config or from_environment()
     resolved.validate()
+    if resolved.log_format is not None:
+        configure_logging(resolved.log_format)
     try:
         authenticate = create_authenticator(
             resolved.auth_mode, resolved.auth_jwks_path, resolved.auth_issuer, resolved.auth_audience
@@ -279,19 +316,23 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         # keep enforcing retention even while no request arrives.
         service.sweep()
         service.start_sweeper()
-        logger.info(
-            "api ready profiles=%d settings=%d state_root=%s",
-            len(catalog),
-            len(settings) if settings else 0,
-            resolved.state_root,
+        log_event(
+            logger,
+            logging.INFO,
+            "api.ready",
+            profiles=len(catalog),
+            settings=len(settings) if settings else 0,
+            state_root=str(resolved.state_root),
+            auth_mode=resolved.auth_mode,
+            max_concurrent_jobs=resolved.max_concurrent_jobs,
         )
         try:
             yield
         finally:
             service.begin_shutdown()
-            logger.info("api draining")
+            log_event(logger, logging.INFO, "api.draining")
             service.shutdown()
-            logger.info("api shutdown complete")
+            log_event(logger, logging.INFO, "api.stopped")
 
     # Required mode never publishes the generated schema or interactive docs:
     # an unauthenticated deployment detail is not something a production
@@ -326,14 +367,27 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         request.state.correlation_id = (
             supplied if CORRELATION_PATTERN.match(supplied) else uuid.uuid4().hex
         )
-        response = await call_next(request)
-        response.headers[CORRELATION_HEADER] = request.state.correlation_id
-        return response
+        started = time.monotonic()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers[CORRELATION_HEADER] = request.state.correlation_id
+            return response
+        finally:
+            _log_request(request, status, started)
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
         identifier = correlation_id(request)
-        logger.info("request failed code=%s correlation_id=%s", error.code, identifier)
+        log_event(
+            logger,
+            logging.INFO,
+            "request.failed",
+            code=error.code,
+            correlation_id=identifier,
+            **_path_identifiers(request),
+        )
         return error_response(error, identifier)
 
     if not docs_enabled:
@@ -424,12 +478,15 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     ) -> Dict[str, Any]:
         """Store one model. The bytes are never parsed in this process."""
         record = request.app.state.jobs.create_upload(file.filename, file.file, principal.owner_id)
-        logger.info(
-            "upload stored upload_id=%s format=%s bytes=%d correlation_id=%s",
-            record.upload_id,
-            record.model_format,
-            record.size_bytes,
-            correlation_id(request),
+        log_event(
+            logger,
+            logging.INFO,
+            "upload.stored",
+            upload_id=record.upload_id,
+            owner_id=principal.owner_id,
+            format=record.model_format,
+            bytes=record.size_bytes,
+            correlation_id=correlation_id(request),
         )
         return record.describe()
 

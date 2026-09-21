@@ -42,8 +42,10 @@ rate are implemented and tested. Job metadata is stored in SQLite and artifacts
 stay in the job directories on the state volume, so jobs and quota windows
 survive a restart. Jobs and uploads expire 24 hours after they finish or are
 created, a periodic sweep enforces that without traffic, and every deletion is
-audited. Structured, job-linked observability (section 16) is next. An
-immutable production release unit remains a G6 exit gate.
+audited. The API, executor, and worker events log one JSON record per line,
+and every record about a job carries its ID. Job metrics and cleanup outcomes
+(the rest of section 16) are next. An immutable production release unit
+remains a G6 exit gate.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -365,7 +367,17 @@ verified in a browser the release depends on.
 
 ### 16. Add observability and operations
 
-- [ ] Emit structured API, executor, and worker logs linked by job ID.
+- [x] Emit structured API, executor, and worker logs linked by job ID. One
+  formatter (`scripts/web_structured_log.py`) writes a JSON object per line
+  for the API, the executor, and Uvicorn; `ORCA_WEB_LOG_FORMAT=text` is for a
+  terminal. Requests, uploads, acceptance, the worker run (start, stage
+  changes, warning and error codes, exit), the terminal state, and deletions
+  are each one record with `job_id`, `correlation_id`, and the opaque
+  `owner_id` where they apply, and `request.completed` replaces the access
+  log. Records hold identifiers, codes, counts, and durations; filenames,
+  worker messages, and engine stderr stay out, and tests assert it. See
+  [the API contract](docs/web/api.md#structured-logs) and
+  [the runbook](docs/web/operations.md#logs).
 - [ ] Record queue time, slice time, peak memory, failures, cancellations,
   artifact size, and cleanup outcomes.
 - [ ] Add dashboards and alerts for saturation, crash loops, timeout rates,

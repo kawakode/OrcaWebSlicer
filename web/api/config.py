@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 from web_job_directory import JobDirectoryLimits, limits_from_environment as job_limits_from_environment
 from web_profile_catalog import vendors_from_environment
+from web_structured_log import FORMAT_JSON as LOG_FORMAT_JSON, FORMATS as LOG_FORMATS
 from web_worker_executor import ExecutorLimits, limits_from_environment as executor_limits_from_environment
 from web_worker_sandbox import SandboxError, SandboxPolicy, policy_from_environment
 
@@ -48,6 +49,9 @@ class ApiConfig:
     auth_issuer: Optional[str] = None
     auth_audience: Optional[str] = None
     auth_jwks_path: Optional[Path] = None
+    # `json` or `text`. `None` leaves the process's logging as it found it,
+    # which is what an embedding test harness wants.
+    log_format: Optional[str] = None
 
     @property
     def uploads_root(self) -> Path:
@@ -90,6 +94,10 @@ class ApiConfig:
                 500,
             )
         self.rate_limits.validate()
+        if self.log_format is not None and self.log_format not in LOG_FORMATS:
+            raise ApiError(
+                "invalid_api_configuration", f"ORCA_WEB_LOG_FORMAT must be one of {', '.join(LOG_FORMATS)}.", 500
+            )
         self._validate_auth()
 
     def _validate_auth(self) -> None:
@@ -157,6 +165,7 @@ def from_environment() -> ApiConfig:
         auth_issuer=os.environ.get("ORCA_WEB_AUTH_ISSUER") or None,
         auth_audience=os.environ.get("ORCA_WEB_AUTH_AUDIENCE") or None,
         auth_jwks_path=Path(jwks_env).resolve() if jwks_env else None,
+        log_format=os.environ.get("ORCA_WEB_LOG_FORMAT") or LOG_FORMAT_JSON,
     )
     config.validate()
     return config

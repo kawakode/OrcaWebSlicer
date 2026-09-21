@@ -86,6 +86,13 @@ event as it arrives, which is how the API reports live progress. It runs on the
 reader thread, so it must not block; an observer that raises fails the job
 rather than stalling the pipe it is draining.
 
+Each run is logged on `orca.web.executor` under the manifest's `job_id`:
+`worker.started`, one `worker.stage` per stage change, `worker.warning` and
+`worker.error` with the worker's stable codes, and a final `worker.exited` with
+the status, exit code, duration, and output volumes. Worker messages and stderr
+are never copied into a record. The records are listed in
+[api.md](api.md#structured-logs).
+
 After a normal exit, the executor requires contiguous event sequences, one last
 terminal state, a matching bounded `result.json`, the documented exit code, and
 safe regular files for every declared artifact. Malformed output, crashes,

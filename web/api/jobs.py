@@ -29,6 +29,7 @@ from web_job_directory import (
 )
 from web_profile_catalog import ProfileCatalog, ProfileCatalogError
 from web_settings_catalog import SettingsCatalog, SettingsCatalogError
+from web_structured_log import log_event
 from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_path
 
 from . import PROTOCOL_VERSION
@@ -669,7 +670,7 @@ class JobService:
                 record.stored_bytes = 0
                 self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
                 self._remove_job(record, "job_canceled")
-            self._log.info("job cancellation requested job_id=%s state=%s", job_id, record.state)
+            self._event(logging.INFO, "job.cancel_requested", job_id=job_id, state=record.state)
             return record.describe()
 
     def retry(self, job_id: str, correlation_id: str, owner_id: str) -> Dict[str, Any]:
@@ -720,7 +721,7 @@ class JobService:
                 self._store.delete(record.job_id for record in expired)
             except ApiError:
                 forgotten = False
-                self._log.error("job metadata delete failed count=%d", len(expired))
+                self._event(logging.ERROR, "metadata.delete_failed", count=len(expired))
             for record in expired:
                 if record.path.exists() or record.path.is_symlink():
                     self._remove_job(record, "retention_expired")
@@ -742,7 +743,7 @@ class JobService:
             try:
                 self._store.prune_deletions(now - self._config.audit_retention_seconds)
             except ApiError:
-                self._log.error("deletion audit prune failed")
+                self._event(logging.ERROR, "audit.prune_failed")
         return {
             "jobs_removed": [record.job_id for record in expired] + report.removed,
             "jobs_retained": report.retained,
@@ -764,7 +765,7 @@ class JobService:
             except Exception:
                 # A sweep that fails (an unlistable job root) is retried on the
                 # next tick; it must never end enforcement for good.
-                self._log.exception("retention sweep failed")
+                self._log.exception("retention.sweep_failed")
 
     def begin_shutdown(self) -> None:
         """Close admission and request cancellation without waiting for workers."""
@@ -788,7 +789,7 @@ class JobService:
                     queued.append(record)
         for record in queued:
             self._remove_job(record, "job_canceled")
-        self._log.info("job service draining queued_canceled=%d", len(queued))
+        self._event(logging.INFO, "jobs.draining", queued_canceled=len(queued))
 
     def shutdown(self) -> None:
         """Drain active work, escalating worker cancellation in the executor."""
@@ -877,13 +878,15 @@ class JobService:
         if rejected is not None:
             self._remove_job(record, "job_refused")
             raise rejected
-        self._log.info(
-            "job accepted job_id=%s operation=%s correlation_id=%s retry_of=%s staged_bytes=%d",
-            job_id,
-            operation,
-            correlation_id,
-            retry_of,
-            staged_bytes,
+        self._event(
+            logging.INFO,
+            "job.accepted",
+            job_id=job_id,
+            owner_id=owner_id,
+            operation=operation,
+            correlation_id=correlation_id,
+            retry_of=retry_of,
+            staged_bytes=staged_bytes,
         )
         return accepted
 
@@ -912,12 +915,12 @@ class JobService:
                 sandbox=self._config.sandbox,
             )
         except ExecutorError as error:
-            self._log.warning("job executor failure job_id=%s code=%s", job_id, error.code)
+            self._event(logging.WARNING, "job.executor_failed", job_id=job_id, code=error.code)
             self._fail(record, "internal", error.code, str(error))
             return
         except Exception:
             # One job's failure must never take the API process down with it.
-            self._log.exception("job execution raised job_id=%s", job_id)
+            self._log.exception("job.raised", extra={"fields": {"job_id": job_id}})
             self._fail(record, "internal", "internal_error", "The job failed unexpectedly.")
             return
         finally:
@@ -949,24 +952,11 @@ class JobService:
                 record.stored_bytes = stored_bytes
                 record.warnings = [item for item in result.get("warnings", []) if isinstance(item, dict)]
                 self._finish(record, outcome, dict(error) if isinstance(error, dict) else None)
-            self._log.info(
-                "job finished job_id=%s outcome=%s correlation_id=%s",
-                record.job_id,
-                outcome,
-                record.correlation_id,
-            )
             return
 
         category, code = _EXECUTOR_FAILURES.get(execution.status, ("internal", None))
         code = code or execution.error_code or "worker_failed"
         state = "canceled" if category == "cancellation" else "failed"
-        self._log.warning(
-            "job terminated job_id=%s status=%s code=%s forced=%s",
-            record.job_id,
-            execution.status,
-            code,
-            execution.forced_termination,
-        )
         # A forcibly terminated worker may have left files the executor never
         # validated, so nothing from this job is ever downloadable.
         self._remove_job(record, "job_canceled" if state == "canceled" else "job_failed")
@@ -989,6 +979,24 @@ class JobService:
         if state == "succeeded":
             record.progress = {"stage": "finalize", "percent": 100, "message": ""}
         self._persist(record)
+        started = record.started_at
+        self._event(
+            logging.INFO,
+            "job.finished",
+            job_id=record.job_id,
+            owner_id=record.owner_id,
+            operation=record.operation,
+            state=state,
+            # The worker writes `result.json`, so its code is cut to a token.
+            code=str(error.get("code"))[:128] if error else None,
+            correlation_id=record.correlation_id,
+            queue_ms=round((started - record.created_at) * 1000) if started is not None else None,
+            run_ms=round((record.finished_at - started) * 1000) if started is not None else None,
+            warnings=len(record.warnings),
+        )
+
+    def _event(self, level: int, event: str, /, **fields: Any) -> None:
+        log_event(self._log, level, event, **fields)
 
     def _persist(self, record: JobRecord) -> None:
         """Write one record through to the store. Call with `_lock` held.
@@ -1000,7 +1008,7 @@ class JobService:
         try:
             self._store.save(record.to_stored())
         except ApiError:
-            self._log.error("job metadata write failed job_id=%s state=%s", record.job_id, record.state)
+            self._event(logging.ERROR, "metadata.write_failed", job_id=record.job_id, state=record.state)
 
     def _recover(self) -> None:
         """Reload the stored job table and settle what an earlier process left.
@@ -1021,7 +1029,7 @@ class JobService:
                         stored, self._config.jobs_root, self._config.job_limits.retention_seconds
                     )
                 except (KeyError, TypeError, ValueError):
-                    self._log.warning("unreadable job record skipped")
+                    self._event(logging.WARNING, "metadata.record_unreadable")
                     continue
                 if record.state not in TERMINAL_STATES:
                     self._remove_job(record, "job_interrupted")
@@ -1047,7 +1055,7 @@ class JobService:
             if age < window:
                 self._quotas.charge_cpu(record.owner_id, record.cpu_charged_ms, max(0.0, age))
         if records:
-            self._log.info("job metadata recovered jobs=%d interrupted=%d", len(records), interrupted)
+            self._event(logging.INFO, "metadata.recovered", jobs=len(records), interrupted=interrupted)
 
     # Helpers
 
@@ -1057,7 +1065,7 @@ class JobService:
         remove_job_directory(record.path)
         removed = not (record.path.exists() or record.path.is_symlink())
         if not removed:
-            self._log.warning("job directory cleanup failed job_id=%s reason=%s", record.job_id, reason)
+            self._event(logging.WARNING, "job.cleanup_failed", job_id=record.job_id, reason=reason)
         self._audit("job_directory", record.job_id, record.owner_id, reason, removed, size, record.created_at)
 
     def _audit(
@@ -1087,10 +1095,8 @@ class JobService:
                 }
             )
         except ApiError:
-            self._log.error("deletion audit write failed kind=%s subject=%s", kind, subject_id)
-        self._log.info(
-            "deleted kind=%s subject=%s reason=%s outcome=%s bytes=%d", kind, subject_id, reason, outcome, size
-        )
+            self._event(logging.ERROR, "audit.write_failed", kind=kind, subject=subject_id)
+        self._event(logging.INFO, "deleted", kind=kind, subject=subject_id, reason=reason, outcome=outcome, bytes=size)
 
     @staticmethod
     def _error(category: str, code: str, message: str) -> Dict[str, str]:

@@ -26,6 +26,8 @@ from typing import Any, Awaitable, Callable, Collection, Dict, Tuple
 
 from starlette.requests import Request
 
+from web_structured_log import log_event
+
 from .errors import ApiError, error_response
 from .quotas import positive_ints_from_environment, validate_positive_ints
 
@@ -168,7 +170,9 @@ class AbuseGuard:
             if wait > 0:
                 raise rate_limited_error(wait)
         except ApiError as error:
-            logger.info("request refused code=%s correlation_id=%s", error.code, state.get("correlation_id", ""))
+            log_event(
+                logger, logging.INFO, "request.refused", code=error.code, correlation_id=state.get("correlation_id") or None
+            )
             await error_response(error, state.get("correlation_id", ""))(scope, receive, send)
             return
         state["principal"] = principal

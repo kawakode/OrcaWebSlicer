@@ -41,6 +41,8 @@ def create_lifecycle_app():
             executor_limits=ExecutorLimits(termination_grace_ms=200),
             # This suite exercises shutdown timing, not identity.
             auth_mode="disabled",
+            # The production shape: every line the process writes is JSON.
+            log_format="json",
         )
     )
 
@@ -173,10 +175,13 @@ class ApiLifecycleTests(unittest.TestCase):
         # A direct Uvicorn process exits 0; the same graceful lifecycle behind
         # an init shim may preserve SIGTERM's conventional 143/-15 status.
         self.assertIn(self.process.returncode, (0, -15))
-        self.assertIn(
-            "Application shutdown complete.",
-            (self.root / "uvicorn.log").read_text(encoding="utf-8"),
-        )
+        log = (self.root / "uvicorn.log").read_text(encoding="utf-8")
+        records = [json.loads(line) for line in log.splitlines()]
+        events = [record["event"] for record in records]
+        self.assertIn("Application shutdown complete.", events)
+        self.assertIn("api.stopped", events)
+        finished = {record["job_id"]: record["state"] for record in records if record["event"] == "job.finished"}
+        self.assertEqual(finished, {running: "canceled", queued: "canceled"})
         self.assertFalse((self.state_root / "jobs" / running).exists())
         self.assertFalse((self.state_root / "jobs" / queued).exists())
         with self.assertRaises(ProcessLookupError):

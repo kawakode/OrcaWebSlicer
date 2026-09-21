@@ -381,6 +381,8 @@ services:
       # `required` and mount ORCA_WEB_AUTH_ISSUER, ORCA_WEB_AUTH_AUDIENCE, and
       # ORCA_WEB_AUTH_JWKS_PATH instead.
       ORCA_WEB_AUTH_MODE: disabled
+      # One JSON object per line on stderr; `text` for reading in a terminal.
+      ORCA_WEB_LOG_FORMAT: ${ORCA_WEB_LOG_FORMAT:-json}
       # Per-owner quotas; empty keeps the application defaults in docs/web/api.md.
       ORCA_WEB_QUOTA_ACTIVE_JOBS: ${ORCA_WEB_QUOTA_ACTIVE_JOBS:-}
       ORCA_WEB_QUOTA_STORAGE_BYTES: ${ORCA_WEB_QUOTA_STORAGE_BYTES:-}
@@ -436,6 +438,9 @@ services:
       - "8000"
       - --timeout-graceful-shutdown
       - "10"
+      # `request.completed` replaces the access log and carries the
+      # correlation ID, owner, and job it served.
+      - --no-access-log
 
   deployment-probe:
     <<: *build-environment

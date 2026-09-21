@@ -161,6 +161,25 @@ After restart, wait for healthy status and run the full deployment probe. Job
 URLs from before the restart keep working until retention reclaims them. Jobs
 the stop canceled can be retried.
 
+## Logs
+
+The API writes one JSON object per line to stderr. The records and their
+fields are listed in [api.md](api.md#structured-logs). To follow one job, filter
+on its ID; every record from its submission to its deletion carries it:
+
+```powershell
+docker compose -f docker/web/compose.yml logs --no-log-prefix api | Select-String 'JOB_ID'
+```
+
+A client's `X-Correlation-Id` links its request to `job.accepted` and
+`job.finished`, so a user report that quotes the correlation ID finds the job
+the same way. Set `ORCA_WEB_LOG_FORMAT=text` to read the stream in a terminal.
+
+`worker.exited` at warning level means the executor ended the run: a timeout,
+a crash, an output limit, or a cancellation. Its `code` is the stable executor
+code, and `stderr_bytes` shows whether the engine said anything. The engine's
+text itself is not logged.
+
 ## Deletion audit
 
 Every deletion the API performs, by retention or because a job failed, was
@@ -186,8 +205,8 @@ A row whose `outcome` is `failed` means files were left behind, for example
 because of a permission error on the state volume. The next sweep, at most
 `ORCA_WEB_RETENTION_SWEEP_SECONDS` later, retries the directory as `orphaned`
 and records a second row. Repeated `failed` rows for one subject need an
-operator. So does the log line `deletion audit write failed`: it means the
-deletion happened but its row could not be stored.
+operator. So does an `audit.write_failed` log record: it means the deletion
+happened but its row could not be stored.
 
 The audit lives on the state volume. An empty-state rebuild or a destructive
 reset loses it along with the data it describes.

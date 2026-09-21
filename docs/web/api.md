@@ -224,8 +224,8 @@ not exposed over HTTP. Operators read it from the state volume, as described in
 [operations.md](operations.md#deletion-audit). Rows are kept for
 `ORCA_WEB_AUDIT_RETENTION_SECONDS` (default 30 days, never less than the
 retention window) and then pruned by the same sweep. Each deletion is also
-logged as `deleted kind=… subject=… reason=… outcome=… bytes=…`, without the
-owner. When the metadata store itself is unavailable, the deletion still
+logged as a `deleted` record with `kind`, `subject`, `reason`, `outcome`, and
+`bytes`, without the owner. When the metadata store itself is unavailable, the deletion still
 happens and is still logged, but its audit row is lost; the failed write is
 logged as an error.
 
@@ -409,6 +409,36 @@ Every request carries a correlation ID: the supplied `X-Correlation-Id` when it
 is well formed, otherwise a generated one. It is echoed on every response
 including errors, stored on the job the request created, and written to the log
 lines for that job, so one identifier links an API request to its worker run.
+See [Structured logs](#structured-logs) for the records that carry it.
+
+## Structured logs
+
+The API, the executor, and the worker's protocol events all log through one
+format: one JSON object per line on stderr, with `ts`, `level`, `logger`, and
+`event`, followed by the record's fields. `ORCA_WEB_LOG_FORMAT=text` renders the
+same records as `event key=value` for a terminal. Uvicorn's own lines are
+reformatted the same way, and the reference Compose service turns off its access
+log because `request.completed` replaces it.
+
+Every record about a job carries its `job_id`, so an operator can follow one
+job from its HTTP calls to its worker run:
+
+| Event | Logger | Fields |
+| --- | --- | --- |
+| `request.completed` | `orca.web.api` | `method`, `route` (the template, never the query), `status`, `duration_ms`, `correlation_id`, `owner_id`, and `job_id` or `upload_id` when the route names one. Probes and the browser shell are logged at debug level. |
+| `request.failed`, `request.refused` | `orca.web.api` | The stable `code` and `correlation_id`. `refused` comes from the abuse guard, before any route runs. |
+| `upload.stored` | `orca.web.api` | `upload_id`, `owner_id`, `format`, `bytes`, `correlation_id` |
+| `job.accepted` | `orca.web.api.jobs` | `job_id`, `owner_id`, `operation`, `correlation_id`, `retry_of`, `staged_bytes` |
+| `worker.started` | `orca.web.executor` | `job_id`, `operation`, `pid`, and the `sandbox` controls applied |
+| `worker.stage`, `worker.warning`, `worker.error` | `orca.web.executor` | `job_id` and the worker's stable `stage`, `code`, or `category` and `code`. A stage is logged when it changes, not per percent. |
+| `worker.exited` | `orca.web.executor` | `job_id`, executor `status`, worker `outcome`, `code`, `exit_code`, `forced`, `duration_ms`, event and stderr byte counts, and `stderr_truncated`. Any status but `completed` is a warning. |
+| `job.finished` | `orca.web.api.jobs` | `job_id`, `owner_id`, `operation`, terminal `state`, error `code`, `correlation_id`, `queue_ms`, `run_ms`, `warnings` |
+| `deleted` | `orca.web.api.jobs` | See [Retention and deletion audit](#retention-and-deletion-audit) |
+
+Records carry identifiers, codes, counts, and durations only. `owner_id` is the
+opaque digest from ADR 0004. No record holds a filename, a profile or setting
+value, a worker message, model or G-code content, or an identity claim. The
+worker's stderr is engine free text, so it is counted rather than copied.
 
 ## Configuration
 
@@ -437,6 +467,7 @@ The API adds these settings to the worker and executor variables listed in
 | `ORCA_WEB_RATE_REQUEST_BURST` | 300 | Requests one owner may make at once |
 | `ORCA_WEB_RATE_TRACKED_OWNERS` | 100000 | Owners the rate limiter remembers at once |
 | `ORCA_WEB_MAX_JSON_BODY_BYTES` | 4194304 (4 MiB) | Body cap for every route but `POST /uploads` |
+| `ORCA_WEB_LOG_FORMAT` | `json` | `json` or `text`; see [Structured logs](#structured-logs) |
 
 When the frontend build exists it is mounted after every API route, so the
 [browser screen](frontend.md) is served from this same origin. When it does not,

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import math
 import os
 import signal
@@ -16,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from web_structured_log import log_event
 from web_worker_sandbox import (
     SandboxError,
     SandboxPolicy,
@@ -26,6 +28,11 @@ from web_worker_sandbox import (
 
 TERMINAL_STATES = {"succeeded", "failed", "canceled"}
 MAX_MANIFEST_BYTES = 1024 * 1024
+# Worker-supplied stages and codes are short identifiers; anything longer is
+# cut before it reaches the log.
+MAX_LOGGED_TOKEN = 128
+
+_log = logging.getLogger("orca.web.executor")
 
 
 class ExecutorError(RuntimeError):
@@ -283,6 +290,68 @@ def _load_job_id(manifest_path: Path) -> str:
     return job_id
 
 
+def _short(value: Any) -> str:
+    """A worker-supplied token, bounded before it reaches a log line."""
+    return str(value)[:MAX_LOGGED_TOKEN]
+
+
+def _logging_observer(
+    job_id: str, observer: Optional[Callable[[Dict[str, Any]], None]]
+) -> Callable[[Dict[str, Any]], None]:
+    """Log each worker event under its job, then hand it to the caller's observer.
+
+    Only stable tokens are logged: stages, categories, and codes. Messages are
+    free text that can name a user's objects, so they stay in the job report.
+    Progress is logged when its stage changes, never per percent.
+    """
+    stage: Optional[str] = None
+
+    def observe(event: Dict[str, Any]) -> None:
+        nonlocal stage
+        kind = event.get("type")
+        payload = event.get(kind) if isinstance(kind, str) else None
+        payload = payload if isinstance(payload, dict) else {}
+        if kind == "progress" and payload.get("stage") != stage:
+            stage = payload.get("stage")
+            log_event(_log, logging.INFO, "worker.stage", job_id=job_id, stage=_short(stage))
+        elif kind == "warning":
+            log_event(_log, logging.INFO, "worker.warning", job_id=job_id, code=_short(payload.get("code")))
+        elif kind == "error":
+            log_event(
+                _log,
+                logging.INFO,
+                "worker.error",
+                job_id=job_id,
+                category=_short(payload.get("category")),
+                code=_short(payload.get("code")),
+            )
+        if observer is not None:
+            observer(event)
+
+    return observe
+
+
+def _log_exit(job_id: str, execution: ExecutionResult, elapsed: float) -> None:
+    """One record per worker run. The worker's stderr is counted, not copied:
+    it is engine free text, and a support copy of it is an explicit export."""
+    log_event(
+        _log,
+        logging.INFO if execution.status == "completed" else logging.WARNING,
+        "worker.exited",
+        job_id=job_id,
+        status=execution.status,
+        outcome=_short(execution.result.get("outcome")) if execution.result else None,
+        code=execution.error_code,
+        exit_code=execution.worker_exit_code,
+        forced=execution.forced_termination,
+        duration_ms=round(elapsed * 1000),
+        event_count=len(execution.events),
+        event_bytes=execution.event_bytes,
+        stderr_bytes=execution.log_bytes,
+        stderr_truncated=execution.log_bytes > execution.captured_log_bytes,
+    )
+
+
 def _signal_process_group(process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
     try:
         os.killpg(process.pid, sig)
@@ -461,7 +530,16 @@ def execute_worker(
 
     assert process.stdout is not None
     assert process.stderr is not None
-    protocol = _ProtocolCollector(limits, event_observer)
+    log_event(
+        _log,
+        logging.INFO,
+        "worker.started",
+        job_id=job_id,
+        operation=manifest_flag.lstrip("-").split("-")[0],
+        pid=process.pid,
+        sandbox=list(setup.controls),
+    )
+    protocol = _ProtocolCollector(limits, _logging_observer(job_id, event_observer))
     logs = _LogCollector(limits.log_bytes)
     stdout_thread = threading.Thread(target=protocol.consume, args=(process.stdout,), daemon=True)
     stderr_thread = threading.Thread(target=logs.consume, args=(process.stderr,), daemon=True)
@@ -517,59 +595,45 @@ def execute_worker(
         termination_code = "log_volume_limit_exceeded"
         termination_message = "Worker log output exceeded the configured byte limit."
 
-    stderr = logs.text()
+    common = dict(
+        worker_exit_code=process.returncode,
+        events=protocol.events,
+        event_bytes=protocol.total_bytes,
+        log_bytes=logs.total_bytes,
+        captured_log_bytes=logs.captured_bytes,
+        sandbox=setup.controls,
+        stderr=logs.text(),
+    )
     if termination_code is not None:
         status = {
             "executor_canceled": "canceled",
             "executor_wall_time_exceeded": "timed_out",
         }.get(termination_code, "output_limit" if "limit" in termination_code else "failed")
-        return ExecutionResult(
+        execution = ExecutionResult(
             status=status,
-            worker_exit_code=process.returncode,
             forced_termination=forced,
-            events=protocol.events,
             result=None,
-            event_bytes=protocol.total_bytes,
-            log_bytes=logs.total_bytes,
-            captured_log_bytes=logs.captured_bytes,
-            sandbox=setup.controls,
-            stderr=stderr,
             error_code=termination_code,
             error_message=termination_message,
+            **common,
         )
-
-    try:
-        result = _validate_completion(
-            protocol.events, job_id, job_root, process.returncode, limits.event_bytes
-        )
-    except ExecutorError as error:
-        return ExecutionResult(
-            status="failed",
-            worker_exit_code=process.returncode,
-            forced_termination=False,
-            events=protocol.events,
-            result=None,
-            event_bytes=protocol.total_bytes,
-            log_bytes=logs.total_bytes,
-            captured_log_bytes=logs.captured_bytes,
-            sandbox=setup.controls,
-            stderr=stderr,
-            error_code=error.code,
-            error_message=str(error),
-        )
-
-    return ExecutionResult(
-        status="completed",
-        worker_exit_code=process.returncode,
-        forced_termination=False,
-        events=protocol.events,
-        result=result,
-        event_bytes=protocol.total_bytes,
-        log_bytes=logs.total_bytes,
-        captured_log_bytes=logs.captured_bytes,
-        sandbox=setup.controls,
-        stderr=stderr,
-    )
+    else:
+        try:
+            result = _validate_completion(
+                protocol.events, job_id, job_root, process.returncode, limits.event_bytes
+            )
+            execution = ExecutionResult(status="completed", forced_termination=False, result=result, **common)
+        except ExecutorError as error:
+            execution = ExecutionResult(
+                status="failed",
+                forced_termination=False,
+                result=None,
+                error_code=error.code,
+                error_message=str(error),
+                **common,
+            )
+    _log_exit(job_id, execution, time.monotonic() - started)
+    return execution
 
 
 def main() -> int:

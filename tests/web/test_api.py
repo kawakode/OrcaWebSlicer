@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import contextlib
 import dataclasses
 import importlib.util
 import io
@@ -474,6 +475,41 @@ class ApiTests(unittest.TestCase):
             with self.subTest(job_id=job_id):
                 response = self.client.get(f"/api/v1/jobs/{job_id}")
                 self.assertIn(response.status_code, {404, 422})
+
+    def test_links_every_log_record_of_a_job_by_its_id(self):
+        loggers = ("orca.web.api", "orca.web.api.jobs", "orca.web.executor")
+        with contextlib.ExitStack() as stack:
+            captures = [stack.enter_context(self.assertLogs(name, level="INFO")) for name in loggers]
+            upload = self.upload(name="private-part-name.stl")
+            accepted = self.client.post(
+                "/api/v1/jobs",
+                json={"upload_id": upload.json()["upload_id"], "machine_profile": MACHINE_ID,
+                      "process_profile": PROCESS_ID, "filament_profile": FILAMENT_ID},
+                headers={"X-Correlation-Id": "trace-log"},
+            )
+            job_id = accepted.json()["job_id"]
+            self.assertEqual(self.wait(job_id)["state"], "succeeded")
+        records = [
+            (record.getMessage(), getattr(record, "fields", {})) for capture in captures for record in capture.records
+        ]
+        by_event = {event: fields for event, fields in records if fields.get("job_id") == job_id}
+        self.assertTrue(
+            {"job.accepted", "worker.started", "worker.stage", "worker.warning", "worker.exited",
+             "job.finished", "request.completed"} <= set(by_event),
+            sorted(by_event),
+        )
+        self.assertEqual(by_event["job.accepted"]["correlation_id"], "trace-log")
+        finished = by_event["job.finished"]
+        self.assertEqual(
+            (finished["state"], finished["correlation_id"], finished["warnings"]), ("succeeded", "trace-log", 1)
+        )
+        self.assertGreaterEqual(finished["run_ms"], 0)
+        polled = by_event["request.completed"]
+        self.assertEqual((polled["route"], polled["status"]), ("/api/v1/jobs/{job_id}", 200))
+        # Filenames and worker messages stay in the job report, never the log.
+        text = repr(records)
+        self.assertNotIn("private-part-name", text)
+        self.assertNotIn("A thin wall was detected", text)
 
     def test_carries_a_correlation_id_through_every_response(self):
         generated = self.client.get("/api/v1/health")

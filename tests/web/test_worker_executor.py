@@ -179,6 +179,33 @@ class WorkerExecutorTests(unittest.TestCase):
         self.assertLessEqual(len(execution.stderr.encode("utf-8")), 4096)
         self.assertGreater(execution.log_bytes, 4096)
 
+    def test_logs_each_run_under_its_job_id(self):
+        with self.assertLogs("orca.web.executor", level="INFO") as captured:
+            self.run_mode("success")
+        records = {record.getMessage(): record.fields for record in captured.records}
+        self.assertEqual(list(records), ["worker.started", "worker.exited"])
+        self.assertEqual({fields["job_id"] for fields in records.values()}, {"executor-test"})
+        self.assertEqual(records["worker.started"]["operation"], "slice")
+        exited = records["worker.exited"]
+        self.assertEqual((exited["status"], exited["outcome"], exited["exit_code"]), ("completed", "succeeded", 0))
+        self.assertEqual(exited["event_count"], 3)
+
+    def test_logs_stages_once_and_never_the_worker_text(self):
+        with self.assertLogs("orca.web.executor", level="INFO") as captured:
+            self.run_mode("event-spam", event_count=8)
+        stages = [record for record in captured.records if record.getMessage() == "worker.stage"]
+        # Seven progress events of one stage are one record, and their
+        # messages are not copied into it.
+        self.assertEqual([record.fields["stage"] for record in stages], ["slicing"])
+        exited = captured.records[-1]
+        self.assertEqual(exited.levelname, "WARNING")
+        self.assertEqual(exited.fields["code"], "event_count_limit_exceeded")
+
+        with self.assertLogs("orca.web.executor", level="INFO") as captured:
+            self.run_mode("log-spam", log_bytes=4096)
+        self.assertTrue(captured.records[-1].fields["stderr_truncated"])
+        self.assertNotIn("secretless diagnostic", repr([record.fields for record in captured.records]))
+
     def test_forces_a_worker_that_ignores_the_grace_period(self):
         execution = self.run_mode("ignore-term", wall_time_ms=500)
         self.assertEqual(execution.status, "timed_out")
