@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from .errors import ApiError
+from .quotas import QuotaLimits, storage_quota_error
 
 
 # The worker rejects anything else before it invokes an importer; the API
@@ -92,7 +93,16 @@ class UploadStore:
         self._max_bytes = max_bytes
         self._legacy_owner_id = legacy_owner_id
 
-    def create(self, filename: Optional[str], reader: BinaryIO, owner_id: str) -> UploadRecord:
+    def create(
+        self,
+        filename: Optional[str],
+        reader: BinaryIO,
+        owner_id: str,
+        quota: Optional[Tuple[int, QuotaLimits]] = None,
+    ) -> UploadRecord:
+        """Store one model. `quota`, when given, is the (bytes, limits) this
+        upload may still consume of its owner's storage budget; exceeding it
+        is a quota failure rather than the service-wide size limit."""
         display = _display_filename(filename)
         model_format = _model_format(display)
         upload_id = uuid.uuid4().hex
@@ -105,7 +115,7 @@ class UploadStore:
 
         target = directory / f"source.{model_format}"
         try:
-            size_bytes, digest = self._store(reader, target)
+            size_bytes, digest = self._store(reader, target, quota)
             record = UploadRecord(
                 upload_id=upload_id,
                 filename=display,
@@ -137,19 +147,7 @@ class UploadStore:
         path = directory / f"source.{model_format}"
         if not path.is_file() or path.is_symlink():
             raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
-        metadata_version = metadata.get("metadata_version", 1)
-        if metadata_version not in (1, _METADATA_VERSION):
-            raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
-        # Version 1 predates ownership. It resolves to the legacy owner this
-        # deployment maps ownerless uploads to (or to nothing in required
-        # mode). Version 2 must carry the opaque 64-character owner digest.
-        if metadata_version == 1:
-            stored_owner = self._legacy_owner_id
-        else:
-            stored_owner = metadata.get("owner_id")
-            if not isinstance(stored_owner, str) or not _OWNER_ID_PATTERN.fullmatch(stored_owner):
-                raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
-        if stored_owner != owner_id:
+        if self._stored_owner(metadata) != owner_id:
             raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
         return UploadRecord(
             upload_id=upload_id,
@@ -161,6 +159,30 @@ class UploadStore:
             created_at=float(metadata.get("created_at", 0.0)),
             owner_id=owner_id,
         )
+
+    def owner_bytes(self, owner_id: str) -> int:
+        """Bytes held by one owner's complete uploads, read from their metadata.
+
+        Measured from disk rather than remembered, so a restart never forgets
+        what an owner still holds. A directory without readable metadata is
+        either mid-upload (and reserved by the caller) or reclaimed by `sweep`.
+        """
+        total = 0
+        try:
+            entries = list(self._root.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return 0
+        except OSError as error:
+            raise ApiError("upload_root_unavailable", "The upload root could not be listed.", 500) from error
+        for entry in entries:
+            try:
+                metadata = json.loads((entry / _METADATA_NAME).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(metadata, dict) and self._stored_owner(metadata) == owner_id:
+                size = metadata.get("size_bytes", 0)
+                total += size if isinstance(size, int) and size > 0 else 0
+        return total
 
     def sweep(self, retention_seconds: int, now: Optional[float] = None) -> List[str]:
         """Reclaim uploads older than the retention window."""
@@ -186,7 +208,27 @@ class UploadStore:
                 continue
         return removed
 
-    def _store(self, reader: BinaryIO, target: Path) -> Tuple[int, str]:
+    def _stored_owner(self, metadata: Dict[str, Any]) -> Optional[str]:
+        """The owner a stored record belongs to, or `None` when it has none.
+
+        Version 1 predates ownership. It resolves to the legacy owner this
+        deployment maps ownerless uploads to (or to nothing in required mode).
+        Version 2 must carry the opaque 64-character owner digest. Any other
+        version fails closed.
+        """
+        metadata_version = metadata.get("metadata_version", 1)
+        if metadata_version == 1:
+            return self._legacy_owner_id
+        if metadata_version != _METADATA_VERSION:
+            return None
+        stored_owner = metadata.get("owner_id")
+        if not isinstance(stored_owner, str) or not _OWNER_ID_PATTERN.fullmatch(stored_owner):
+            return None
+        return stored_owner
+
+    def _store(
+        self, reader: BinaryIO, target: Path, quota: Optional[Tuple[int, QuotaLimits]] = None
+    ) -> Tuple[int, str]:
         digest = hashlib.sha256()
         written = 0
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -202,6 +244,8 @@ class UploadStore:
                         "The uploaded model exceeds the configured size limit.",
                         413,
                     )
+                if quota is not None and written > quota[0]:
+                    raise storage_quota_error(quota[1])
                 digest.update(chunk)
                 writer.write(chunk)
         if written == 0:

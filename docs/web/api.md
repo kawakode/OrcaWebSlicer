@@ -76,6 +76,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/health/ready` | Admission, worker, and state-root readiness for traffic |
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
 | `GET` | `/settings` | The engine's own definition of every curated setting |
+| `GET` | `/quota` | The caller's own quota limits and current usage |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model |
 | `POST` | `/uploads/{upload_id}/scene` | Start (or return) the inspect job for one upload |
 | `POST` | `/jobs` | Submit one slice request |
@@ -247,6 +248,52 @@ form, and jobs run with the selected profiles unchanged.
 Both are recorded when the job is accepted, so a finished job still explains
 itself after its directory is reclaimed.
 
+## Quotas
+
+Every quota is kept per owner, keyed by the same `owner_id` that authorizes
+uploads and jobs, so one owner's usage never spends another's budget. A refused
+request is an ordinary API error with HTTP 429 and one of these stable codes:
+
+| Code | Refused when | `Retry-After` |
+| --- | --- | --- |
+| `concurrent_job_quota_exceeded` | The owner already has `max_active_jobs` jobs queued or running | No; a job must finish or be canceled |
+| `job_submission_quota_exceeded` | `max_submissions` jobs were accepted within the rolling window | Seconds until the oldest ages out |
+| `cpu_time_quota_exceeded` | Worker time charged within the rolling window reached `cpu_time_ms` | Seconds until enough ages out |
+| `storage_quota_exceeded` | Uploads plus retained job directories would exceed `max_storage_bytes` | No; retention reclaims storage |
+
+Slices, scene inspections, and retries are all jobs and are all counted. A
+repeated scene request answered with the job already in flight or finished is
+not a new submission and is not counted. The job quotas are checked before any
+input is staged and again, atomically, when the job is recorded, so concurrent
+requests cannot race past them; a refused job leaves no job directory behind.
+
+An upload is streamed against whatever remains of its owner's storage budget
+(reserved for the length of the stream) and is discarded if it would exceed it.
+The service-wide `upload_size_limit_exceeded` (HTTP 413) stays a separate
+failure. Stored bytes are measured from the upload metadata on disk and from
+the job directories this process holds, so a restart never forgets an upload.
+
+A finished worker run is charged the larger of the CPU time it reported and the
+wall time the executor measured, capped at the executor's own CPU limit. The
+worker is untrusted, so it can never report its way below the time it held a
+slot.
+
+Quotas are admission checks: a job admitted under budget runs to its executor
+limits. One owner can therefore overshoot the CPU budget by at most one job's
+CPU limit, and the storage budget by at most the executor's output limit, per
+concurrent job. The rolling windows are process-local, like job metadata, and
+restart empty.
+
+`GET /api/v1/quota` returns the caller's own limits and current usage:
+
+```json
+{
+  "limits": {"max_active_jobs": 2, "max_storage_bytes": 5368709120,
+             "cpu_time_ms": 3600000, "max_submissions": 120, "window_seconds": 3600},
+  "usage": {"active_jobs": 0, "storage_bytes": 1824, "cpu_time_ms": 41, "submissions": 1}
+}
+```
+
 ## Correlation IDs
 
 Every request carries a correlation ID: the supplied `X-Correlation-Id` when it
@@ -256,7 +303,7 @@ lines for that job, so one identifier links an API request to its worker run.
 
 ## Configuration
 
-The API adds four settings to the worker and executor variables listed in
+The API adds these settings to the worker and executor variables listed in
 [executor.md](executor.md), which it also honours.
 
 | Environment variable | Default | Meaning |
@@ -270,6 +317,11 @@ The API adds four settings to the worker and executor variables listed in
 | `ORCA_WEB_AUTH_ISSUER` | none | Required assertion issuer in `required` mode |
 | `ORCA_WEB_AUTH_AUDIENCE` | none | Required assertion audience in `required` mode |
 | `ORCA_WEB_AUTH_JWKS_PATH` | none | Local JWKS file path in `required` mode |
+| `ORCA_WEB_QUOTA_ACTIVE_JOBS` | 2 | Jobs one owner may have queued or running |
+| `ORCA_WEB_QUOTA_STORAGE_BYTES` | 5368709120 (5 GiB) | Bytes one owner may hold in uploads and job directories; at least `ORCA_WEB_MAX_INPUT_BYTES` |
+| `ORCA_WEB_QUOTA_CPU_TIME_MS` | 3600000 | Worker time one owner may be charged per window |
+| `ORCA_WEB_QUOTA_SUBMISSIONS` | 120 | Jobs one owner may submit per window |
+| `ORCA_WEB_QUOTA_WINDOW_SECONDS` | 3600 | Length of the rolling CPU and submission window |
 
 When the frontend build exists it is mounted after every API route, so the
 [browser screen](frontend.md) is served from this same origin. When it does not,
@@ -310,5 +362,6 @@ G-code lands where the transform said it would — the write side of
 Job state and artifacts live on the job-directory filesystem behind the
 `JobService` interface. Database, queue, and object-store products stay
 unselected until local throughput and artifact sizes are measured.
-Authentication and per-owner enforcement are implemented; retention tied to
-completion and its deletion audit, quotas, and rate limiting remain G6 work.
+Authentication, per-owner enforcement, and per-owner quotas are implemented;
+retention tied to completion and its deletion audit, abuse controls, and rate
+limiting remain G6 work.

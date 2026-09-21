@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 from web_job_directory import JobDirectoryError
 from web_profile_catalog import ProfileCatalogError
@@ -16,6 +16,9 @@ class ApiError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.status = status
+        # Whole seconds a client should wait before retrying, sent as
+        # `Retry-After`; only a windowed quota knows one.
+        self.retry_after: Optional[int] = None
 
 
 # Lower layers already produce stable codes. Only the codes whose HTTP meaning

@@ -100,9 +100,11 @@ health checks requires a verified, short-lived bearer assertion by default,
 uploads and jobs carry an owner derived from that assertion's issuer and
 subject, and every lookup, cancellation, retry, artifact, preview, and scene
 access enforces it. `ORCA_WEB_AUTH_MODE` stays `disabled` in the reference
-Compose file until an authenticating edge is added in front of it. Per-user
-quotas, abuse controls, persistent metadata storage, retention, observability,
-and the remaining release and compliance work are still open.
+Compose file until an authenticating edge is added in front of it. Per-owner
+concurrency, storage, CPU-time, and submission quotas are enforced on that same
+owner key. Abuse controls and rate limiting, persistent metadata storage,
+retention, observability, and the remaining release and compliance work are
+still open.
 
 Multi-filament landed after that gate closed: a slice request names 1-16
 filament profiles and assigns each placed object to one of them, from the

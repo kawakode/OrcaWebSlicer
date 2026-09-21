@@ -379,6 +379,12 @@ services:
       # `required` and mount ORCA_WEB_AUTH_ISSUER, ORCA_WEB_AUTH_AUDIENCE, and
       # ORCA_WEB_AUTH_JWKS_PATH instead.
       ORCA_WEB_AUTH_MODE: disabled
+      # Per-owner quotas; empty keeps the application defaults in docs/web/api.md.
+      ORCA_WEB_QUOTA_ACTIVE_JOBS: ${ORCA_WEB_QUOTA_ACTIVE_JOBS:-}
+      ORCA_WEB_QUOTA_STORAGE_BYTES: ${ORCA_WEB_QUOTA_STORAGE_BYTES:-}
+      ORCA_WEB_QUOTA_CPU_TIME_MS: ${ORCA_WEB_QUOTA_CPU_TIME_MS:-}
+      ORCA_WEB_QUOTA_SUBMISSIONS: ${ORCA_WEB_QUOTA_SUBMISSIONS:-}
+      ORCA_WEB_QUOTA_WINDOW_SECONDS: ${ORCA_WEB_QUOTA_WINDOW_SECONDS:-}
     # This service alone receives mutable user state. Build and test services
     # retain the anchor's cache volumes without gaining access to uploads.
     volumes:

@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-17
+Last updated: 2026-09-21
 
 ## Objective
 
@@ -36,9 +36,9 @@ The foundation is complete:
 Multi-filament landed after G5 closed and is described in section 18.
 
 The active gate is G6, production readiness. Isolation, security scanning, the
-reference single-instance lifecycle, and per-owner authentication and
-authorization are implemented and tested. Per-user quotas and abuse controls
-are next; an immutable production release unit and durable recovery remain G6
+reference single-instance lifecycle, per-owner authentication and
+authorization, and per-owner quotas are implemented and tested. Abuse controls
+and rate limiting are next; an immutable production release unit and durable recovery remain G6
 exit gates.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
@@ -303,7 +303,16 @@ verified in a browser the release depends on.
   `local-development` principal. See
   [ADR 0004](docs/web/adr/0004-service-identity.md) and
   [the API contract](docs/web/api.md#authentication-and-authorization).
-- [ ] Add per-user concurrency, storage, CPU-time, and request quotas.
+- [x] Add per-user concurrency, storage, CPU-time, and request quotas. Each is
+  keyed by `owner_id` and refused with a stable HTTP 429 code: queued-or-running
+  jobs, job submissions and charged worker time over a rolling window, and
+  bytes held in uploads plus retained job directories. Job quotas are checked
+  before staging and again atomically when the job is recorded; an upload is
+  streamed against a reservation of the remaining storage budget. The worker
+  is untrusted, so a run is charged at least the wall time the executor
+  measured. `GET /api/v1/quota` reports limits and usage. The rolling windows
+  are process-local until persistent metadata is selected; see
+  [the API contract](docs/web/api.md#quotas).
 - [ ] Add abuse controls and rate limiting without weakening stable job errors.
 - [ ] Select persistent metadata and artifact storage based on measured needs.
 - [ ] Enforce the default 24-hour artifact retention policy and deletion audit.

@@ -320,6 +320,8 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         headers = {CORRELATION_HEADER: identifier} if identifier else {}
         if error.code == "authentication_required":
             headers["WWW-Authenticate"] = "Bearer"
+        if error.retry_after is not None:
+            headers["Retry-After"] = str(error.retry_after)
         return JSONResponse(
             status_code=error.status,
             content={
@@ -403,6 +405,11 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
             )
         return catalog.describe()
 
+    @protected.get(f"{PREFIX}/quota", tags=["service"])
+    def read_quota(request: Request, principal: Principal = Depends(get_principal)) -> Dict[str, Any]:
+        """The caller's own quota limits and current usage."""
+        return request.app.state.jobs.quota(principal.owner_id)
+
     @protected.post(f"{PREFIX}/uploads", status_code=201, tags=["uploads"])
     def create_upload(
         request: Request,
@@ -411,7 +418,7 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         _admission: None = Depends(require_admission),
     ) -> Dict[str, Any]:
         """Store one model. The bytes are never parsed in this process."""
-        record = request.app.state.uploads.create(file.filename, file.file, principal.owner_id)
+        record = request.app.state.jobs.create_upload(file.filename, file.file, principal.owner_id)
         logger.info(
             "upload stored upload_id=%s format=%s bytes=%d correlation_id=%s",
             record.upload_id,

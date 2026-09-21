@@ -7,7 +7,9 @@ import functools
 import json
 import logging
 import math
+import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -15,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from web_job_directory import (
     MANIFEST_NAME,
@@ -32,6 +34,7 @@ from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_
 from . import PROTOCOL_VERSION
 from .config import ApiConfig
 from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
+from .quotas import QuotaLedger, storage_quota_error
 from .uploads import UploadRecord, UploadStore
 
 
@@ -76,6 +79,20 @@ _EXECUTOR_FAILURES = {
     "output_limit": ("resource_limit", None),
     "failed": ("internal", None),
 }
+
+
+def _directory_bytes(root: Path) -> int:
+    """Bytes of the regular files under a job directory, never following links."""
+    total = 0
+    for directory, _, files in os.walk(root):
+        for name in files:
+            try:
+                status = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode):
+                total += status.st_size
+    return total
 
 
 def _requires_admission(method):
@@ -171,6 +188,9 @@ class JobRecord:
     error: Optional[Dict[str, str]] = None
     result: Optional[Dict[str, Any]] = None
     retry_of: Optional[str] = None
+    # Bytes this job's directory holds against its owner's storage quota: the
+    # staged inputs, then the published artifacts too, and 0 once removed.
+    stored_bytes: int = 0
     # The flattened profile chain and the overrides that displace it, recorded
     # when the job was accepted so the report explains what was actually sliced.
     profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -237,6 +257,7 @@ class JobService:
         uploads: UploadStore,
         logger: Optional[logging.Logger] = None,
         settings_catalog: Optional[SettingsCatalog] = None,
+        quotas: Optional[QuotaLedger] = None,
     ) -> None:
         self._config = config
         self._catalog = catalog
@@ -250,6 +271,12 @@ class JobService:
         self._admission_condition = threading.Condition(self._lock)
         self._shutdown_lock = threading.Lock()
         self._jobs: Dict[str, JobRecord] = {}
+        self._quotas = quotas or QuotaLedger(config.quotas)
+        # Serializes storage admission, so two uploads by one owner can never
+        # both measure the same remaining budget. Always taken before `_lock`,
+        # never inside it, and held across the upload-directory scan so that
+        # disk reads never block job-state readers.
+        self._storage_lock = threading.Lock()
         # Admission closes before the executor pool is shut down. Keeping this
         # state under the same lock as `_jobs` makes the final accepting check
         # and queue submission atomic with respect to `begin_shutdown()`.
@@ -313,6 +340,23 @@ class JobService:
                 if self._admissions_in_flight == 0:
                     self._admission_condition.notify_all()
 
+    def quota(self, owner_id: str) -> Dict[str, Any]:
+        """One owner's quota limits beside what they currently use of each."""
+        with self._storage_lock:
+            stored = self._stored_bytes(owner_id)
+        cpu_time_ms, submissions, reserved = self._quotas.usage(owner_id)
+        with self._lock:
+            active = self._active_jobs(owner_id)
+        return {
+            "limits": self._quotas.limits.describe(),
+            "usage": {
+                "active_jobs": active,
+                "storage_bytes": stored + reserved,
+                "cpu_time_ms": cpu_time_ms,
+                "submissions": submissions,
+            },
+        }
+
     def artifact(self, job_id: str, name: str, owner_id: str) -> Tuple[Path, str, str]:
         """Resolve a downloadable artifact to a path, media type, and filename."""
         if name not in ARTIFACT_NAMES:
@@ -375,6 +419,24 @@ class JobService:
 
     # Commands
 
+    def create_upload(self, filename: Optional[str], reader: BinaryIO, owner_id: str) -> UploadRecord:
+        """Store one model within its owner's storage quota.
+
+        The upload is bounded by whatever remains of the budget, reserved for
+        the length of the stream so a concurrent upload by the same owner
+        cannot spend it twice.
+        """
+        with self._storage_lock:
+            granted = self._quotas.reserve_storage(
+                owner_id, self._stored_bytes(owner_id), self._config.job_limits.max_input_bytes
+            )
+        try:
+            return self._uploads.create(filename, reader, owner_id, quota=(granted, self._quotas.limits))
+        finally:
+            # Released only after `create` has written the upload's metadata,
+            # so a concurrent measurement sees the bytes at least once.
+            self._quotas.release_storage(owner_id, granted)
+
     @_requires_admission
     def submit(
         self,
@@ -387,6 +449,7 @@ class JobService:
         upload = self._uploads.get(request.upload_id, owner_id)
         self._validate(request)
         self.sweep()
+        self._check_quota(owner_id, upload.size_bytes)
 
         job_id = f"job-{uuid.uuid4().hex}"
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
@@ -457,6 +520,7 @@ class JobService:
                 existing = self._jobs.get(existing_job_id) if existing_job_id else None
                 if existing is not None and existing.state not in ("failed", "canceled"):
                     return existing.describe()
+        self._check_quota(owner_id, upload.size_bytes)
 
         job_id = f"job-{uuid.uuid4().hex}"
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
@@ -512,6 +576,7 @@ class JobService:
                 # No worker exists yet, so the job is canceled here and _run
                 # returns without launching one.
                 self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
+                record.stored_bytes = 0
                 if not remove_job_directory(record.path):
                     self._log.warning(
                         "queued job cleanup failed job_id=%s path=%s", job_id, record.path
@@ -575,6 +640,7 @@ class JobService:
                         self._error("cancellation", "job_canceled", "The job was canceled."),
                     )
                     queued_paths.append(record.path)
+                    record.stored_bytes = 0
         for path in queued_paths:
             if not remove_job_directory(path):
                 self._log.warning("shutdown job cleanup failed path=%s", path)
@@ -626,12 +692,26 @@ class JobService:
             retry_of=retry_of,
             profiles=profiles,
             overrides=overrides,
+            stored_bytes=staged_bytes,
         )
+        rejected: Optional[ApiError] = None
         with self._lock:
             if not self._accepting:
-                rejected = True
+                rejected = ApiError(
+                    "service_draining",
+                    "This API instance is draining and cannot accept new work.",
+                    503,
+                )
             else:
-                rejected = False
+                # Checked again under the same lock that records the job, so
+                # concurrent submissions by one owner cannot all pass the
+                # precheck in `_check_quota` and exceed the job budgets.
+                try:
+                    self._quotas.check_submission(owner_id, self._active_jobs(owner_id))
+                except ApiError as error:
+                    rejected = error
+            if rejected is None:
+                self._quotas.record_submission(owner_id)
                 self._jobs[job_id] = record
                 # Queue while holding the admission lock. Shutdown cannot close
                 # the pool between recording and submitting this job.
@@ -639,13 +719,9 @@ class JobService:
                 # Snapshot before the worker takes the lock: an acceptance must
                 # report the job as accepted even if it starts immediately.
                 accepted = record.describe()
-        if rejected:
+        if rejected is not None:
             remove_job_directory(record.path)
-            raise ApiError(
-                "service_draining",
-                "This API instance is draining and cannot accept new work.",
-                503,
-            )
+            raise rejected
         self._log.info(
             "job accepted job_id=%s operation=%s correlation_id=%s retry_of=%s staged_bytes=%d",
             job_id,
@@ -667,6 +743,8 @@ class JobService:
             manifest_path = record.path / MANIFEST_NAME
             manifest_flag = _MANIFEST_FLAGS[record.operation]
 
+        started = time.monotonic()
+        execution = None
         try:
             execution = execute_worker(
                 self._config.worker_command,
@@ -686,6 +764,8 @@ class JobService:
             self._log.exception("job execution raised job_id=%s", job_id)
             self._fail(record, "internal", "internal_error", "The job failed unexpectedly.")
             return
+        finally:
+            self._charge_cpu(record, execution, started)
 
         self._conclude(record, execution)
 
@@ -707,8 +787,10 @@ class JobService:
             result = execution.result
             outcome = str(result.get("outcome"))
             error = result.get("error")
+            stored_bytes = _directory_bytes(record.path)
             with self._lock:
                 record.result = result
+                record.stored_bytes = stored_bytes
                 record.warnings = [item for item in result.get("warnings", []) if isinstance(item, dict)]
                 self._finish(record, outcome, dict(error) if isinstance(error, dict) else None)
             self._log.info(
@@ -733,11 +815,13 @@ class JobService:
         # validated, so nothing from this job is ever downloadable.
         remove_job_directory(record.path)
         with self._lock:
+            record.stored_bytes = 0
             self._finish(record, state, self._error(category, code, execution.error_message or "The job failed."))
 
     def _fail(self, record: JobRecord, category: str, code: str, message: str) -> None:
         remove_job_directory(record.path)
         with self._lock:
+            record.stored_bytes = 0
             self._finish(record, "failed", self._error(category, code, message))
 
     def _finish(self, record: JobRecord, state: str, error: Optional[Dict[str, Any]]) -> None:
@@ -752,6 +836,49 @@ class JobService:
     @staticmethod
     def _error(category: str, code: str, message: str) -> Dict[str, str]:
         return {"category": category, "code": code, "message": message}
+
+    def _active_jobs(self, owner_id: str) -> int:
+        """Queued and running jobs held for one owner. Call with `_lock` held."""
+        return sum(
+            1 for record in self._jobs.values() if record.owner_id == owner_id and record.state not in TERMINAL_STATES
+        )
+
+    def _stored_bytes(self, owner_id: str) -> int:
+        """Bytes one owner holds in uploads and in this process's job directories.
+
+        Call with `_storage_lock` held (never `_lock`): the upload scan reads
+        disk, and `_lock` is taken only briefly for the job table.
+        """
+        uploads = self._uploads.owner_bytes(owner_id)
+        with self._lock:
+            jobs = sum(record.stored_bytes for record in self._jobs.values() if record.owner_id == owner_id)
+        return uploads + jobs
+
+    def _check_quota(self, owner_id: str, staged_bytes: int) -> None:
+        """Refuse a job before it is staged when its owner has no budget left.
+
+        `_accept` repeats the job-count checks atomically with recording the
+        job; this earlier pass keeps a refused job from ever copying inputs.
+        """
+        with self._lock:
+            self._quotas.check_submission(owner_id, self._active_jobs(owner_id))
+        with self._storage_lock:
+            if self._stored_bytes(owner_id) + staged_bytes > self._quotas.limits.max_storage_bytes:
+                raise storage_quota_error(self._quotas.limits)
+
+    def _charge_cpu(self, record: JobRecord, execution: Any, started: float) -> None:
+        """Charge one finished worker run to its owner's CPU budget.
+
+        The worker is untrusted, so its reported CPU time is never taken below
+        the wall time the executor itself measured, and never above the CPU
+        limit the kernel enforced on it.
+        """
+        charged = int((time.monotonic() - started) * 1000)
+        timing = (execution.result or {}).get("timing") if execution is not None else None
+        reported = timing.get("cpu_time_ms") if isinstance(timing, dict) else None
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            charged = max(charged, min(reported, self._config.executor_limits.cpu_time_ms))
+        self._quotas.charge_cpu(record.owner_id, charged)
 
     def _require(self, job_id: str, owner_id: str) -> JobRecord:
         record = self._jobs.get(job_id)

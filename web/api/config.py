@@ -15,6 +15,7 @@ from web_worker_sandbox import SandboxError, SandboxPolicy, policy_from_environm
 from . import REPO_ROOT
 from .auth import AUTH_MODE_REQUIRED, AUTH_MODES
 from .errors import ApiError
+from .quotas import QuotaLimits, limits_from_environment as quota_limits_from_environment
 
 
 DEFAULT_WORKER = Path("build-worker") / "src" / "Release" / "orca-slicer-worker"
@@ -30,6 +31,7 @@ class ApiConfig:
     executor_limits: ExecutorLimits = dataclasses.field(default_factory=ExecutorLimits)
     job_limits: JobDirectoryLimits = dataclasses.field(default_factory=JobDirectoryLimits)
     sandbox: SandboxPolicy = dataclasses.field(default_factory=SandboxPolicy)
+    quotas: QuotaLimits = dataclasses.field(default_factory=QuotaLimits)
     # Serving the built browser screen from the API keeps the app on one origin.
     # When it is absent the API is a bare JSON service and the Vite dev server
     # proxies to it instead.
@@ -60,6 +62,14 @@ class ApiConfig:
             self.sandbox.validate()
         except SandboxError as error:
             raise ApiError("invalid_api_configuration", str(error), 500) from error
+        self.quotas.validate()
+        if self.quotas.max_storage_bytes < self.job_limits.max_input_bytes:
+            # Otherwise the largest upload the service accepts could never fit.
+            raise ApiError(
+                "invalid_api_configuration",
+                "the storage quota must be at least the maximum input size.",
+                500,
+            )
         self._validate_auth()
 
     def _validate_auth(self) -> None:
@@ -119,6 +129,7 @@ def from_environment() -> ApiConfig:
         executor_limits=executor_limits_from_environment(),
         job_limits=job_limits_from_environment(),
         sandbox=sandbox,
+        quotas=quota_limits_from_environment(),
         frontend_dist=dist if dist.is_dir() else None,
         auth_mode=os.environ.get("ORCA_WEB_AUTH_MODE") or AUTH_MODE_REQUIRED,
         auth_issuer=os.environ.get("ORCA_WEB_AUTH_ISSUER") or None,

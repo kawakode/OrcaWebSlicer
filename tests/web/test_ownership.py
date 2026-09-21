@@ -133,7 +133,7 @@ class OwnershipTests(unittest.TestCase):
     # --- authentication --------------------------------------------------
 
     def test_protected_get_routes_refuse_a_missing_bearer_assertion(self):
-        for path in ("/api/v1/profiles", "/api/v1/settings", "/api/v1/jobs"):
+        for path in ("/api/v1/profiles", "/api/v1/settings", "/api/v1/jobs", "/api/v1/quota"):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 self.assertEqual(response.status_code, 401)

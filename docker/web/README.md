@@ -67,8 +67,9 @@ on `http://localhost:8000`, driving the worker built by `worker-build`. Once
 `frontend-build` has produced `web/frontend/dist`, the same origin also serves
 the [browser screen](../../docs/web/frontend.md). Set `ORCA_WEB_API_PORT` to
 publish it elsewhere. `ORCA_WEB_STATE_ROOT`, `ORCA_WEB_WORKER`,
-`ORCA_WEB_PROFILE_VENDORS`, `ORCA_WEB_MAX_CONCURRENT_JOBS`, and
-`ORCA_WEB_FRONTEND_DIST` configure it.
+`ORCA_WEB_PROFILE_VENDORS`, `ORCA_WEB_MAX_CONCURRENT_JOBS`,
+`ORCA_WEB_FRONTEND_DIST`, and the `ORCA_WEB_QUOTA_*` per-owner quotas
+([api.md](../../docs/web/api.md#quotas)) configure it.
 
 The compose file sets `ORCA_WEB_AUTH_MODE=disabled` for this `api` service,
 visibly, because this reference topology has no authenticating edge proxy in
