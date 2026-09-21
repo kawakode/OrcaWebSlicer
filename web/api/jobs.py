@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from web_job_directory import (
+    JOB_ID_PATTERN,
     MANIFEST_NAME,
     JobDirectoryError,
     JobInput,
@@ -35,6 +36,7 @@ from . import PROTOCOL_VERSION
 from .config import ApiConfig
 from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
 from .quotas import QuotaLedger, storage_quota_error
+from .store import JobStore
 from .uploads import UploadRecord, UploadStore
 
 
@@ -43,6 +45,10 @@ MAX_SETTING_VALUE_CHARS = 4096
 MAX_PLATE_INDEX = 64
 SETTING_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled"})
+JOB_STATES = TERMINAL_STATES | {"queued", "running"}
+# The shape of one job record in the metadata store; see `JobRecord.to_stored`.
+RECORD_VERSION = 1
+_OWNER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 OUTPUT_GCODE = "output/model.gcode"
 OUTPUT_PREVIEW = "output/preview.json"
 OUTPUT_SCENE = "output/scene.json"
@@ -195,6 +201,10 @@ class JobRecord:
     # when the job was accepted so the report explains what was actually sliced.
     profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
     overrides: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # What this job's worker run was charged against its owner's CPU budget,
+    # and when, so a restart can replay the charge into the quota window.
+    cpu_charged_ms: int = 0
+    cpu_charged_at: Optional[float] = None
     # Parsed once and kept, so paging through layers/objects never re-reads
     # the index.
     preview_index: Optional[Dict[str, Any]] = None
@@ -219,6 +229,79 @@ class JobRecord:
             "finished_at": self.finished_at,
             "timing": (self.result or {}).get("timing"),
         }
+
+    def to_stored(self) -> Dict[str, Any]:
+        """The durable part of the record. Caches and the cancellation event
+        belong to one process and are rebuilt, not stored."""
+        return {
+            "record_version": RECORD_VERSION,
+            "job_id": self.job_id,
+            "correlation_id": self.correlation_id,
+            "owner_id": self.owner_id,
+            "operation": self.operation,
+            "request": self.request.describe(),
+            "state": self.state,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "progress": dict(self.progress),
+            "warnings": list(self.warnings),
+            "error": dict(self.error) if self.error else None,
+            "result": self.result,
+            "retry_of": self.retry_of,
+            "stored_bytes": self.stored_bytes,
+            "profiles": dict(self.profiles),
+            "overrides": list(self.overrides),
+            "cpu_charged_ms": self.cpu_charged_ms,
+            "cpu_charged_at": self.cpu_charged_at,
+        }
+
+    @classmethod
+    def from_stored(cls, stored: Dict[str, Any], jobs_root: Path) -> "JobRecord":
+        """Rebuild a record `to_stored` wrote. Raises `ValueError`, `KeyError`,
+        or `TypeError` for anything else, so a damaged row is never served."""
+        if stored.get("record_version") != RECORD_VERSION:
+            raise ValueError("unsupported job record version")
+        job_id, owner_id, state = stored["job_id"], stored["owner_id"], stored["state"]
+        # The job ID becomes a path below the job root, so it is held to the
+        # same pattern a fresh one is.
+        if not isinstance(job_id, str) or not JOB_ID_PATTERN.fullmatch(job_id):
+            raise ValueError("invalid job id")
+        if not isinstance(owner_id, str) or not _OWNER_ID_PATTERN.fullmatch(owner_id):
+            raise ValueError("invalid owner id")
+        if state not in JOB_STATES:
+            raise ValueError("invalid job state")
+        operation = stored["operation"]
+        fields = dict(stored["request"])
+        if operation == OPERATION_SLICE:
+            fields["filament_profiles"] = tuple(fields["filament_profiles"])
+            request: Any = SliceRequest(**fields)
+        elif operation == OPERATION_INSPECT:
+            request = SceneRequest(**fields)
+        else:
+            raise ValueError("unknown operation")
+        return cls(
+            job_id=job_id,
+            correlation_id=str(stored["correlation_id"]),
+            request=request,
+            path=Path(jobs_root) / job_id,
+            created_at=float(stored["created_at"]),
+            owner_id=owner_id,
+            operation=operation,
+            state=state,
+            started_at=stored.get("started_at"),
+            finished_at=stored.get("finished_at"),
+            progress=dict(stored["progress"]),
+            warnings=list(stored.get("warnings") or []),
+            error=stored.get("error"),
+            result=stored.get("result"),
+            retry_of=stored.get("retry_of"),
+            stored_bytes=int(stored.get("stored_bytes", 0)),
+            profiles=dict(stored.get("profiles") or {}),
+            overrides=list(stored.get("overrides") or []),
+            cpu_charged_ms=int(stored.get("cpu_charged_ms", 0)),
+            cpu_charged_at=stored.get("cpu_charged_at"),
+        )
 
     def _describe_artifacts(self) -> List[Dict[str, Any]]:
         """Name the artifacts that are downloadable now.
@@ -258,6 +341,7 @@ class JobService:
         logger: Optional[logging.Logger] = None,
         settings_catalog: Optional[SettingsCatalog] = None,
         quotas: Optional[QuotaLedger] = None,
+        store: Optional[JobStore] = None,
     ) -> None:
         self._config = config
         self._catalog = catalog
@@ -291,6 +375,10 @@ class JobService:
         self._pool = ThreadPoolExecutor(
             max_workers=config.max_concurrent_jobs, thread_name_prefix="orca-slice-job"
         )
+        # Write-through copy of `_jobs`, read back once here so jobs outlive a
+        # restart of this process.
+        self._store = store or JobStore(config.metadata_path)
+        self._recover()
 
     # Queries
 
@@ -575,8 +663,8 @@ class JobService:
             if record.state == "queued":
                 # No worker exists yet, so the job is canceled here and _run
                 # returns without launching one.
-                self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
                 record.stored_bytes = 0
+                self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
                 if not remove_job_directory(record.path):
                     self._log.warning(
                         "queued job cleanup failed job_id=%s path=%s", job_id, record.path
@@ -609,9 +697,18 @@ class JobService:
             report = sweep_job_directories(self._config.jobs_root, self._config.job_limits, active)
         except JobDirectoryError as error:
             raise from_job_directory_error(error) from error
+        # A finished job's record is kept exactly as long as its directory
+        # would be. Without this, jobs whose directories were removed when they
+        # failed or were canceled would be remembered forever.
+        horizon = time.time() - self._config.job_limits.retention_seconds
         with self._lock:
             removed = set(report.removed)
-            for job_id in report.removed:
+            removed.update(
+                job_id
+                for job_id, record in self._jobs.items()
+                if record.state in TERMINAL_STATES and (record.finished_at or record.created_at) <= horizon
+            )
+            for job_id in removed:
                 self._jobs.pop(job_id, None)
             if removed:
                 # Never point a future scene request at a job directory that
@@ -619,6 +716,10 @@ class JobService:
                 self._scenes = {
                     key: job_id for key, job_id in self._scenes.items() if job_id not in removed
                 }
+                try:
+                    self._store.delete(removed)
+                except ApiError:
+                    self._log.error("job metadata delete failed count=%d", len(removed))
         uploads = self._uploads.sweep(self._config.job_limits.retention_seconds)
         return {"jobs_removed": report.removed, "jobs_retained": report.retained, "uploads_removed": uploads}
 
@@ -634,13 +735,13 @@ class JobService:
                     continue
                 record.cancellation.set()
                 if record.state == "queued":
+                    record.stored_bytes = 0
                     self._finish(
                         record,
                         "canceled",
                         self._error("cancellation", "job_canceled", "The job was canceled."),
                     )
                     queued_paths.append(record.path)
-                    record.stored_bytes = 0
         for path in queued_paths:
             if not remove_job_directory(path):
                 self._log.warning("shutdown job cleanup failed path=%s", path)
@@ -658,6 +759,7 @@ class JobService:
             # Queued records were made terminal above; canceling their futures
             # ensures they never consume a worker slot just to observe that state.
             self._pool.shutdown(wait=True, cancel_futures=True)
+            self._store.close()
             self._shutdown_complete = True
 
     # Execution
@@ -711,6 +813,13 @@ class JobService:
                 except ApiError as error:
                     rejected = error
             if rejected is None:
+                # Durable before it is queued: a job the store never recorded
+                # is refused rather than run and then forgotten by a restart.
+                try:
+                    self._store.save(record.to_stored())
+                except ApiError as error:
+                    rejected = error
+            if rejected is None:
                 self._quotas.record_submission(owner_id)
                 self._jobs[job_id] = record
                 # Queue while holding the admission lock. Shutdown cannot close
@@ -740,6 +849,7 @@ class JobService:
             record.state = "running"
             record.started_at = time.time()
             record.progress = {"stage": "input", "percent": 0, "message": ""}
+            self._persist(record)
             manifest_path = record.path / MANIFEST_NAME
             manifest_flag = _MANIFEST_FLAGS[record.operation]
 
@@ -825,11 +935,71 @@ class JobService:
             self._finish(record, "failed", self._error(category, code, message))
 
     def _finish(self, record: JobRecord, state: str, error: Optional[Dict[str, Any]]) -> None:
+        """Make a record terminal. Call with `_lock` held, after any field the
+        terminal state depends on (`result`, `stored_bytes`) is already set."""
         record.state = state
         record.error = error
         record.finished_at = time.time()
         if state == "succeeded":
             record.progress = {"stage": "finalize", "percent": 100, "message": ""}
+        self._persist(record)
+
+    def _persist(self, record: JobRecord) -> None:
+        """Write one record through to the store. Call with `_lock` held.
+
+        A failed write is logged rather than raised: the in-memory table stays
+        authoritative while this process runs, and the worst a stale stored
+        copy can cause is a job recovered as interrupted after a restart.
+        """
+        try:
+            self._store.save(record.to_stored())
+        except ApiError:
+            self._log.error("job metadata write failed job_id=%s state=%s", record.job_id, record.state)
+
+    def _recover(self) -> None:
+        """Reload the stored job table and settle what an earlier process left.
+
+        A job still queued or running in the store has no worker any more, and
+        its directory may hold files no executor validated, so it fails as
+        `job_interrupted` and its directory is removed; a retry reruns its
+        inputs. Submissions and CPU charges still inside the quota window are
+        replayed into the ledger, oldest first.
+        """
+        now = time.time()
+        window = self._quotas.limits.window_seconds
+        interrupted = 0
+        with self._lock:
+            for stored in self._store.load():
+                try:
+                    record = JobRecord.from_stored(stored, self._config.jobs_root)
+                except (KeyError, TypeError, ValueError):
+                    self._log.warning("unreadable job record skipped")
+                    continue
+                if record.state not in TERMINAL_STATES:
+                    remove_job_directory(record.path)
+                    record.stored_bytes = 0
+                    self._finish(
+                        record,
+                        "failed",
+                        self._error("internal", "job_interrupted", "The service restarted before this job finished."),
+                    )
+                    interrupted += 1
+                self._jobs[record.job_id] = record
+                if record.operation == OPERATION_INSPECT:
+                    # Loaded oldest first, so the newest job for a request wins.
+                    self._scenes[(record.owner_id, record.request)] = record.job_id
+            records = list(self._jobs.values())
+        for record in sorted(records, key=lambda item: item.created_at):
+            age = now - record.created_at
+            if age < window:
+                self._quotas.record_submission(record.owner_id, max(0.0, age))
+        charged = [record for record in records if record.cpu_charged_at is not None]
+        for record in sorted(charged, key=lambda item: item.cpu_charged_at):
+            age = now - record.cpu_charged_at
+            if age < window:
+                self._quotas.charge_cpu(record.owner_id, record.cpu_charged_ms, max(0.0, age))
+        if records:
+            self._log.info("job metadata recovered jobs=%d interrupted=%d", len(records), interrupted)
 
     # Helpers
 
@@ -879,6 +1049,10 @@ class JobService:
         if isinstance(reported, int) and not isinstance(reported, bool):
             charged = max(charged, min(reported, self._config.executor_limits.cpu_time_ms))
         self._quotas.charge_cpu(record.owner_id, charged)
+        with self._lock:
+            record.cpu_charged_ms = charged
+            record.cpu_charged_at = time.time()
+            self._persist(record)
 
     def _require(self, job_id: str, owner_id: str) -> JobRecord:
         record = self._jobs.get(job_id)

@@ -53,6 +53,10 @@ class ApiConfig:
     def jobs_root(self) -> Path:
         return self.state_root / "jobs"
 
+    @property
+    def metadata_path(self) -> Path:
+        return self.state_root / "metadata.sqlite3"
+
     def validate(self) -> None:
         if self.max_concurrent_jobs <= 0:
             raise ApiError("invalid_api_configuration", "max_concurrent_jobs must be positive.", 500)

@@ -38,9 +38,10 @@ Multi-filament landed after G5 closed and is described in section 18.
 The active gate is G6, production readiness. Isolation, security scanning, the
 reference single-instance lifecycle, per-owner authentication and
 authorization, per-owner quotas, and abuse controls with a per-owner request
-rate are implemented and tested. Persistent metadata and artifact storage is
-next; an immutable production release unit and durable recovery remain G6 exit
-gates.
+rate are implemented and tested. Job metadata is stored in SQLite and artifacts
+stay in the job directories on the state volume, so jobs and quota windows
+survive a restart. The 24-hour retention policy and its deletion audit are
+next. An immutable production release unit remains a G6 exit gate.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -328,7 +329,22 @@ verified in a browser the release depends on.
   `Retry-After`. Unauthenticated floods and per-address limits are left to the
   authenticating edge. See
   [the API contract](docs/web/api.md#abuse-controls-and-rate-limiting).
-- [ ] Select persistent metadata and artifact storage based on measured needs.
+- [x] Select persistent metadata and artifact storage based on measured needs.
+  [ADR 0005](docs/web/adr/0005-job-metadata-storage.md) records the
+  measurements. Artifacts are megabytes per job and records are about 1 KB.
+  Throughput is bounded by the worker pool, and a SQLite commit in WAL mode
+  takes 0.09 ms on the state volume. Job records are stored in
+  `metadata.sqlite3` at the root of the state volume, using the standard
+  library and adding no service. `JobService` writes every transition through
+  to that database and reads it back at startup. A job is refused with
+  `metadata_store_unavailable` if its record cannot be stored before it is
+  queued. A job left queued or running by a crash recovers as `failed` /
+  `job_interrupted`, and its directory is removed. The quota windows are
+  replayed from the stored submissions and CPU charges. Finished records now
+  expire with the retention window rather than living as long as the process.
+  Artifacts stay in the executor-validated job directories. A database server,
+  an object store, and a queue are rejected until several API instances or
+  hosts must share state.
 - [ ] Enforce the default 24-hour artifact retention policy and deletion audit.
 
 ### 16. Add observability and operations
@@ -431,7 +447,7 @@ time, never a requirement.
 
 2a. Decision and renderer seam
 
-- [ ] Record ADR 0005: three.js (pinned, MIT, scanned by the existing Grype
+- [ ] Record ADR 0006: three.js (pinned, MIT, scanned by the existing Grype
   gate) against raw WebGL2. The recommendation is three.js, for its camera,
   picking, and line/instancing support. Record the bundle-size budget it may
   add.
@@ -490,7 +506,7 @@ Step 2 exit criteria
   proves it.
 - [ ] The axe pass and the keyboard walk are unchanged under both renderers.
 - [ ] The added bundle size and the measured frame times are recorded in
-  `docs/web/frontend.md`, and ADR 0005 is accepted.
+  `docs/web/frontend.md`, and ADR 0006 is accepted.
 
 Still out of scope: painting tools (supports, seams, colors), cut, text,
 measure, variable layer height, and multiple plates. Each needs engine or
@@ -511,18 +527,20 @@ request-format support that a slice request cannot yet express.
 
 A choice is made only when its phase begins. These are the ones still open:
 
-- Database, queue, and object-store products. Job state and artifacts live on
-  the job-directory filesystem behind `JobService` until local throughput and
-  artifact sizes are measured.
+- A database server, a queue, and an object store. They become worth choosing
+  once several API instances or hosts must share job state; until then, the
+  embedded SQLite store in [ADR 0005](docs/web/adr/0005-job-metadata-storage.md)
+  holds it.
 - Production hosting, and with it whether each job gets its own container or
   its own uid. The in-process sandbox in
   [ADR 0003](docs/web/adr/0003-worker-sandbox.md) composes with either.
 - Authentication provider and billing model.
 
 Settled since: the frontend and API frameworks in
-[ADR 0002](docs/web/adr/0002-web-stack.md), the preview artifact encoding in
-[preview-format.md](docs/web/preview-format.md), and the scene encoding the
-plater consumes in [scene-format.md](docs/web/scene-format.md).
+[ADR 0002](docs/web/adr/0002-web-stack.md), job metadata and artifact storage
+in [ADR 0005](docs/web/adr/0005-job-metadata-storage.md), the preview artifact
+encoding in [preview-format.md](docs/web/preview-format.md), and the scene
+encoding the plater consumes in [scene-format.md](docs/web/scene-format.md).
 
 SLA slicing, multiple plates, painting tools, desktop gizmo parity, direct
 printer control, plugins, arbitrary post-processing, offline WebAssembly

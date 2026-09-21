@@ -20,6 +20,7 @@ This directory is the source of truth for the web effort:
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 - [ADR 0003: worker sandbox and production isolation](adr/0003-worker-sandbox.md)
 - [ADR 0004: service identity and authorization boundary](adr/0004-service-identity.md)
+- [ADR 0005: job metadata and artifact storage](adr/0005-job-metadata-storage.md)
 - [Deployment operations and recovery](operations.md)
 
 ## Delivery gates
@@ -90,9 +91,12 @@ behind already-admitted mutations, cancels queued and running jobs, and has
 tested container stop timing. The reference Compose topology keeps state
 separate from build caches, and its probe-only container performs a complete
 canary slice without access to that state. The operations contract defines
-stop-then-start rollback and honest empty-state recovery procedures. An
-immutable release image and durable job recovery remain G6 exit work because
-the reference image is mutable and job metadata is still process-local.
+stop-then-start rollback and honest empty-state recovery procedures. Job
+metadata is stored in SQLite on the state volume, per
+[ADR 0005](adr/0005-job-metadata-storage.md), so job IDs, reports, artifacts,
+and quota windows survive a restart and a rollback. A job that was running when
+the process died is reported as interrupted. An immutable release image remains
+G6 exit work, because the reference image is mutable.
 
 Runtime authentication and authorization are implemented per
 [ADR 0004](adr/0004-service-identity.md): every `/api/v1` route but the three
@@ -103,9 +107,8 @@ access enforces it. `ORCA_WEB_AUTH_MODE` stays `disabled` in the reference
 Compose file until an authenticating edge is added in front of it. Per-owner
 concurrency, storage, CPU-time, and submission quotas are enforced on that same
 owner key, and every authenticated request is charged to a per-owner rate
-limit and a body cap before its body is read. Persistent metadata storage,
-retention, observability, and the remaining release and compliance work are
-still open.
+limit and a body cap before its body is read. Retention auditing,
+observability, and the remaining release and compliance work are still open.
 
 Multi-filament landed after that gate closed: a slice request names 1-16
 filament profiles and assigns each placed object to one of them, from the

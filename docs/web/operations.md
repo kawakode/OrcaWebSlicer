@@ -3,34 +3,47 @@
 Status: Reference procedure for the current single-instance filesystem deployment
 
 This runbook covers health checks, graceful replacement, rollback, and recovery
-for the web tier as it exists today. It does not select a production host,
-authentication provider, database, queue, or object store. Those decisions remain
-in G6.
+for the web tier as it exists today. Job metadata storage is selected in
+[ADR 0005](adr/0005-job-metadata-storage.md). This runbook does not select a
+production host, an authentication provider, a database server, a queue, or an
+object store.
 
 ## Supported topology and recovery boundary
 
-Run exactly one API instance against one `ORCA_WEB_STATE_ROOT`. The job registry
-and scene index are process memory. Two API instances sharing a state directory
-would not share that registry, and each instance's sweeper would not know which
-jobs the other instance is running.
+Run exactly one API instance against one `ORCA_WEB_STATE_ROOT`. The state root
+holds three things:
 
-Uploads and worker files are stored below the state root. An upload can be opened
-again after a restart when the client retained its upload ID. Job records are not
-rehydrated. After any API restart, old job IDs and artifact URLs return
-`unknown_job`, even when files from those jobs remain on disk. In-flight jobs are
-canceled during a graceful stop and are not resumed.
+| Path | Contents |
+| --- | --- |
+| `uploads/` | One directory per upload: the model and its metadata |
+| `jobs/` | One directory per job: staged inputs, the worker's report, and its artifacts |
+| `metadata.sqlite3` (and its `-wal` and `-shm` files) | The job table |
+
+The running API holds the job table in memory and writes every change through
+to `metadata.sqlite3`. It reads the table back once at startup. Two API
+instances sharing a state root would not see each other's jobs, and each
+instance's sweeper would not know which jobs the other is running.
+
+After a restart:
+
+- uploads, finished jobs, their reports and artifacts, and their previews and
+  scenes are served under the same IDs and URLs as before;
+- jobs that a graceful stop canceled stay `canceled`;
+- jobs that were queued or running when the process died are reported as
+  `failed` with `job_interrupted`, and their directories are removed. They are
+  not resumed. A client retries them.
+- per-owner quota windows are rebuilt from the job records, and the request
+  rate limiter starts empty.
 
 Consequently:
 
 - replacement and rollback are stop-then-start operations, never overlapping
   blue/green instances on the same state root;
-- the current recovery point and recovery time objectives are not guaranteed;
+- the recovery point is the last committed job record. A power loss can roll
+  back the newest few, which then recover as interrupted or disappear;
 - the 24-hour retention window is deletion policy, not a backup or recovery
   guarantee;
 - a lost state volume means clients must upload and submit again.
-
-Durable job recovery belongs with the persistent metadata and artifact storage
-decision in phase 4 of `PLAN.md`.
 
 ## Probes
 
@@ -128,7 +141,9 @@ On shutdown the server stops accepting HTTP connections, then the application:
 5. waits for executor threads to finish and exits.
 
 Reads and artifact downloads remain available while the process is reachable.
-There is no resumable job state.
+Every job's final state is stored before the process exits. The next process
+serves the finished jobs and reports the canceled ones as canceled. It does not
+resume them.
 
 Compose gives Uvicorn 10 seconds for HTTP work and the container 30 seconds in
 total. The worker termination grace defaults to 5 seconds, followed by bounded
@@ -142,9 +157,9 @@ docker compose -f docker/web/compose.yml up -d api
 docker compose -f docker/web/compose.yml ps api
 ```
 
-After restart, wait for healthy status and run the full deployment probe. Treat
-old job URLs as expired and have clients resubmit from a surviving upload or
-upload the model again.
+After restart, wait for healthy status and run the full deployment probe. Job
+URLs from before the restart keep working until retention reclaims them. Jobs
+the stop canceled can be retried.
 
 ## Rollback
 
@@ -162,8 +177,13 @@ roll worker and API versions independently.
 7. Record the rollback reason, release IDs, data-loss boundary, and probe result.
 
 If the previous version cannot safely read state written by the candidate, use
-a new empty state root. The current formats have no cross-version migration
-contract. Never run the two versions concurrently on the same root.
+a new empty state root. The job database records its schema version, and a
+release refuses to start against a newer schema than it knows. A release from
+before ADR 0005 ignores the database, so its jobs are lost as they were before.
+When a later release starts again, the records it finds that point at swept
+directories are reclaimed by retention. Upload metadata and job directories have
+no cross-version migration contract. Never run the two versions concurrently on
+the same root.
 
 The release that first introduces the dedicated `orca-web-state` volume is a
 one-time storage boundary. Existing state under
@@ -193,8 +213,11 @@ best-effort upload recovery, but it is not a durable service backup:
    release first.
 5. Start the API and run the deployment probe.
 
-Restoring such a snapshot does not restore old job URLs. It may make a known
-upload ID reusable, and it preserves files for authorized manual investigation.
+Restoring such a snapshot restores the job table with it. Job URLs whose
+directories are still inside the retention window work again. Jobs that were
+running when the snapshot was taken are reported as interrupted. The snapshot
+also makes known upload IDs reusable and preserves files for authorized manual
+investigation.
 Routine snapshots are deliberately not prescribed: retaining raw models and
 G-code beyond their deletion window changes the privacy policy and must be
 designed together with persistent storage, deletion auditing, and access
@@ -204,5 +227,5 @@ control.
 
 `docker compose down --volumes` deletes every named volume in this Compose
 project, including compiler caches, the dedicated `orca-web-state` volume, raw
-uploads, and job artifacts. It is a full local reset and cannot be undone unless
-an operator made an appropriate cold copy first.
+uploads, job artifacts, and the job database. It is a full local reset and
+cannot be undone unless an operator made an appropriate cold copy first.

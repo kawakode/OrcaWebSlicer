@@ -163,6 +163,21 @@ Every terminal path is contained. A worker crash, a malformed event stream, a
 timeout, a limit violation, and a missing artifact are all one job's failure,
 recorded with the executor's own error code, and the API process keeps serving.
 
+Jobs survive an API restart. Their records are stored in the state root's
+metadata database ([ADR 0005](adr/0005-job-metadata-storage.md)), so a job ID,
+its report, its artifacts, its preview, and its scene stay reachable, and a
+repeated scene request still returns the recovered job. A job cannot be accepted
+unless its record is stored first. When the store refuses the write, the
+submission fails with `metadata_store_unavailable` (HTTP 503) and nothing is
+queued. A job that was still queued or running when the previous process
+stopped is not resumed. A graceful stop cancels it (`job_canceled`), and after
+a crash it is reported as `failed` with `internal` / `job_interrupted` and no
+artifacts. Either way, a retry reruns the same inputs.
+
+A finished job is kept as long as the retention window keeps its directory.
+After that, its ID returns `unknown_job`. This also applies to a failed or
+canceled job, which has no directory.
+
 ## Artifacts
 
 Artifacts are named, not addressed by path. A client asks for `gcode` or
@@ -281,8 +296,10 @@ slot.
 Quotas are admission checks: a job admitted under budget runs to its executor
 limits. One owner can therefore overshoot the CPU budget by at most one job's
 CPU limit, and the storage budget by at most the executor's output limit, per
-concurrent job. The rolling windows are process-local, like job metadata, and
-restart empty.
+concurrent job. The rolling windows are rebuilt at startup from the stored job
+records, so a restart does not reset them. A window longer than the retention
+window loses its oldest entries after a restart, and a job interrupted by a
+crash was never charged CPU time.
 
 `GET /api/v1/quota` returns the caller's own limits and current usage:
 
@@ -327,7 +344,7 @@ before it reaches the quota checks.
 
 The three health endpoints are not guarded. The limiter tracks at most
 `ORCA_WEB_RATE_TRACKED_OWNERS` owners and forgets the least recently seen first.
-Like the quota windows it is process-local and restarts empty. In `disabled`
+Unlike the quota windows, it is process-local and restarts empty. In `disabled`
 mode every request shares the one `local-development` bucket.
 
 Only callers with a valid assertion are rate-limited. Floods of
@@ -349,7 +366,7 @@ The API adds these settings to the worker and executor variables listed in
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
-| `ORCA_WEB_STATE_ROOT` | `<repo>/build/web-state` (`/var/lib/orca-web` in Compose) | Uploads and job directories |
+| `ORCA_WEB_STATE_ROOT` | `<repo>/build/web-state` (`/var/lib/orca-web` in Compose) | Uploads, job directories, and the `metadata.sqlite3` job database |
 | `ORCA_WEB_WORKER` | `<repo>/build-worker/src/Release/orca-slicer-worker` | Worker executable |
 | `ORCA_WEB_PROFILE_VENDORS` | `Anycubic` | Comma-separated bundled vendors |
 | `ORCA_WEB_MAX_CONCURRENT_JOBS` | 2 | Workers running at once |
@@ -404,9 +421,10 @@ G-code lands where the transform said it would — the write side of
 
 ## Still deferred
 
-Job state and artifacts live on the job-directory filesystem behind the
-`JobService` interface. Database, queue, and object-store products stay
-unselected until local throughput and artifact sizes are measured.
-Authentication, per-owner enforcement, and per-owner quotas are implemented;
-retention tied to completion and its deletion audit, abuse controls, and rate
-limiting remain G6 work.
+Job metadata is stored in SQLite and artifacts stay in the job directories on
+the state volume ([ADR 0005](adr/0005-job-metadata-storage.md)). A database
+server, an object store, and a queue are not selected, and running more than one
+API instance against the same state root is still unsupported. Authentication,
+per-owner enforcement, per-owner quotas, abuse controls, and rate limiting are
+implemented. Retention tied to completion and its deletion audit remain G6
+work.

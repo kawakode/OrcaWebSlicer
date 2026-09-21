@@ -1,10 +1,10 @@
 """Per-owner quotas: concurrent jobs, stored bytes, worker CPU time, and submissions.
 
 Every quota is keyed by the opaque `owner_id` ADR 0004 derives from the
-assertion's issuer and subject. The ledger is process-local, like job
-metadata: a restart forgets the rolling CPU and submission windows. Stored
-bytes are not forgotten, because they are measured from what is on disk (and
-from the jobs this process holds) rather than remembered.
+assertion's issuer and subject. The ledger itself lives in memory; after a
+restart `JobService` replays the submissions and CPU charges its persisted job
+records carry. Stored bytes are measured from what is on disk (and from the
+jobs the service holds) rather than remembered.
 
 Quotas are admission checks. A job admitted under budget runs to its own
 executor limits, so one owner can overshoot the CPU budget by at most one
@@ -150,15 +150,19 @@ class QuotaLedger:
                     wait,
                 )
 
-    def record_submission(self, owner_id: str) -> None:
-        with self._lock:
-            self._submissions.setdefault(owner_id, deque()).append(self._clock())
+    # `age_seconds` backdates an entry that is being restored from job metadata
+    # after a restart. Restored entries must be replayed oldest first, because
+    # each window expires from its front.
 
-    def charge_cpu(self, owner_id: str, cpu_time_ms: int) -> None:
+    def record_submission(self, owner_id: str, age_seconds: float = 0.0) -> None:
+        with self._lock:
+            self._submissions.setdefault(owner_id, deque()).append(self._clock() - age_seconds)
+
+    def charge_cpu(self, owner_id: str, cpu_time_ms: int, age_seconds: float = 0.0) -> None:
         if cpu_time_ms <= 0:
             return
         with self._lock:
-            self._cpu.setdefault(owner_id, deque()).append((self._clock(), int(cpu_time_ms)))
+            self._cpu.setdefault(owner_id, deque()).append((self._clock() - age_seconds, int(cpu_time_ms)))
 
     def reserve_storage(self, owner_id: str, stored_bytes: int, requested: int) -> int:
         """Reserve up to `requested` bytes of what remains of the storage budget.

@@ -30,6 +30,8 @@ from web_worker_executor import ExecutorLimits  # noqa: E402
 from web.api.config import ApiConfig  # noqa: E402
 from web.api.errors import ApiError  # noqa: E402
 from web.api.jobs import TERMINAL_STATES, JobService, SceneRequest, SliceRequest  # noqa: E402
+from web.api.quotas import QuotaLimits  # noqa: E402
+from web.api.store import JobStore  # noqa: E402
 from web.api.uploads import UploadStore  # noqa: E402
 
 
@@ -69,7 +71,9 @@ class JobServiceTests(unittest.TestCase):
             service.shutdown()
         self.temporary.cleanup()
 
-    def service(self, mode="success", max_concurrent_jobs=2, retention_seconds=3600):
+    def service(self, mode="success", max_concurrent_jobs=2, retention_seconds=3600, quotas=None):
+        """A service on this test's state root. Calling it again is a restart:
+        the new service recovers whatever the earlier one persisted."""
         config = ApiConfig(
             repo_root=self.root,
             state_root=self.root / "state",
@@ -78,6 +82,7 @@ class JobServiceTests(unittest.TestCase):
             max_concurrent_jobs=max_concurrent_jobs,
             executor_limits=TEST_LIMITS,
             job_limits=JobDirectoryLimits(retention_seconds=retention_seconds),
+            quotas=quotas or QuotaLimits(),
             # This suite exercises job execution, not identity.
             auth_mode="disabled",
         )
@@ -520,6 +525,119 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(report["jobs_retained"], [accepted["job_id"]])
         self.assertTrue(directory.is_dir())
         service.cancel(accepted["job_id"], OWNER_ID)
+
+    # Restart and recovery
+
+    def test_a_restart_keeps_finished_jobs_and_their_artifacts(self):
+        first = self.service()
+        sliced = self.wait(first, self.submit(first)["job_id"])
+        scene = self.wait(
+            first, first.submit_scene(self.scene_request(self.upload().upload_id), "c-scene", OWNER_ID)["job_id"]
+        )
+        first.shutdown()
+
+        restarted = self.service()
+        self.assertEqual(restarted.get(sliced["job_id"], OWNER_ID), sliced)
+        self.assertEqual([job["job_id"] for job in restarted.list(OWNER_ID)], [sliced["job_id"], scene["job_id"]])
+        path, _, _ = restarted.artifact(sliced["job_id"], "gcode", OWNER_ID)
+        self.assertTrue(path.is_file())
+        self.assertEqual(len(restarted.preview(sliced["job_id"], OWNER_ID)["layers"]), 2)
+        # Scene deduplication survives too: the same request returns the
+        # recovered job rather than starting another.
+        again = restarted.submit_scene(
+            self.scene_request(scene["request"]["upload_id"]), "c-scene-again", OWNER_ID
+        )
+        self.assertEqual(again["job_id"], scene["job_id"])
+        # A recovered job is retried exactly like a live one.
+        retried = restarted.retry(sliced["job_id"], "c-retry", OWNER_ID)
+        self.assertEqual(retried["retry_of"], sliced["job_id"])
+        self.assertEqual(self.wait(restarted, retried["job_id"])["state"], "succeeded")
+
+    def test_a_restart_fails_jobs_an_earlier_process_left_unfinished(self):
+        first = self.service("slow")
+        accepted = self.submit(first)
+        deadline = time.monotonic() + 10
+        while first.get(accepted["job_id"], OWNER_ID)["state"] == "queued" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # What a crash leaves behind: the stored record still says running,
+        # and the directory holds whatever the worker had written.
+        stranded = first._jobs[accepted["job_id"]].to_stored()
+        self.assertEqual(stranded["state"], "running")
+        first.shutdown()
+        store = JobStore(self.config.metadata_path)
+        store.save(stranded)
+        store.close()
+        directory = self.config.jobs_root / accepted["job_id"]
+        (directory / "output").mkdir(parents=True, exist_ok=True)
+        (directory / "output" / "model.gcode").write_text("; partial", encoding="utf-8")
+
+        restarted = self.service()
+        job = restarted.get(accepted["job_id"], OWNER_ID)
+        self.assertEqual(job["state"], "failed")
+        self.assertEqual(job["error"]["category"], "internal")
+        self.assertEqual(job["error"]["code"], "job_interrupted")
+        self.assertEqual(job["artifacts"], [])
+        self.assertFalse(directory.exists())
+        retried = restarted.retry(accepted["job_id"], "c-retry", OWNER_ID)
+        self.assertEqual(self.wait(restarted, retried["job_id"])["state"], "succeeded")
+        # The interruption itself was persisted, so a second restart agrees.
+        restarted.shutdown()
+        self.assertEqual(self.service().get(accepted["job_id"], OWNER_ID)["error"]["code"], "job_interrupted")
+
+    def test_a_restart_replays_the_quota_windows(self):
+        limits = QuotaLimits(max_submissions=1)
+        first = self.service(quotas=limits)
+        self.wait(first, self.submit(first)["job_id"])
+        charged = first.quota(OWNER_ID)["usage"]["cpu_time_ms"]
+        self.assertGreater(charged, 0)
+        first.shutdown()
+
+        restarted = self.service(quotas=limits)
+        usage = restarted.quota(OWNER_ID)["usage"]
+        self.assertEqual(usage["submissions"], 1)
+        self.assertEqual(usage["cpu_time_ms"], charged)
+        with self.assertRaises(ApiError) as raised:
+            self.submit(restarted)
+        self.assertEqual(raised.exception.code, "job_submission_quota_exceeded")
+
+    def test_forgets_a_finished_record_after_the_retention_window(self):
+        service = self.service("crash", retention_seconds=1)
+        job = self.wait(service, self.submit(service)["job_id"])
+        # A crashed job's directory is already gone; only its record remains.
+        self.assertFalse((self.config.jobs_root / job["job_id"]).exists())
+        time.sleep(1.1)
+        service.sweep()
+        with self.assertRaises(ApiError) as raised:
+            service.get(job["job_id"], OWNER_ID)
+        self.assertEqual(raised.exception.code, "unknown_job")
+        service.shutdown()
+        self.assertEqual(self.service().list(OWNER_ID), [])
+
+    def test_skips_a_stored_record_it_cannot_trust(self):
+        first = self.service()
+        job = self.wait(first, self.submit(first)["job_id"])
+        stored = first._jobs[job["job_id"]].to_stored()
+        first.shutdown()
+        store = JobStore(self.config.metadata_path)
+        store.save(dict(stored, job_id="job-escape", owner_id="not-an-owner"))
+        store.save(dict(stored, job_id="../outside"))
+        store.save(dict(stored, job_id="job-future", record_version=99))
+        store.save(dict(stored, job_id="job-bad-request", request={"unexpected": 1}))
+        store.close()
+
+        restarted = self.service()
+        self.assertEqual([item["job_id"] for item in restarted.list(OWNER_ID)], [job["job_id"]])
+
+    def test_refuses_a_job_the_store_cannot_record(self):
+        service = self.service()
+        upload = self.upload()
+        service._store.close()
+        with self.assertRaises(ApiError) as raised:
+            service.submit(self.request(upload.upload_id), "c-1", OWNER_ID)
+        self.assertEqual(raised.exception.code, "metadata_store_unavailable")
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(service.list(OWNER_ID), [])
+        self.assertEqual(list(self.config.jobs_root.iterdir()), [])
 
 
 if __name__ == "__main__":
