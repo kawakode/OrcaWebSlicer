@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import logging
 import math
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,6 +76,16 @@ _EXECUTOR_FAILURES = {
     "output_limit": ("resource_limit", None),
     "failed": ("internal", None),
 }
+
+
+def _requires_admission(method):
+    """Hold a lifecycle lease across validation, staging, and queueing."""
+    @functools.wraps(method)
+    def admitted(self, *args, **kwargs):
+        with self.admission():
+            return method(self, *args, **kwargs)
+
+    return admitted
 
 
 @dataclasses.dataclass(frozen=True)
@@ -143,6 +155,9 @@ class JobRecord:
     request: Any
     path: Path
     created_at: float
+    # The owner this job was accepted for. Never rendered by `describe()`:
+    # ownership is an authorization fact, not something a client needs to see.
+    owner_id: str
     # Which worker operation this job runs; selects the manifest flag the
     # executor is invoked with, so the executor call site stays generic.
     operation: str = OPERATION_SLICE
@@ -232,33 +247,79 @@ class JobService:
         self._uploads = uploads
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
+        self._admission_condition = threading.Condition(self._lock)
+        self._shutdown_lock = threading.Lock()
         self._jobs: Dict[str, JobRecord] = {}
-        # The most recent inspect job for one (upload, machine, process,
+        # Admission closes before the executor pool is shut down. Keeping this
+        # state under the same lock as `_jobs` makes the final accepting check
+        # and queue submission atomic with respect to `begin_shutdown()`.
+        self._accepting = True
+        self._admissions_in_flight = 0
+        self._shutdown_complete = False
+        # The most recent inspect job for one (owner, upload, machine, process,
         # filament, plate) request, so a repeated scene request returns the
         # job already in flight or finished rather than starting another.
-        self._scenes: Dict[SceneRequest, str] = {}
+        # Keyed on the owner too, so deduplication never crosses owners.
+        self._scenes: Dict[Tuple[str, SceneRequest], str] = {}
         self._pool = ThreadPoolExecutor(
             max_workers=config.max_concurrent_jobs, thread_name_prefix="orca-slice-job"
         )
 
     # Queries
 
-    def get(self, job_id: str) -> Dict[str, Any]:
+    def get(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         with self._lock:
-            return self._require(job_id).describe()
+            return self._require(job_id, owner_id).describe()
 
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self, owner_id: str) -> List[Dict[str, Any]]:
         with self._lock:
-            records = sorted(self._jobs.values(), key=lambda record: record.created_at)
+            records = sorted(
+                (record for record in self._jobs.values() if record.owner_id == owner_id),
+                key=lambda record: record.created_at,
+            )
             return [record.describe() for record in records]
 
-    def artifact(self, job_id: str, name: str) -> Tuple[Path, str, str]:
+    def is_accepting(self) -> bool:
+        """Whether this instance may accept work that needs a worker later."""
+        with self._lock:
+            return self._accepting
+
+    def require_accepting(self) -> None:
+        """Refuse new mutable work once graceful shutdown has begun."""
+        with self._lock:
+            if not self._accepting:
+                raise ApiError(
+                    "service_draining",
+                    "This API instance is draining and cannot accept new work.",
+                    503,
+                )
+
+    @contextmanager
+    def admission(self):
+        """Keep shutdown from completing while one accepted request mutates state."""
+        with self._admission_condition:
+            if not self._accepting:
+                raise ApiError(
+                    "service_draining",
+                    "This API instance is draining and cannot accept new work.",
+                    503,
+                )
+            self._admissions_in_flight += 1
+        try:
+            yield
+        finally:
+            with self._admission_condition:
+                self._admissions_in_flight -= 1
+                if self._admissions_in_flight == 0:
+                    self._admission_condition.notify_all()
+
+    def artifact(self, job_id: str, name: str, owner_id: str) -> Tuple[Path, str, str]:
         """Resolve a downloadable artifact to a path, media type, and filename."""
         if name not in ARTIFACT_NAMES:
             raise ApiError("unknown_artifact", f"No artifact is named {name}.", 404)
         media_type, filename = _ARTIFACT_MEDIA[name]
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             if name == "result":
                 # A failed run's report is the useful part, so any outcome the
                 # executor validated is served.
@@ -270,19 +331,19 @@ class JobService:
             path = self._published(record, name)
             return self._readable(path), media_type, filename.format(job_id=job_id)
 
-    def preview(self, job_id: str) -> Dict[str, Any]:
+    def preview(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         """Read the layer preview index, which names byte ranges per layer."""
-        return dict(self._preview_index(job_id))
+        return dict(self._preview_index(job_id, owner_id))
 
-    def preview_layer(self, job_id: str, layer: int) -> Tuple[Path, int, int]:
+    def preview_layer(self, job_id: str, layer: int, owner_id: str) -> Tuple[Path, int, int]:
         """Locate one layer inside the preview blob without reading the rest."""
-        index = self._preview_index(job_id)
+        index = self._preview_index(job_id, owner_id)
         layers = index.get("layers", [])
         if not isinstance(layers, list) or not 0 <= layer < len(layers):
             raise ApiError("unknown_preview_layer", "This preview has no such layer.", 404)
         described = layers[layer]
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             path = self._published(record, "preview_data")
         offset = int(described.get("offset", 0))
         length = int(described.get("length", 0))
@@ -291,19 +352,19 @@ class JobService:
             raise ApiError("artifact_unavailable", "The preview data no longer matches its index.", 410)
         return path, offset, length
 
-    def scene(self, job_id: str) -> Dict[str, Any]:
+    def scene(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         """Read the scene index: the bed and every object's geometry range."""
-        return dict(self._scene_index(job_id))
+        return dict(self._scene_index(job_id, owner_id))
 
-    def scene_object(self, job_id: str, index: int) -> Tuple[Path, int, int]:
+    def scene_object(self, job_id: str, index: int, owner_id: str) -> Tuple[Path, int, int]:
         """Locate one object's triangle soup inside the scene blob without reading the rest."""
-        scene = self._scene_index(job_id)
+        scene = self._scene_index(job_id, owner_id)
         objects = scene.get("objects", [])
         if not isinstance(objects, list) or not 0 <= index < len(objects):
             raise ApiError("unknown_scene_object", "This scene has no such object.", 404)
         described = objects[index]
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             path = self._published(record, "scene_data")
         offset = int(described.get("offset", 0))
         length = int(described.get("length", 0))
@@ -314,10 +375,16 @@ class JobService:
 
     # Commands
 
+    @_requires_admission
     def submit(
-        self, request: SliceRequest, correlation_id: str, retry_of: Optional[str] = None
+        self,
+        request: SliceRequest,
+        correlation_id: str,
+        owner_id: str,
+        retry_of: Optional[str] = None,
     ) -> Dict[str, Any]:
-        upload = self._uploads.get(request.upload_id)
+        self.require_accepting()
+        upload = self._uploads.get(request.upload_id, owner_id)
         self._validate(request)
         self.sweep()
 
@@ -355,27 +422,38 @@ class JobService:
             prepared.path,
             prepared.staged_bytes,
             correlation_id,
+            owner_id,
             retry_of,
             self._describe_chain(request),
             self._describe_overrides(request.settings),
         )
 
+    @_requires_admission
     def submit_scene(
-        self, request: SceneRequest, correlation_id: str, retry_of: Optional[str] = None
+        self,
+        request: SceneRequest,
+        correlation_id: str,
+        owner_id: str,
+        retry_of: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Start (or return) the inspect job for one upload, machine, and plate.
 
         A direct request is idempotent: a matching job already queued, running,
         or succeeded is returned rather than duplicated. A retry (`retry_of`
-        set) always starts a fresh job, exactly like a slice retry.
+        set) always starts a fresh job, exactly like a slice retry. The dedup
+        key is scoped to the owner, so two owners inspecting the same upload
+        (never possible today, since an upload has one owner, but kept
+        explicit) never share a job.
         """
-        upload = self._uploads.get(request.upload_id)
+        self.require_accepting()
+        upload = self._uploads.get(request.upload_id, owner_id)
         self._validate_plate_index(request.plate_index)
         self.sweep()
 
+        scene_key = (owner_id, request)
         if retry_of is None:
             with self._lock:
-                existing_job_id = self._scenes.get(request)
+                existing_job_id = self._scenes.get(scene_key)
                 existing = self._jobs.get(existing_job_id) if existing_job_id else None
                 if existing is not None and existing.state not in ("failed", "canceled"):
                     return existing.describe()
@@ -415,17 +493,18 @@ class JobService:
             prepared.path,
             prepared.staged_bytes,
             correlation_id,
+            owner_id,
             retry_of,
             self._describe_chain(request),
             [],
         )
         with self._lock:
-            self._scenes[request] = job_id
+            self._scenes[scene_key] = job_id
         return accepted
 
-    def cancel(self, job_id: str) -> Dict[str, Any]:
+    def cancel(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             if record.state in TERMINAL_STATES:
                 raise ApiError("job_not_cancelable", "This job has already finished.", 409)
             record.cancellation.set()
@@ -433,19 +512,27 @@ class JobService:
                 # No worker exists yet, so the job is canceled here and _run
                 # returns without launching one.
                 self._finish(record, "canceled", self._error("cancellation", "job_canceled", "The job was canceled."))
+                if not remove_job_directory(record.path):
+                    self._log.warning(
+                        "queued job cleanup failed job_id=%s path=%s", job_id, record.path
+                    )
             self._log.info("job cancellation requested job_id=%s state=%s", job_id, record.state)
             return record.describe()
 
-    def retry(self, job_id: str, correlation_id: str) -> Dict[str, Any]:
+    def retry(self, job_id: str, correlation_id: str, owner_id: str) -> Dict[str, Any]:
+        """Rerun a finished job's inputs. The original owner is retained even
+        though `owner_id` (already checked by `_require`) must match it: a
+        caller can never transfer a job by retrying it."""
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             if record.state not in TERMINAL_STATES:
                 raise ApiError("job_not_retryable", "This job has not finished yet.", 409)
             operation = record.operation
             request = record.request
+            original_owner = record.owner_id
         if operation == OPERATION_INSPECT:
-            return self.submit_scene(request, correlation_id, retry_of=job_id)
-        return self.submit(request, correlation_id, retry_of=job_id)
+            return self.submit_scene(request, correlation_id, original_owner, retry_of=job_id)
+        return self.submit(request, correlation_id, original_owner, retry_of=job_id)
 
     def sweep(self) -> Dict[str, Any]:
         """Reclaim expired jobs and uploads, and forget the jobs that went away."""
@@ -465,17 +552,47 @@ class JobService:
                 # Never point a future scene request at a job directory that
                 # is gone.
                 self._scenes = {
-                    request: job_id for request, job_id in self._scenes.items() if job_id not in removed
+                    key: job_id for key, job_id in self._scenes.items() if job_id not in removed
                 }
         uploads = self._uploads.sweep(self._config.job_limits.retention_seconds)
         return {"jobs_removed": report.removed, "jobs_retained": report.retained, "uploads_removed": uploads}
 
-    def shutdown(self) -> None:
+    def begin_shutdown(self) -> None:
+        """Close admission and request cancellation without waiting for workers."""
+        queued_paths: List[Path] = []
         with self._lock:
+            if not self._accepting:
+                return
+            self._accepting = False
             for record in self._jobs.values():
-                if record.state not in TERMINAL_STATES:
-                    record.cancellation.set()
-        self._pool.shutdown(wait=True)
+                if record.state in TERMINAL_STATES:
+                    continue
+                record.cancellation.set()
+                if record.state == "queued":
+                    self._finish(
+                        record,
+                        "canceled",
+                        self._error("cancellation", "job_canceled", "The job was canceled."),
+                    )
+                    queued_paths.append(record.path)
+        for path in queued_paths:
+            if not remove_job_directory(path):
+                self._log.warning("shutdown job cleanup failed path=%s", path)
+        self._log.info("job service draining queued_canceled=%d", len(queued_paths))
+
+    def shutdown(self) -> None:
+        """Drain active work, escalating worker cancellation in the executor."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self.begin_shutdown()
+            with self._admission_condition:
+                while self._admissions_in_flight:
+                    self._admission_condition.wait()
+            # Queued records were made terminal above; canceling their futures
+            # ensures they never consume a worker slot just to observe that state.
+            self._pool.shutdown(wait=True, cancel_futures=True)
+            self._shutdown_complete = True
 
     # Execution
 
@@ -487,6 +604,7 @@ class JobService:
         path: Path,
         staged_bytes: int,
         correlation_id: str,
+        owner_id: str,
         retry_of: Optional[str],
         profiles: Dict[str, Any],
         overrides: List[Dict[str, Any]],
@@ -503,16 +621,31 @@ class JobService:
             request=request,
             path=path,
             created_at=time.time(),
+            owner_id=owner_id,
             operation=operation,
             retry_of=retry_of,
             profiles=profiles,
             overrides=overrides,
         )
         with self._lock:
-            self._jobs[job_id] = record
-            # Snapshot before queueing: a worker can start before this returns,
-            # and an acceptance must report the job as accepted.
-            accepted = record.describe()
+            if not self._accepting:
+                rejected = True
+            else:
+                rejected = False
+                self._jobs[job_id] = record
+                # Queue while holding the admission lock. Shutdown cannot close
+                # the pool between recording and submitting this job.
+                self._pool.submit(self._run, job_id)
+                # Snapshot before the worker takes the lock: an acceptance must
+                # report the job as accepted even if it starts immediately.
+                accepted = record.describe()
+        if rejected:
+            remove_job_directory(record.path)
+            raise ApiError(
+                "service_draining",
+                "This API instance is draining and cannot accept new work.",
+                503,
+            )
         self._log.info(
             "job accepted job_id=%s operation=%s correlation_id=%s retry_of=%s staged_bytes=%d",
             job_id,
@@ -521,7 +654,6 @@ class JobService:
             retry_of,
             staged_bytes,
         )
-        self._pool.submit(self._run, job_id)
         return accepted
 
     def _run(self, job_id: str) -> None:
@@ -621,9 +753,12 @@ class JobService:
     def _error(category: str, code: str, message: str) -> Dict[str, str]:
         return {"category": category, "code": code, "message": message}
 
-    def _require(self, job_id: str) -> JobRecord:
+    def _require(self, job_id: str, owner_id: str) -> JobRecord:
         record = self._jobs.get(job_id)
-        if record is None:
+        # A job that belongs to another owner is reported exactly like one
+        # that does not exist, so a job ID is never a cross-owner existence
+        # oracle.
+        if record is None or record.owner_id != owner_id:
             raise ApiError("unknown_job", "No job is known under that id.", 404)
         return record
 
@@ -645,9 +780,9 @@ class JobService:
                     return path
         raise ApiError("artifact_unavailable", f"This job published no {kind}.", 409)
 
-    def _preview_index(self, job_id: str) -> Dict[str, Any]:
+    def _preview_index(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             if record.preview_index is not None:
                 return record.preview_index
             path = self._readable(self._published(record, "preview"))
@@ -662,9 +797,9 @@ class JobService:
             record.preview_index = index
             return index
 
-    def _scene_index(self, job_id: str) -> Dict[str, Any]:
+    def _scene_index(self, job_id: str, owner_id: str) -> Dict[str, Any]:
         with self._lock:
-            record = self._require(job_id)
+            record = self._require(job_id, owner_id)
             if record.scene_index is not None:
                 return record.scene_index
             path = self._readable(self._published(record, "scene"))

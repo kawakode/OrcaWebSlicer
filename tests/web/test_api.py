@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import dataclasses
 import importlib.util
 import io
 import json
@@ -60,6 +61,9 @@ class ApiTests(unittest.TestCase):
             max_concurrent_jobs=2,
             executor_limits=TEST_LIMITS,
             job_limits=JobDirectoryLimits(retention_seconds=3600),
+            # This suite exercises request handling, not identity; auth
+            # behavior itself is covered by test_auth.py and test_ownership.py.
+            auth_mode="disabled",
         )
 
     def tearDown(self):
@@ -106,6 +110,12 @@ class ApiTests(unittest.TestCase):
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["protocol_version"], 1)
+        live = self.client.get("/api/v1/health/live")
+        self.assertEqual(live.status_code, 200)
+        ready = self.client.get("/api/v1/health/ready")
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.json()["status"], "ready")
+        self.assertEqual(ready.json()["checks"], {"admission": True, "worker": True, "state": True})
 
         schema = self.client.get("/openapi.json")
         self.assertEqual(schema.status_code, 200)
@@ -119,6 +129,62 @@ class ApiTests(unittest.TestCase):
             sorted(submission["required"]),
             ["machine_profile", "process_profile", "upload_id"],
         )
+
+    def test_drain_fails_readiness_and_new_work_but_keeps_reads_available(self):
+        accepted = self.submit()
+        job_id = accepted.json()["job_id"]
+        self.assertEqual(self.wait(job_id)["state"], "succeeded")
+        upload_id = accepted.json()["request"]["upload_id"]
+
+        self.client.app.state.jobs.begin_shutdown()
+
+        ready = self.client.get("/api/v1/health/ready")
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(ready.json()["status"], "not_ready")
+        self.assertFalse(ready.json()["checks"]["admission"])
+        self.assertEqual(self.client.get("/api/v1/health/live").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/v1/jobs/{job_id}").status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/v1/jobs/{job_id}/artifacts/gcode").status_code,
+            200,
+        )
+
+        rejected_upload = self.upload("later.stl")
+        self.assertEqual(rejected_upload.status_code, 503)
+        self.assertEqual(rejected_upload.json()["error"]["code"], "service_draining")
+        rejected_job = self.client.post(
+            "/api/v1/jobs",
+            json={
+                "upload_id": upload_id,
+                "machine_profile": MACHINE_ID,
+                "process_profile": PROCESS_ID,
+                "filament_profile": FILAMENT_ID,
+            },
+        )
+        self.assertEqual(rejected_job.status_code, 503)
+        self.assertEqual(rejected_job.json()["error"]["code"], "service_draining")
+        self.assertEqual(self.client.post(f"/api/v1/jobs/{job_id}/retry").status_code, 503)
+
+    def test_readiness_reports_a_missing_worker_and_unwritable_state(self):
+        from fastapi.testclient import TestClient
+
+        missing_worker = dataclasses.replace(
+            self.config(), worker_command=(str(self.root / "missing-worker"),)
+        )
+        with TestClient(self.create_app(missing_worker)) as client:
+            response = client.get("/api/v1/health/ready")
+            self.assertEqual(response.status_code, 503)
+            self.assertFalse(response.json()["checks"]["worker"])
+
+        state_root = self.client.app.state.config.state_root
+        state_root.mkdir(parents=True, exist_ok=True)
+        state_root.chmod(0o500)
+        try:
+            response = self.client.get("/api/v1/health/ready")
+            self.assertEqual(response.status_code, 503)
+            self.assertFalse(response.json()["checks"]["state"])
+        finally:
+            state_root.chmod(0o700)
 
     def test_lists_bundled_profiles_and_narrows_them_to_a_printer(self):
         response = self.client.get("/api/v1/profiles")

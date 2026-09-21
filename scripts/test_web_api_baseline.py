@@ -178,6 +178,9 @@ def main():
             ),
             job_limits=JobDirectoryLimits(),
             sandbox=policy_from_environment(),
+            # This check drives the API directly, with no edge to mint an
+            # assertion, so it uses the explicit local-development mode.
+            auth_mode="disabled",
         )
         with TestClient(create_app(config)) as client:
             results = {

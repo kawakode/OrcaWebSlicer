@@ -12,14 +12,68 @@ The process never links `libslic3r` and never parses model geometry. An upload
 is streamed to disk after an extension and size check; the first thing to read
 its contents is a worker process inside its own job directory.
 
+## Authentication and authorization
+
+See [ADR 0004](adr/0004-service-identity.md) for the design. `ORCA_WEB_AUTH_MODE`
+selects one of two modes, and an invalid value or an incomplete `required`
+configuration fails startup with `invalid_api_configuration`:
+
+- `required` (the default): every `/api/v1` route other than the three health
+  endpoints needs `Authorization: Bearer <assertion>`, a short-lived RS256 JWT
+  the API verifies itself against a local, read-only JWKS file. It never
+  fetches keys over the network. The assertion must name a fixed-allowlist
+  RS256 algorithm, a non-empty `kid` that selects exactly one RSA signing key
+  from the JWKS, the configured issuer and audience, `exp`/`nbf`/`iat`, and a
+  non-empty `sub` and `jti`; an assertion whose `exp - iat` exceeds 300 seconds
+  is refused regardless of its stated validity window. A rotation file may
+  carry both a retiring and a replacement key at once, each under its own
+  `kid`. The API derives `owner_id` as the hex SHA-256 digest of `issuer`, a
+  NUL byte, and `subject`, and never logs or returns the raw assertion,
+  subject, email, or display name. `required` also needs
+  `ORCA_WEB_AUTH_ISSUER`, `ORCA_WEB_AUTH_AUDIENCE`, and
+  `ORCA_WEB_AUTH_JWKS_PATH`, and disables `/openapi.json`, `/docs`, and
+  `/redoc`.
+- `disabled`: an explicit local-development and isolated-test mode. Every
+  request is treated as one fixed `local-development` principal, regardless of
+  any `Authorization` header. This is the only mode the reference development
+  Compose file and the isolated test suite use.
+
+A missing or invalid assertion in `required` mode is always
+`{"error": {"code": "authentication_required", ...}}` with HTTP 401 and
+`WWW-Authenticate: Bearer`. A resource that does not exist and one that
+belongs to another principal return the identical `404` — a job, upload,
+artifact, preview, or scene ID is never a cross-owner existence oracle. HTTP
+403 is reserved for a future explicit role or scope denial; the first
+implementation treats every valid principal as an ordinary user with no
+privileged bypass.
+
+Every upload and job is owned by the principal that created it. New upload
+metadata uses schema version 2 and persists the opaque `owner_id` only on disk;
+unknown future metadata versions fail closed. An upload can
+only be used to create a scene or slice for its own owner; a job, its
+artifacts, preview, and scene can only be reached, canceled, or retried by its
+owner; a retry keeps the original owner even though the caller must already be
+that owner to retry it at all; job listing returns only the caller's jobs; and
+scene deduplication is scoped per owner. Neither a job response nor
+`POST /uploads`'s response ever renders `owner_id`. Version 1 upload metadata,
+stored before
+authentication was enabled has no owner on disk: `required` mode treats it as
+unknown to everyone, and `disabled` mode (the only mode that can still read
+it) treats it as the fixed `local-development` principal's.
+
+`GET /health/ready` is public and reports the live `auth_mode`, so an operator
+can never mistake a `disabled` topology for an authenticated one.
+
 ## Surface
 
 Every route is under `/api/v1`. The generated OpenAPI document is served at
-`/openapi.json`.
+`/openapi.json` in `disabled` mode only.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Liveness plus the protocol and API versions |
+| `GET` | `/health` | Compatibility liveness plus the protocol and API versions |
+| `GET` | `/health/live` | Process liveness for restart policy |
+| `GET` | `/health/ready` | Admission, worker, and state-root readiness for traffic |
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
 | `GET` | `/settings` | The engine's own definition of every curated setting |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model |
@@ -207,11 +261,15 @@ The API adds four settings to the worker and executor variables listed in
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
-| `ORCA_WEB_STATE_ROOT` | `<repo>/build/web-state` | Uploads and job directories |
+| `ORCA_WEB_STATE_ROOT` | `<repo>/build/web-state` (`/var/lib/orca-web` in Compose) | Uploads and job directories |
 | `ORCA_WEB_WORKER` | `<repo>/build-worker/src/Release/orca-slicer-worker` | Worker executable |
 | `ORCA_WEB_PROFILE_VENDORS` | `Anycubic` | Comma-separated bundled vendors |
 | `ORCA_WEB_MAX_CONCURRENT_JOBS` | 2 | Workers running at once |
 | `ORCA_WEB_FRONTEND_DIST` | `<repo>/web/frontend/dist` | Built browser screen |
+| `ORCA_WEB_AUTH_MODE` | `required` | `required` or `disabled` (see above) |
+| `ORCA_WEB_AUTH_ISSUER` | none | Required assertion issuer in `required` mode |
+| `ORCA_WEB_AUTH_AUDIENCE` | none | Required assertion audience in `required` mode |
+| `ORCA_WEB_AUTH_JWKS_PATH` | none | Local JWKS file path in `required` mode |
 
 When the frontend build exists it is mounted after every API route, so the
 [browser screen](frontend.md) is served from this same origin. When it does not,
@@ -219,6 +277,13 @@ the API is a bare JSON service.
 
 Uploads and job directories are reclaimed by the same retention window as the
 job-directory sweep, which runs at startup and before each submission.
+
+During graceful shutdown the service closes upload, scene, slice, and retry
+admission with `service_draining` (HTTP 503), cancels queued jobs without
+launching them, and asks the executor to terminate running workers. Reads and
+published downloads stay available until the HTTP server exits. See the
+[deployment operations runbook](operations.md) for probe, timeout, rollback,
+and restart semantics.
 
 ## Running it
 
@@ -244,6 +309,6 @@ G-code lands where the transform said it would — the write side of
 
 Job state and artifacts live on the job-directory filesystem behind the
 `JobService` interface. Database, queue, and object-store products stay
-unselected until local throughput and artifact sizes are measured. Retention
-tied to completion and its deletion audit, authentication, quotas, and rate
-limiting are G6 work.
+unselected until local throughput and artifact sizes are measured.
+Authentication and per-owner enforcement are implemented; retention tied to
+completion and its deletion audit, quotas, and rate limiting remain G6 work.

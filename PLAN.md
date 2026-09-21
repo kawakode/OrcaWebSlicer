@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-14
+Last updated: 2026-09-17
 
 ## Objective
 
@@ -35,8 +35,11 @@ The foundation is complete:
 
 Multi-filament landed after G5 closed and is described in section 18.
 
-The active gate is G6, production readiness. Its first batch, the worker
-sandbox, is described in section 14.
+The active gate is G6, production readiness. Isolation, security scanning, the
+reference single-instance lifecycle, and per-owner authentication and
+authorization are implemented and tested. Per-user quotas and abuse controls
+are next; an immutable production release unit and durable recovery remain G6
+exit gates.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -271,12 +274,35 @@ verified in a browser the release depends on.
   and Grype versions, retain CycloneDX SBOMs and complete JSON findings, and
   fail the release gate on fixable High or Critical vulnerabilities. Static
   custom-CMake dependencies remain an explicitly documented cataloger gap.
-- [ ] Add health checks, graceful shutdown, deployment rollback, and disaster
-  recovery procedures.
+- [x] Add separate liveness and readiness checks, close admission atomically,
+  hold shutdown behind already-admitted uploads and job staging, cancel queued
+  jobs without launching them, and configure the reference container's bounded
+  graceful stop. Focused tests exercise admission races and an actual Uvicorn
+  `SIGTERM` with running and queued jobs; a black-box canary verifies readiness,
+  upload, slicing, and artifact checksums. The rollback and empty-state disaster
+  recovery runbook is explicit that job metadata is process-local, the current
+  Compose image is not immutable, and durable recovery remains gated by
+  persistent storage.
 
 ### 15. Add service controls
 
-- [ ] Implement authentication and authorization appropriate to the deployment.
+- [x] Select and document the provider-neutral identity boundary, public probe
+  surface, authenticated browser session contract, and secure production
+  default before wiring ownership into uploads and jobs. ADR 0004 keeps OIDC
+  and browser sessions at the edge, requires the API to verify a short-lived
+  signed assertion, and derives the ownership and quota key from its issuer and
+  opaque subject without persisting the raw identity claims.
+- [x] Implement authentication and authorization appropriate to the
+  deployment. `ORCA_WEB_AUTH_MODE` defaults to `required`: every `/api/v1`
+  route but the three health checks verifies a short-lived RS256 bearer
+  assertion against a local, read-only JWKS file, and `owner_id` (derived from
+  the assertion's issuer and subject, never persisted or logged raw) is
+  enforced on every upload, job, artifact, preview, and scene lookup, list,
+  cancellation, and retry. `disabled` mode, used only by the reference
+  development Compose file and isolated tests, is an explicit fixed
+  `local-development` principal. See
+  [ADR 0004](docs/web/adr/0004-service-identity.md) and
+  [the API contract](docs/web/api.md#authentication-and-authorization).
 - [ ] Add per-user concurrency, storage, CPU-time, and request quotas.
 - [ ] Add abuse controls and rate limiting without weakening stable job errors.
 - [ ] Select persistent metadata and artifact storage based on measured needs.

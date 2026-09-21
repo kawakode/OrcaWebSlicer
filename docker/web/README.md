@@ -70,6 +70,27 @@ publish it elsewhere. `ORCA_WEB_STATE_ROOT`, `ORCA_WEB_WORKER`,
 `ORCA_WEB_PROFILE_VENDORS`, `ORCA_WEB_MAX_CONCURRENT_JOBS`, and
 `ORCA_WEB_FRONTEND_DIST` configure it.
 
+The compose file sets `ORCA_WEB_AUTH_MODE=disabled` for this `api` service,
+visibly, because this reference topology has no authenticating edge proxy in
+front of it yet — that is also why its port is bound to `127.0.0.1` only. It
+treats every request as one fixed `local-development` principal. A real
+deployment sets `ORCA_WEB_AUTH_MODE=required` behind an edge that injects a
+verified `Authorization: Bearer` assertion, and mounts `ORCA_WEB_AUTH_ISSUER`,
+`ORCA_WEB_AUTH_AUDIENCE`, and a read-only `ORCA_WEB_AUTH_JWKS_PATH`; see the
+[authentication section of the API contract](../../docs/web/api.md#authentication-and-authorization)
+and [ADR 0004](../../docs/web/adr/0004-service-identity.md).
+
+The container healthcheck gates on `/api/v1/health/ready`; `/health/live` is the
+process-only probe. Mutable uploads and jobs live in the dedicated
+`orca-web-state` volume at `/var/lib/orca-web`, separate from build outputs.
+`init: true`, Uvicorn's 10-second HTTP shutdown window, and the configurable
+`ORCA_WEB_API_STOP_GRACE_PERIOD` (30 seconds by default) give workers time to
+cancel and escalate cleanly. The full replacement, rollback, and disaster
+recovery procedure is in [operations.md](../../docs/web/operations.md).
+The Compose state path is intentionally fixed to `/var/lib/orca-web`; changing
+it safely requires an override that also changes the `orca-web-state` mount
+target.
+
 `frontend` runs the Vite dev server with hot reload on port 5173 and proxies
 `/api` to `ORCA_WEB_API_URL`. `frontend-e2e` builds the bundle, installs the
 browser matrix, and runs the Playwright suite against the API and the real
@@ -190,9 +211,11 @@ Stop containers without deleting the build cache:
 docker compose -f docker/web/compose.yml down
 ```
 
-Delete all compiled dependencies, application outputs, and ccache only when a
-genuinely clean rebuild is required:
+Delete every named volume only when a genuinely full local reset is required:
 
 ```powershell
 docker compose -f docker/web/compose.yml down --volumes
 ```
+
+This also permanently deletes the `orca-web-state` volume, including raw model
+uploads and job artifacts. It is not merely a build-cache cleanup command.

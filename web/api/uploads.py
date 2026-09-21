@@ -23,6 +23,8 @@ UPLOAD_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 MAX_FILENAME_CHARS = 200
 _UNSAFE_FILENAME_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _METADATA_NAME = "upload.json"
+_METADATA_VERSION = 2
+_OWNER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -34,6 +36,9 @@ class UploadRecord:
     sha256: str
     path: Path
     created_at: float
+    # Never rendered by `describe()`: ownership is an authorization fact, not
+    # something a client needs to see about its own upload.
+    owner_id: str
 
     def describe(self) -> Dict[str, Any]:
         return {
@@ -44,6 +49,13 @@ class UploadRecord:
             "sha256": self.sha256,
             "created_at": self.created_at,
         }
+
+    def _metadata(self) -> Dict[str, Any]:
+        """The on-disk record, which does carry `owner_id`, unlike `describe()`."""
+        payload = self.describe()
+        payload["metadata_version"] = _METADATA_VERSION
+        payload["owner_id"] = self.owner_id
+        return payload
 
 
 def _display_filename(filename: Optional[str]) -> str:
@@ -66,13 +78,21 @@ def _model_format(filename: str) -> str:
 
 
 class UploadStore:
-    """One directory per upload, holding the model and its metadata."""
+    """One directory per upload, holding the model and its metadata.
 
-    def __init__(self, root: Path, max_bytes: int) -> None:
+    `legacy_owner_id`, when set, is the owner a pre-auth upload (one whose
+    stored metadata has no `owner_id`) is treated as belonging to. It is the
+    fixed local-development principal in disabled mode and `None` (never
+    matching a real caller) in required mode, so a legacy upload is exposed
+    only in the one topology that documents the transition.
+    """
+
+    def __init__(self, root: Path, max_bytes: int, legacy_owner_id: Optional[str] = None) -> None:
         self._root = Path(root)
         self._max_bytes = max_bytes
+        self._legacy_owner_id = legacy_owner_id
 
-    def create(self, filename: Optional[str], reader: BinaryIO) -> UploadRecord:
+    def create(self, filename: Optional[str], reader: BinaryIO, owner_id: str) -> UploadRecord:
         display = _display_filename(filename)
         model_format = _model_format(display)
         upload_id = uuid.uuid4().hex
@@ -94,6 +114,7 @@ class UploadStore:
                 sha256=digest,
                 path=target,
                 created_at=time.time(),
+                owner_id=owner_id,
             )
             # Metadata lands last, so a directory holding it is always complete.
             self._write_metadata(directory, record)
@@ -102,7 +123,7 @@ class UploadStore:
             raise
         return record
 
-    def get(self, upload_id: str) -> UploadRecord:
+    def get(self, upload_id: str, owner_id: str) -> UploadRecord:
         if not isinstance(upload_id, str) or not UPLOAD_ID_PATTERN.match(upload_id):
             raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
         directory = self._root / upload_id
@@ -116,6 +137,20 @@ class UploadStore:
         path = directory / f"source.{model_format}"
         if not path.is_file() or path.is_symlink():
             raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
+        metadata_version = metadata.get("metadata_version", 1)
+        if metadata_version not in (1, _METADATA_VERSION):
+            raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
+        # Version 1 predates ownership. It resolves to the legacy owner this
+        # deployment maps ownerless uploads to (or to nothing in required
+        # mode). Version 2 must carry the opaque 64-character owner digest.
+        if metadata_version == 1:
+            stored_owner = self._legacy_owner_id
+        else:
+            stored_owner = metadata.get("owner_id")
+            if not isinstance(stored_owner, str) or not _OWNER_ID_PATTERN.fullmatch(stored_owner):
+                raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
+        if stored_owner != owner_id:
+            raise ApiError("unknown_upload", "No upload is stored under that id.", 404)
         return UploadRecord(
             upload_id=upload_id,
             filename=str(metadata.get("filename", "model")),
@@ -124,6 +159,7 @@ class UploadStore:
             sha256=str(metadata.get("sha256", "")),
             path=path,
             created_at=float(metadata.get("created_at", 0.0)),
+            owner_id=owner_id,
         )
 
     def sweep(self, retention_seconds: int, now: Optional[float] = None) -> List[str]:
@@ -173,7 +209,7 @@ class UploadStore:
         return written, digest.hexdigest()
 
     def _write_metadata(self, directory: Path, record: UploadRecord) -> None:
-        payload = json.dumps(record.describe(), separators=(",", ":")).encode("utf-8")
+        payload = json.dumps(record._metadata(), separators=(",", ":")).encode("utf-8")
         temporary = directory / f".{_METADATA_NAME}.partial"
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with open(descriptor, "wb") as writer:

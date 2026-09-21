@@ -19,6 +19,8 @@ This directory is the source of truth for the web effort:
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 - [ADR 0003: worker sandbox and production isolation](adr/0003-worker-sandbox.md)
+- [ADR 0004: service identity and authorization boundary](adr/0004-service-identity.md)
+- [Deployment operations and recovery](operations.md)
 
 ## Delivery gates
 
@@ -73,8 +75,8 @@ covers support, multipart, invalid configuration, Unicode 3MF, and the
 output-size limit across all three [baseline lanes](baseline.md). G5 is
 complete; G6, production readiness, is the next gate.
 
-G6 has begun with the worker sandbox and a reproducible SBOM and vulnerability
-scan. Every worker now runs with no network, no
+G6 has begun with the worker sandbox, a reproducible SBOM and vulnerability
+scan, and the [deployment operations contract](operations.md). Every worker now runs with no network, no
 capabilities, no privileges to gain, a temporary directory inside its own job,
 an environment rebuilt from an allowlist, and never as root; a control that
 cannot be applied fails the job before the worker starts.
@@ -82,6 +84,25 @@ cannot be applied fails the job before the worker starts.
 filter rather than a namespace — every `unshare` flag returns `EPERM` under the
 canonical runtime, including as root — and the two engine defects that running
 a worker unprivileged for the first time surfaced.
+
+The API now distinguishes liveness from readiness, holds graceful shutdown
+behind already-admitted mutations, cancels queued and running jobs, and has
+tested container stop timing. The reference Compose topology keeps state
+separate from build caches, and its probe-only container performs a complete
+canary slice without access to that state. The operations contract defines
+stop-then-start rollback and honest empty-state recovery procedures. An
+immutable release image and durable job recovery remain G6 exit work because
+the reference image is mutable and job metadata is still process-local.
+
+Runtime authentication and authorization are implemented per
+[ADR 0004](adr/0004-service-identity.md): every `/api/v1` route but the three
+health checks requires a verified, short-lived bearer assertion by default,
+uploads and jobs carry an owner derived from that assertion's issuer and
+subject, and every lookup, cancellation, retry, artifact, preview, and scene
+access enforces it. `ORCA_WEB_AUTH_MODE` stays `disabled` in the reference
+Compose file until an authenticating edge is added in front of it. Per-user
+quotas, abuse controls, persistent metadata storage, retention, observability,
+and the remaining release and compliance work are still open.
 
 Multi-filament landed after that gate closed: a slice request names 1-16
 filament profiles and assigns each placed object to one of them, from the

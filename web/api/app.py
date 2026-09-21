@@ -7,12 +7,15 @@ bytes are streamed to disk and only ever read by a disposable worker process.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +25,7 @@ from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
 from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
 
 from . import API_VERSION, PROTOCOL_VERSION
+from .auth import AUTH_MODE_DISABLED, AuthConfigurationError, LOCAL_DEVELOPMENT_OWNER_ID, Principal, create_authenticator
 from .config import ApiConfig, from_environment
 from .errors import ApiError, from_catalog_error
 from .jobs import (
@@ -170,6 +174,51 @@ def correlation_id(request: Request) -> str:
     return getattr(request.state, "correlation_id", "")
 
 
+def get_principal(request: Request) -> Principal:
+    """The one dependency every protected route requires.
+
+    Attached to the `protected` router below rather than to individual routes,
+    so a route added to it can never accidentally skip authentication. The
+    concrete check (fixed disabled-mode principal, or real JWKS verification)
+    lives in `request.app.state.authenticate`, built once in `create_app`.
+    """
+    return request.app.state.authenticate(request)
+
+
+def require_admission(request: Request):
+    """Hold a lifecycle lease until one mutating HTTP request has returned."""
+    with request.app.state.jobs.admission():
+        yield
+
+
+def _worker_available(command: str) -> bool:
+    """Check the configured executable without launching a worker."""
+    candidate = Path(command)
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        return candidate.is_file() and os.access(candidate, os.X_OK)
+    return shutil.which(command) is not None
+
+
+def _state_root_writable(root: Path) -> bool:
+    """Probe the state mount that must accept uploads and job directories."""
+    probe = root / f".readiness-{uuid.uuid4().hex}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as writer:
+            writer.write(b"1")
+            writer.flush()
+            os.fsync(writer.fileno())
+        probe.unlink()
+        return True
+    except OSError:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
 def _job_id(job_id: str = PathParam(max_length=128)) -> str:
     if not JOB_ID_PATTERN.match(job_id):
         raise ApiError("unknown_job", "No job is known under that id.", 404)
@@ -199,12 +248,21 @@ def _load_engine_metadata(config: ApiConfig, catalog):
 def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     resolved = config or from_environment()
     resolved.validate()
+    try:
+        authenticate = create_authenticator(
+            resolved.auth_mode, resolved.auth_jwks_path, resolved.auth_issuer, resolved.auth_audience
+        )
+    except AuthConfigurationError as error:
+        raise ApiError("invalid_api_configuration", str(error), 500) from error
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         catalog = load_catalog(resolved.repo_root, resolved.profile_vendors)
         settings = _load_engine_metadata(resolved, catalog)
-        uploads = UploadStore(resolved.uploads_root, resolved.job_limits.max_input_bytes)
+        # Disabled mode has exactly one principal, so a pre-auth upload is
+        # unambiguously its own; required mode never guesses an owner.
+        legacy_owner_id = LOCAL_DEVELOPMENT_OWNER_ID if resolved.auth_mode == AUTH_MODE_DISABLED else None
+        uploads = UploadStore(resolved.uploads_root, resolved.job_limits.max_input_bytes, legacy_owner_id)
         service = JobService(resolved, catalog, uploads, settings_catalog=settings)
         app.state.config = resolved
         app.state.catalog = catalog
@@ -222,14 +280,28 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         try:
             yield
         finally:
+            service.begin_shutdown()
+            logger.info("api draining")
             service.shutdown()
+            logger.info("api shutdown complete")
 
+    # Required mode never publishes the generated schema or interactive docs:
+    # an unauthenticated deployment detail is not something a production
+    # topology should expose next to a route surface that all requires a
+    # bearer assertion.
+    docs_enabled = resolved.auth_mode == AUTH_MODE_DISABLED
     app = FastAPI(
         title="OrcaWebSlicer API",
         version=API_VERSION,
         summary="Browser-facing slicing API backed by isolated native workers.",
         lifespan=lifespan,
+        openapi_url="/openapi.json" if docs_enabled else None,
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
     )
+    # Built once per app instance (tests create several with different
+    # configs), stored on state so `get_principal` reaches it per request.
+    app.state.authenticate = authenticate
 
     @app.middleware("http")
     async def attach_correlation_id(request: Request, call_next):
@@ -245,20 +317,66 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
         identifier = correlation_id(request)
         logger.info("request failed code=%s correlation_id=%s", error.code, identifier)
+        headers = {CORRELATION_HEADER: identifier} if identifier else {}
+        if error.code == "authentication_required":
+            headers["WWW-Authenticate"] = "Bearer"
         return JSONResponse(
             status_code=error.status,
             content={
                 "error": {"code": error.code, "message": str(error)},
                 "correlation_id": identifier,
             },
-            headers={CORRELATION_HEADER: identifier} if identifier else None,
+            headers=headers or None,
         )
+
+    if not docs_enabled:
+        # The built frontend is mounted as a catch-all below. Reserve these
+        # paths explicitly so required mode returns a real 404 instead of the
+        # public SPA shell after FastAPI's generated docs are disabled.
+        @app.get("/openapi.json", include_in_schema=False)
+        @app.get("/docs", include_in_schema=False)
+        @app.get("/redoc", include_in_schema=False)
+        def hidden_api_documentation() -> Response:
+            return Response(status_code=404)
 
     @app.get(f"{PREFIX}/health", tags=["service"])
     def health() -> Dict[str, Any]:
         return {"status": "ok", "protocol_version": PROTOCOL_VERSION, "api_version": API_VERSION}
 
-    @app.get(f"{PREFIX}/profiles", tags=["profiles"])
+    @app.get(f"{PREFIX}/health/live", tags=["service"])
+    def liveness() -> Dict[str, Any]:
+        """Process-only probe; dependency failures belong to readiness."""
+        return {"status": "ok", "protocol_version": PROTOCOL_VERSION, "api_version": API_VERSION}
+
+    @app.get(f"{PREFIX}/health/ready", tags=["service"])
+    def readiness(request: Request, response: Response) -> Dict[str, Any]:
+        """Deployment gate for admission, worker availability, and state storage."""
+        checks = {
+            "admission": request.app.state.jobs.is_accepting(),
+            "worker": _worker_available(resolved.worker_command[0]),
+            "state": _state_root_writable(resolved.state_root),
+        }
+        ready = all(checks.values())
+        if not ready:
+            response.status_code = 503
+        return {
+            "status": "ready" if ready else "not_ready",
+            "checks": checks,
+            "protocol_version": PROTOCOL_VERSION,
+            "api_version": API_VERSION,
+            # Public and truthful, so an operator can never mistake a
+            # `disabled` topology for an authenticated deployment.
+            "auth_mode": resolved.auth_mode,
+        }
+
+    # Every route below requires a principal; this dependency is the one
+    # centralized boundary that guarantees it, so a new route added to this
+    # router can never accidentally ship unauthenticated. Health stays above,
+    # registered directly on `app`, and static frontend assets are mounted
+    # after this router, so neither passes through it.
+    protected = APIRouter(dependencies=[Depends(get_principal)])
+
+    @protected.get(f"{PREFIX}/profiles", tags=["profiles"])
     def profiles(
         request: Request,
         printer: Optional[str] = Query(default=None, max_length=512),
@@ -273,7 +391,7 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         except ProfileCatalogError as error:
             raise from_catalog_error(error) from error
 
-    @app.get(f"{PREFIX}/settings", tags=["profiles"])
+    @protected.get(f"{PREFIX}/settings", tags=["profiles"])
     def settings(request: Request) -> Dict[str, Any]:
         """Serve the engine's own definition of every curated setting."""
         catalog = request.app.state.settings
@@ -285,10 +403,15 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
             )
         return catalog.describe()
 
-    @app.post(f"{PREFIX}/uploads", status_code=201, tags=["uploads"])
-    def create_upload(request: Request, file: UploadFile = File()) -> Dict[str, Any]:
+    @protected.post(f"{PREFIX}/uploads", status_code=201, tags=["uploads"])
+    def create_upload(
+        request: Request,
+        file: UploadFile = File(),
+        principal: Principal = Depends(get_principal),
+        _admission: None = Depends(require_admission),
+    ) -> Dict[str, Any]:
         """Store one model. The bytes are never parsed in this process."""
-        record = request.app.state.uploads.create(file.filename, file.file)
+        record = request.app.state.uploads.create(file.filename, file.file, principal.owner_id)
         logger.info(
             "upload stored upload_id=%s format=%s bytes=%d correlation_id=%s",
             record.upload_id,
@@ -298,92 +421,121 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         )
         return record.describe()
 
-    @app.post(f"{PREFIX}/uploads/{{upload_id}}/scene", status_code=202, tags=["scenes"])
+    @protected.post(f"{PREFIX}/uploads/{{upload_id}}/scene", status_code=202, tags=["scenes"])
     def submit_scene(
         request: Request,
         submission: SceneSubmission,
         upload_id: str = PathParam(min_length=1, max_length=64),
+        principal: Principal = Depends(get_principal),
+        _admission: None = Depends(require_admission),
     ) -> Dict[str, Any]:
         """Start (or return) the inspect job that turns this upload into a scene."""
-        return request.app.state.jobs.submit_scene(submission.to_request(upload_id), correlation_id(request))
+        return request.app.state.jobs.submit_scene(
+            submission.to_request(upload_id), correlation_id(request), principal.owner_id
+        )
 
-    @app.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
-    def submit_job(request: Request, submission: SliceSubmission) -> Dict[str, Any]:
-        return request.app.state.jobs.submit(submission.to_request(), correlation_id(request))
+    @protected.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
+    def submit_job(
+        request: Request,
+        submission: SliceSubmission,
+        principal: Principal = Depends(get_principal),
+        _admission: None = Depends(require_admission),
+    ) -> Dict[str, Any]:
+        return request.app.state.jobs.submit(submission.to_request(), correlation_id(request), principal.owner_id)
 
-    @app.get(f"{PREFIX}/jobs", tags=["jobs"])
-    def list_jobs(request: Request) -> Dict[str, Any]:
-        return {"jobs": request.app.state.jobs.list()}
+    @protected.get(f"{PREFIX}/jobs", tags=["jobs"])
+    def list_jobs(request: Request, principal: Principal = Depends(get_principal)) -> Dict[str, Any]:
+        return {"jobs": request.app.state.jobs.list(principal.owner_id)}
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}", tags=["jobs"])
-    def read_job(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
-        return request.app.state.jobs.get(job_id)
+    @protected.get(f"{PREFIX}/jobs/{{job_id}}", tags=["jobs"])
+    def read_job(
+        request: Request, job_id: str = Depends(_job_id), principal: Principal = Depends(get_principal)
+    ) -> Dict[str, Any]:
+        return request.app.state.jobs.get(job_id, principal.owner_id)
 
-    @app.post(f"{PREFIX}/jobs/{{job_id}}/cancel", tags=["jobs"])
-    def cancel_job(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
-        return request.app.state.jobs.cancel(job_id)
+    @protected.post(f"{PREFIX}/jobs/{{job_id}}/cancel", tags=["jobs"])
+    def cancel_job(
+        request: Request, job_id: str = Depends(_job_id), principal: Principal = Depends(get_principal)
+    ) -> Dict[str, Any]:
+        return request.app.state.jobs.cancel(job_id, principal.owner_id)
 
-    @app.post(f"{PREFIX}/jobs/{{job_id}}/retry", status_code=202, tags=["jobs"])
-    def retry_job(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
-        return request.app.state.jobs.retry(job_id, correlation_id(request))
+    @protected.post(f"{PREFIX}/jobs/{{job_id}}/retry", status_code=202, tags=["jobs"])
+    def retry_job(
+        request: Request,
+        job_id: str = Depends(_job_id),
+        principal: Principal = Depends(get_principal),
+        _admission: None = Depends(require_admission),
+    ) -> Dict[str, Any]:
+        return request.app.state.jobs.retry(job_id, correlation_id(request), principal.owner_id)
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}/artifacts/{{name}}", tags=["jobs"])
+    @protected.get(f"{PREFIX}/jobs/{{job_id}}/artifacts/{{name}}", tags=["jobs"])
     def download_artifact(
         request: Request,
         job_id: str = Depends(_job_id),
         name: str = PathParam(pattern=f"^({'|'.join(ARTIFACT_NAMES)})$"),
+        principal: Principal = Depends(get_principal),
     ) -> Response:
-        path, media_type, filename = request.app.state.jobs.artifact(job_id, name)
+        path, media_type, filename = request.app.state.jobs.artifact(job_id, name, principal.owner_id)
         return FileResponse(path, media_type=media_type, filename=filename)
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}/preview", tags=["preview"])
-    def read_preview(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
+    @protected.get(f"{PREFIX}/jobs/{{job_id}}/preview", tags=["preview"])
+    def read_preview(
+        request: Request, job_id: str = Depends(_job_id), principal: Principal = Depends(get_principal)
+    ) -> Dict[str, Any]:
         """The layer index: z heights, roles, tools, and each layer's byte range."""
-        return request.app.state.jobs.preview(job_id)
+        return request.app.state.jobs.preview(job_id, principal.owner_id)
 
-    @app.get(f"{PREFIX}/jobs/{{job_id}}/preview/layers/{{layer}}", tags=["preview"])
+    @protected.get(f"{PREFIX}/jobs/{{job_id}}/preview/layers/{{layer}}", tags=["preview"])
     def read_preview_layer(
         request: Request,
         job_id: str = Depends(_job_id),
         layer: int = PathParam(ge=0, le=MAX_PREVIEW_LAYER),
+        principal: Principal = Depends(get_principal),
     ) -> Response:
         """One layer's toolpaths, read from the blob by seeking to its range.
 
         The whole preview is never loaded: the response streams the layer's
         bytes straight off disk, which is what keeps a large print servable.
         """
-        path, offset, length = request.app.state.jobs.preview_layer(job_id, layer)
+        path, offset, length = request.app.state.jobs.preview_layer(job_id, layer, principal.owner_id)
         return StreamingResponse(
             _read_range(path, offset, length),
             media_type="application/octet-stream",
             headers={"Content-Length": str(length), "Cache-Control": "no-store"},
         )
 
-    @app.get(f"{PREFIX}/scenes/{{job_id}}", tags=["scenes"])
-    def read_scene(request: Request, job_id: str = Depends(_job_id)) -> Dict[str, Any]:
+    @protected.get(f"{PREFIX}/scenes/{{job_id}}", tags=["scenes"])
+    def read_scene(
+        request: Request, job_id: str = Depends(_job_id), principal: Principal = Depends(get_principal)
+    ) -> Dict[str, Any]:
         """The scene index: the bed shape and each object's geometry range."""
-        return request.app.state.jobs.scene(job_id)
+        return request.app.state.jobs.scene(job_id, principal.owner_id)
 
-    @app.get(f"{PREFIX}/scenes/{{job_id}}/objects/{{index}}", tags=["scenes"])
+    @protected.get(f"{PREFIX}/scenes/{{job_id}}/objects/{{index}}", tags=["scenes"])
     def read_scene_object(
         request: Request,
         job_id: str = Depends(_job_id),
         index: int = PathParam(ge=0, le=MAX_SCENE_OBJECT_INDEX),
+        principal: Principal = Depends(get_principal),
     ) -> Response:
         """One object's triangle soup, read from the blob by seeking to its range.
 
         The whole scene is never loaded: the response streams the object's
         bytes straight off disk, the same way a preview layer is served.
         """
-        path, offset, length = request.app.state.jobs.scene_object(job_id, index)
+        path, offset, length = request.app.state.jobs.scene_object(job_id, index, principal.owner_id)
         return StreamingResponse(
             _read_range(path, offset, length),
             media_type="application/octet-stream",
             headers={"Content-Length": str(length), "Cache-Control": "no-store"},
         )
 
+    app.include_router(protected)
+
     # Mounted last so every API route is matched before the catch-all, and only
     # when a build exists; `html=True` serves index.html for unknown paths.
+    # Static assets stay outside `protected`: they are the unauthenticated
+    # browser shell, not `/api/v1` data.
     if resolved.frontend_dist is not None:
         app.mount(
             "/", StaticFiles(directory=resolved.frontend_dist, html=True), name="frontend"

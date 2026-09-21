@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -46,6 +47,12 @@ TEST_LIMITS = ExecutorLimits(
     log_bytes=32 * 1024,
 )
 
+# This suite exercises JobService directly, against one fixed caller; ownership
+# enforcement across two distinct owners is covered end to end in
+# test_ownership.py, so a single opaque constant stands in for a real
+# `derive_owner_id()` result here.
+OWNER_ID = "1" * 64
+
 
 @unittest.skipUnless(sys.platform == "linux", "the executor requires Linux")
 class JobServiceTests(unittest.TestCase):
@@ -71,6 +78,8 @@ class JobServiceTests(unittest.TestCase):
             max_concurrent_jobs=max_concurrent_jobs,
             executor_limits=TEST_LIMITS,
             job_limits=JobDirectoryLimits(retention_seconds=retention_seconds),
+            # This suite exercises job execution, not identity.
+            auth_mode="disabled",
         )
         config.validate()
         self.config = config
@@ -84,7 +93,7 @@ class JobServiceTests(unittest.TestCase):
         source = self.root / filename
         source.write_bytes(contents)
         with source.open("rb") as reader:
-            return self.uploads.create(filename, reader)
+            return self.uploads.create(filename, reader, OWNER_ID)
 
     def request(self, upload_id, **overrides):
         fields = {
@@ -109,14 +118,14 @@ class JobServiceTests(unittest.TestCase):
     def wait(self, service, job_id, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            job = service.get(job_id)
+            job = service.get(job_id, OWNER_ID)
             if job["state"] in TERMINAL_STATES:
                 return job
             time.sleep(0.02)
-        self.fail(f"job {job_id} did not finish within {timeout}s: {service.get(job_id)['state']}")
+        self.fail(f"job {job_id} did not finish within {timeout}s: {service.get(job_id, OWNER_ID)['state']}")
 
     def submit(self, service, **overrides):
-        return service.submit(self.request(self.upload().upload_id, **overrides), "correlation-1")
+        return service.submit(self.request(self.upload().upload_id, **overrides), "correlation-1", OWNER_ID)
 
     def test_slices_an_upload_into_a_downloadable_artifact(self):
         service = self.service()
@@ -135,12 +144,12 @@ class JobServiceTests(unittest.TestCase):
         )
         self.assertEqual(job["timing"], {"duration_ms": 3, "cpu_time_ms": 2})
 
-        path, media_type, filename = service.artifact(accepted["job_id"], "gcode")
+        path, media_type, filename = service.artifact(accepted["job_id"], "gcode", OWNER_ID)
         self.assertEqual(media_type, "text/x.gcode")
         self.assertEqual(filename, f"{accepted['job_id']}.gcode")
         # The curated override reached the worker through the manifest.
         self.assertIn("layer_height = 0.28", path.read_text(encoding="utf-8"))
-        self.assertTrue(service.artifact(accepted["job_id"], "result")[0].is_file())
+        self.assertTrue(service.artifact(accepted["job_id"], "result", OWNER_ID)[0].is_file())
 
     def test_keeps_a_failed_result_but_publishes_no_gcode(self):
         service = self.service("fail")
@@ -148,9 +157,9 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(job["state"], "failed")
         self.assertEqual(job["error"]["code"], "slicing_failed")
         self.assertEqual([item["name"] for item in job["artifacts"]], ["result"])
-        self.assertTrue(service.artifact(job["job_id"], "result")[0].is_file())
+        self.assertTrue(service.artifact(job["job_id"], "result", OWNER_ID)[0].is_file())
         with self.assertRaises(ApiError) as raised:
-            service.artifact(job["job_id"], "gcode")
+            service.artifact(job["job_id"], "gcode", OWNER_ID)
         self.assertEqual(raised.exception.status, 409)
 
     def test_isolates_a_worker_crash(self):
@@ -169,55 +178,124 @@ class JobServiceTests(unittest.TestCase):
         accepted = self.submit(service)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            job = service.get(accepted["job_id"])
+            job = service.get(accepted["job_id"], OWNER_ID)
             if job["progress"]["percent"] == 42:
                 break
             time.sleep(0.02)
         self.assertEqual(job["state"], "running")
         self.assertEqual(job["progress"], {"stage": "slicing", "percent": 42, "message": "Slicing"})
         self.assertEqual([warning["code"] for warning in job["warnings"]], ["slow_start"])
-        service.cancel(accepted["job_id"])
+        service.cancel(accepted["job_id"], OWNER_ID)
         self.assertEqual(self.wait(service, accepted["job_id"])["state"], "canceled")
 
     def test_cancels_a_running_job_and_removes_its_directory(self):
         service = self.service("slow")
         accepted = self.submit(service)
         deadline = time.monotonic() + 10
-        while service.get(accepted["job_id"])["state"] == "queued" and time.monotonic() < deadline:
+        while service.get(accepted["job_id"], OWNER_ID)["state"] == "queued" and time.monotonic() < deadline:
             time.sleep(0.02)
-        self.assertEqual(service.get(accepted["job_id"])["state"], "running")
+        self.assertEqual(service.get(accepted["job_id"], OWNER_ID)["state"], "running")
 
-        service.cancel(accepted["job_id"])
+        service.cancel(accepted["job_id"], OWNER_ID)
         job = self.wait(service, accepted["job_id"])
         self.assertEqual(job["state"], "canceled")
         self.assertEqual(job["error"]["category"], "cancellation")
         self.assertFalse((self.config.jobs_root / job["job_id"]).exists())
         with self.assertRaises(ApiError):
-            service.artifact(job["job_id"], "result")
+            service.artifact(job["job_id"], "result", OWNER_ID)
 
     def test_cancels_a_queued_job_before_a_worker_starts(self):
         service = self.service("slow", max_concurrent_jobs=1)
         running = self.submit(service)
         queued = self.submit(service)
-        self.assertEqual(service.get(queued["job_id"])["state"], "queued")
+        self.assertEqual(service.get(queued["job_id"], OWNER_ID)["state"], "queued")
 
-        canceled = service.cancel(queued["job_id"])
+        canceled = service.cancel(queued["job_id"], OWNER_ID)
         self.assertEqual(canceled["state"], "canceled")
         self.assertIsNone(canceled["started_at"])
-        service.cancel(running["job_id"])
+        self.assertFalse((self.config.jobs_root / queued["job_id"]).exists())
+        service.cancel(running["job_id"], OWNER_ID)
         self.assertEqual(self.wait(service, running["job_id"])["state"], "canceled")
+
+    def test_shutdown_closes_admission_and_never_launches_queued_jobs(self):
+        service = self.service("slow", max_concurrent_jobs=1)
+        running = self.submit(service)
+        deadline = time.monotonic() + 10
+        while service.get(running["job_id"], OWNER_ID)["state"] == "queued" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(service.get(running["job_id"], OWNER_ID)["state"], "running")
+
+        queued = self.submit(service)
+        self.assertEqual(service.get(queued["job_id"], OWNER_ID)["state"], "queued")
+        service.shutdown()
+
+        running_record = service.get(running["job_id"], OWNER_ID)
+        queued_record = service.get(queued["job_id"], OWNER_ID)
+        self.assertEqual(running_record["state"], "canceled")
+        self.assertEqual(queued_record["state"], "canceled")
+        self.assertIsNone(queued_record["started_at"])
+        self.assertFalse((self.config.jobs_root / running["job_id"]).exists())
+        self.assertFalse((self.config.jobs_root / queued["job_id"]).exists())
+
+        with self.assertRaises(ApiError) as raised:
+            self.submit(service)
+        self.assertEqual(raised.exception.code, "service_draining")
+        self.assertEqual(raised.exception.status, 503)
+        # A second lifecycle callback is harmless.
+        service.shutdown()
+
+    def test_rechecks_admission_after_a_job_directory_was_staged(self):
+        service = self.service()
+        upload = self.upload()
+        path = self.config.jobs_root / "job-late-admission"
+        path.mkdir(parents=True)
+        service.begin_shutdown()
+
+        with self.assertRaises(ApiError) as raised:
+            service._accept(
+                "job-late-admission",
+                "slice",
+                self.request(upload.upload_id),
+                path,
+                0,
+                "correlation-late",
+                OWNER_ID,
+                None,
+                {},
+                [],
+            )
+        self.assertEqual(raised.exception.code, "service_draining")
+        self.assertFalse(path.exists())
+        self.assertEqual(service.list(OWNER_ID), [])
+
+    def test_shutdown_waits_for_a_previously_admitted_mutation(self):
+        service = self.service()
+        finished = threading.Event()
+
+        with service.admission():
+            shutdown = threading.Thread(target=lambda: (service.shutdown(), finished.set()))
+            shutdown.start()
+            deadline = time.monotonic() + 5
+            while service.is_accepting() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(service.is_accepting())
+            self.assertFalse(finished.wait(0.1))
+
+        shutdown.join(timeout=5)
+        self.assertFalse(shutdown.is_alive())
+        self.assertTrue(finished.is_set())
 
     def test_refuses_to_cancel_a_finished_job(self):
         service = self.service()
         job = self.wait(service, self.submit(service)["job_id"])
         with self.assertRaises(ApiError) as raised:
-            service.cancel(job["job_id"])
+            service.cancel(job["job_id"], OWNER_ID)
         self.assertEqual(raised.exception.code, "job_not_cancelable")
 
     def test_retries_a_finished_job_with_the_same_inputs(self):
         service = self.service("fail")
         first = self.wait(service, self.submit(service, settings={"layer_height": "0.3"})["job_id"])
-        retried = service.retry(first["job_id"], "correlation-2")
+        retried = service.retry(first["job_id"], "correlation-2", OWNER_ID)
         self.assertNotEqual(retried["job_id"], first["job_id"])
         self.assertEqual(retried["retry_of"], first["job_id"])
         self.assertEqual(retried["correlation_id"], "correlation-2")
@@ -228,9 +306,9 @@ class JobServiceTests(unittest.TestCase):
         service = self.service("slow")
         accepted = self.submit(service)
         with self.assertRaises(ApiError) as raised:
-            service.retry(accepted["job_id"], "correlation-3")
+            service.retry(accepted["job_id"], "correlation-3", OWNER_ID)
         self.assertEqual(raised.exception.code, "job_not_retryable")
-        service.cancel(accepted["job_id"])
+        service.cancel(accepted["job_id"], OWNER_ID)
 
     def test_rejects_requests_that_cannot_produce_a_job(self):
         service = self.service()
@@ -286,10 +364,10 @@ class JobServiceTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ApiError) as raised:
                     fields = {"upload_id": upload.upload_id, **overrides}
-                    service.submit(self.request(**fields), "correlation-4")
+                    service.submit(self.request(**fields), "correlation-4", OWNER_ID)
                 self.assertEqual(raised.exception.code, code)
                 self.assertEqual(raised.exception.status, status)
-        self.assertEqual(service.list(), [])
+        self.assertEqual(service.list(OWNER_ID), [])
 
     def test_places_explicit_object_transforms_and_preserves_them_on_retry(self):
         service = self.service()
@@ -303,11 +381,11 @@ class JobServiceTests(unittest.TestCase):
         job = self.wait(service, accepted["job_id"])
         self.assertEqual(job["state"], "succeeded")
         self.assertEqual(job["request"]["objects"], objects)
-        path, _, _ = service.artifact(job["job_id"], "gcode")
+        path, _, _ = service.artifact(job["job_id"], "gcode", OWNER_ID)
         # The manifest carried the placement through to the worker intact.
         self.assertIn(json.dumps(objects, separators=(",", ":")), path.read_text(encoding="utf-8"))
 
-        retried = service.retry(job["job_id"], "correlation-objects-retry")
+        retried = service.retry(job["job_id"], "correlation-objects-retry", OWNER_ID)
         self.assertEqual(retried["request"]["objects"], objects)
         self.assertEqual(self.wait(service, retried["job_id"])["state"], "succeeded")
 
@@ -324,7 +402,7 @@ class JobServiceTests(unittest.TestCase):
         request = self.request(
             upload.upload_id, filament_profiles=(FILAMENT_ID, FILAMENT_ID), objects=objects
         )
-        accepted = service.submit(request, "correlation-multi-filament")
+        accepted = service.submit(request, "correlation-multi-filament", OWNER_ID)
         self.assertEqual(accepted["request"]["filament_profiles"], [FILAMENT_ID, FILAMENT_ID])
         # The job report names every filament in the chain, not only the first.
         self.assertEqual(
@@ -357,26 +435,26 @@ class JobServiceTests(unittest.TestCase):
             objects=[{"source_object": 0, "transform": transform, "filament": 2}],
         )
         with self.assertRaises(ApiError) as raised:
-            service.submit(bad, "correlation-retry-like", retry_of="job-does-not-exist")
+            service.submit(bad, "correlation-retry-like", OWNER_ID, retry_of="job-does-not-exist")
         self.assertEqual(raised.exception.code, "invalid_object_filament")
-        self.assertEqual(service.list(), [])
+        self.assertEqual(service.list(OWNER_ID), [])
 
     def test_produces_a_scene_for_an_upload_and_serves_its_objects(self):
         service = self.service()
         upload = self.upload()
-        accepted = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1")
+        accepted = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1", OWNER_ID)
         self.assertEqual(accepted["state"], "queued")
 
         job = self.wait(service, accepted["job_id"])
         self.assertEqual(job["state"], "succeeded")
 
-        index = service.scene(job["job_id"])
+        index = service.scene(job["job_id"], OWNER_ID)
         self.assertEqual(index["scene_version"], 1)
         self.assertEqual(len(index["objects"]), 2)
 
         for described in index["objects"]:
             with self.subTest(index=described["index"]):
-                path, offset, length = service.scene_object(job["job_id"], described["index"])
+                path, offset, length = service.scene_object(job["job_id"], described["index"], OWNER_ID)
                 self.assertEqual(length, described["length"])
                 # Never the whole blob: each object is a strict slice of it.
                 self.assertLess(length, index["data_bytes"])
@@ -385,15 +463,15 @@ class JobServiceTests(unittest.TestCase):
                     self.assertEqual(len(stream.read(length)), length)
 
         with self.assertRaises(ApiError) as raised:
-            service.scene_object(job["job_id"], 99)
+            service.scene_object(job["job_id"], 99, OWNER_ID)
         self.assertEqual(raised.exception.code, "unknown_scene_object")
         self.assertEqual(raised.exception.status, 404)
 
     def test_returns_the_existing_scene_job_for_a_repeated_request(self):
         service = self.service()
         upload = self.upload()
-        first = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1")
-        second = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-2")
+        first = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-1", OWNER_ID)
+        second = service.submit_scene(self.scene_request(upload.upload_id), "correlation-scene-2", OWNER_ID)
         self.assertEqual(second["job_id"], first["job_id"])
         # The correlation id recorded is the one that actually created the job.
         self.assertEqual(second["correlation_id"], "correlation-scene-1")
@@ -401,9 +479,12 @@ class JobServiceTests(unittest.TestCase):
 
     def test_retries_a_failed_scene_job_as_a_fresh_one(self):
         service = self.service("fail")
-        first = self.wait(service, service.submit_scene(self.scene_request(self.upload().upload_id), "c-1")["job_id"])
+        first = self.wait(
+            service,
+            service.submit_scene(self.scene_request(self.upload().upload_id), "c-1", OWNER_ID)["job_id"],
+        )
         self.assertEqual(first["state"], "failed")
-        retried = service.retry(first["job_id"], "correlation-scene-retry")
+        retried = service.retry(first["job_id"], "correlation-scene-retry", OWNER_ID)
         self.assertNotEqual(retried["job_id"], first["job_id"])
         self.assertEqual(retried["retry_of"], first["job_id"])
         self.assertEqual(self.wait(service, retried["job_id"])["state"], "failed")
@@ -424,7 +505,7 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(len(report["uploads_removed"]), 1)
         self.assertFalse(directory.exists())
         with self.assertRaises(ApiError) as raised:
-            service.get(job["job_id"])
+            service.get(job["job_id"], OWNER_ID)
         self.assertEqual(raised.exception.code, "unknown_job")
 
     def test_never_sweeps_a_job_that_is_still_running(self):
@@ -438,7 +519,7 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(report["jobs_removed"], [])
         self.assertEqual(report["jobs_retained"], [accepted["job_id"]])
         self.assertTrue(directory.is_dir())
-        service.cancel(accepted["job_id"])
+        service.cancel(accepted["job_id"], OWNER_ID)
 
 
 if __name__ == "__main__":

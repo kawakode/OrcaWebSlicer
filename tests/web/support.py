@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Fixtures shared by the API tests: a bundled profile tree and a fake worker."""
 
+import base64
 import json
+import time
+import uuid
 from pathlib import Path
+from typing import Any, Dict, Iterable, Optional
 
 
 # Slices the manifest the API actually wrote, so the tests exercise the real
@@ -381,3 +385,79 @@ def write_profile_tree(repo_root: Path) -> Path:
     index.update(listed)
     (profiles / f"{VENDOR}.json").write_text(json.dumps(index), encoding="utf-8")
     return profiles
+
+
+# --- Auth fixtures --------------------------------------------------------
+# Minted in-process with `cryptography`, never fetched or read from a
+# checked-in file: a leaked test private key must never be able to sign
+# anything a real deployment would accept.
+
+def generate_rsa_keypair():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _b64url_uint(value: int) -> str:
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def jwk_from_private_key(private_key, kid: str, **overrides: Any) -> Dict[str, Any]:
+    """The public JWK a JWKS file would carry for `private_key`."""
+    numbers = private_key.public_key().public_numbers()
+    entry = {
+        "kty": "RSA",
+        "kid": kid,
+        "use": "sig",
+        "alg": "RS256",
+        "n": _b64url_uint(numbers.n),
+        "e": _b64url_uint(numbers.e),
+    }
+    entry.update(overrides)
+    return entry
+
+
+def write_jwks(path: Path, entries: Iterable[Dict[str, Any]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"keys": list(entries)}), encoding="utf-8")
+    return path
+
+
+def mint_assertion(
+    private_key,
+    kid: str,
+    issuer: str,
+    audience: str,
+    subject: str,
+    *,
+    jti: Optional[str] = None,
+    lifetime: float = 60,
+    issued_at: Optional[float] = None,
+    algorithm: str = "RS256",
+    claim_overrides: Optional[Dict[str, Any]] = None,
+    omit_claims: Iterable[str] = (),
+    header_overrides: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Mint a compact JWS the way an authenticating edge would, for tests only."""
+    import jwt
+
+    now = time.time() if issued_at is None else issued_at
+    claims: Dict[str, Any] = {
+        "iss": issuer,
+        "aud": audience,
+        "sub": subject,
+        "iat": int(now),
+        "nbf": int(now),
+        "exp": int(now + lifetime),
+        "jti": jti or uuid.uuid4().hex,
+    }
+    for name in omit_claims:
+        claims.pop(name, None)
+    if claim_overrides:
+        claims.update(claim_overrides)
+    headers = {"kid": kid}
+    if header_overrides:
+        headers.update(header_overrides)
+    headers = {name: value for name, value in headers.items() if value is not None}
+    return jwt.encode(claims, private_key, algorithm=algorithm, headers=headers)

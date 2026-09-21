@@ -9,7 +9,7 @@ x-build-environment: &build-environment
       BASE_IMAGE: ${ORCA_WEB_BASE_IMAGE:-ubuntu:24.04}
       CMAKE_VERSION: ${ORCA_WEB_CMAKE_VERSION:-4.3.0}
   working_dir: /workspace
-  environment:
+  environment: &build-environment-values
     CMAKE_BUILD_PARALLEL_LEVEL: ${ORCA_WEB_BUILD_JOBS:-2}
     CMAKE_CCACHE: ccache
     CCACHE_DIR: /cache/ccache
@@ -366,8 +366,51 @@ services:
 
   api:
     <<: *build-environment
+    init: true
+    environment:
+      <<: *build-environment-values
+      # Fixed to the matching named-volume target. A deployment that changes
+      # this path must change both entries together in a Compose override.
+      ORCA_WEB_STATE_ROOT: /var/lib/orca-web
+      # This reference topology has no authenticating edge in front of it yet
+      # (see the API port comment below), so it stays in the explicit,
+      # local-development-only mode rather than the secure application
+      # default. A production Compose file or host manifest must set
+      # `required` and mount ORCA_WEB_AUTH_ISSUER, ORCA_WEB_AUTH_AUDIENCE, and
+      # ORCA_WEB_AUTH_JWKS_PATH instead.
+      ORCA_WEB_AUTH_MODE: disabled
+    # This service alone receives mutable user state. Build and test services
+    # retain the anchor's cache volumes without gaining access to uploads.
+    volumes:
+      - ../..:/workspace
+      - orca-deps-build:/workspace/deps/build
+      - orca-app-build:/workspace/build
+      - orca-worker-build:/workspace/build-worker
+      - orca-ccache:/cache/ccache
+      - orca-web-state:/var/lib/orca-web
+      - orca-frontend-modules:/workspace/web/frontend/node_modules
+      - orca-playwright:/cache/playwright
     ports:
-      - "${ORCA_WEB_API_PORT:-8000}:8000"
+      # The reference topology has no authenticating edge yet, so expose its
+      # explicitly development-only API to the local host only.
+      - "127.0.0.1:${ORCA_WEB_API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # The reference checkout is bind-mounted through Docker Desktop; its
+      # first profile-catalog scan can take roughly a minute on Windows.
+      start_period: 90s
+    # Uvicorn gets ten seconds to finish HTTP work, then the API cancels jobs;
+    # the outer runtime leaves room for the worker's TERM-to-KILL escalation.
+    stop_grace_period: ${ORCA_WEB_API_STOP_GRACE_PERIOD:-30s}
     command:
       - python3
       - -m
@@ -378,6 +421,18 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
+      - --timeout-graceful-shutdown
+      - "10"
+
+  deployment-probe:
+    <<: *build-environment
+    depends_on:
+      api:
+        condition: service_healthy
+    command:
+      - python3
+      - scripts/web_deployment_probe.py
+      - --help
 
   api-baseline:
     <<: *build-environment
@@ -457,5 +512,6 @@ volumes:
   orca-ccache:
   orca-frontend-modules:
   orca-playwright:
+  orca-web-state:
   orca-web-grype-db:
   orca-web-syft-cache:

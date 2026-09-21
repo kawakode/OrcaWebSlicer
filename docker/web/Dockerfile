@@ -70,6 +70,8 @@ RUN apt-get update \
         "uvicorn==0.53.0" \
         "httpx==0.28.1" \
         "python-multipart==0.0.32" \
+        "PyJWT==2.14.0" \
+        "cryptography==50.0.1" \
     && apt-get purge -y python3-mako python3-pip python3-setuptools python3-wheel \
     && rm -rf /var/lib/apt/lists/*
 
