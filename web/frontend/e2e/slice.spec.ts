@@ -49,6 +49,28 @@ test("a browser upload produces downloadable G-code", async ({ page }) => {
 
   const report = await page.request.get(`/api/v1/jobs/${jobId}/artifacts/result`);
   expect((await report.json()).outcome).toBe("succeeded");
+
+  // The job names the whole effective chain and the override it applied.
+  await expect(page.getByTestId("job-chain-process")).toContainText("fdm_process_common");
+  await expect(page.getByTestId("job-overrides")).toContainText("layer_height = 0.28");
+
+  await page.getByTestId("retry").click();
+  await expect(page.getByTestId("retry-of")).toContainText(jobId);
+  await expect(page.getByTestId("job-state")).toHaveText("succeeded");
+});
+
+test("the settings form is generated from the engine catalog", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+
+  // Every curated group the engine exported is rendered, with the selected
+  // profile's own value as what a blank override keeps.
+  await expect(page.getByTestId("settings-group-quality")).toBeVisible();
+  await expect(page.getByTestId("setting-layer_height")).toHaveAttribute("placeholder", /^0\.\d+$/);
+  // A dependent setting is disabled until the setting that enables it is on.
+  await expect(page.getByTestId("setting-support_type")).toBeDisabled();
+  await page.getByTestId("setting-enable_support").selectOption("1");
+  await expect(page.getByTestId("setting-support_type")).toBeEnabled();
 });
 
 test("a rejected setting is reported without leaving a job behind", async ({ page }) => {
@@ -59,13 +81,10 @@ test("a rejected setting is reported without leaving a job behind", async ({ pag
   await page.getByTestId("setting-layer_height").fill("not-a-number");
   await page.getByTestId("slice").click();
 
-  // The worker rejects the value, so the job exists but fails with a stable code.
-  await expect(page.getByTestId("job-state")).toHaveText("failed");
-  await expect(page.getByTestId("job-error")).toBeVisible();
+  // The engine's own definition refuses the value before a worker is started.
+  await expect(page.getByTestId("failure")).toContainText("invalid_setting_value");
+  await expect(page.getByTestId("job-state")).toHaveCount(0);
   await expect(page.getByTestId("download-gcode")).toHaveCount(0);
-
-  await page.getByTestId("retry").click();
-  await expect(page.getByTestId("retry-of")).toBeVisible();
 });
 
 test("an unsupported model is refused before a job is created", async ({ page }) => {

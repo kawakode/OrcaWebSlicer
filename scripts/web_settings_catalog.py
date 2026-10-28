@@ -57,6 +57,14 @@ class SettingsCatalog:
             "settings": [dict(setting) for setting in self.settings],
         }
 
+    def scopes(self) -> Dict[str, str]:
+        """Map each available key to the profile kind that carries it."""
+        return {
+            setting["key"]: str(setting.get("scope", ""))
+            for setting in self.settings
+            if not setting.get("missing")
+        }
+
     def definition(self, key: str) -> Optional[Dict[str, Any]]:
         for setting in self.settings:
             if setting["key"] == key:

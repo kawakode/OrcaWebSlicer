@@ -12,12 +12,48 @@ export interface ProfileEntry {
   printer_model?: string;
   nozzle_diameter?: string;
   default_process?: string;
+  /** Inherited profiles flattened into this one, root first, ending with it. */
+  inherits_chain: string[];
 }
 
 export interface ProfileCatalog {
   machine: ProfileEntry[];
   process: ProfileEntry[];
   filament: ProfileEntry[];
+}
+
+/** One setting as `orca-slicer-worker --export-settings-catalog` describes it. */
+export interface SettingDefinition {
+  key: string;
+  group: string;
+  scope: "machine" | "process" | "filament" | "other";
+  type: string;
+  vector: boolean;
+  label: string;
+  tooltip?: string;
+  unit?: string;
+  min?: number;
+  max?: number;
+  ratio_over?: string;
+  enabled_by?: string;
+  enum?: { value: string; label: string }[];
+  default?: string;
+  missing?: boolean;
+}
+
+export interface SettingsCatalog {
+  catalog_version: number;
+  engine_version: string;
+  groups: { id: string; label: string }[];
+  settings: SettingDefinition[];
+}
+
+/** A profile value as bundled JSON carries it: a string or a per-extruder list. */
+export type ProfileValue = string | string[];
+
+export interface EffectiveProfile {
+  profiles: Record<"machine" | "process" | "filament", ProfileEntry>;
+  values: Record<string, ProfileValue>;
 }
 
 export interface Upload {
@@ -60,7 +96,9 @@ export interface Job {
   warnings: JobWarning[];
   error: JobError | null;
   artifacts: JobArtifact[];
+  request: { settings: Record<string, string> };
   retry_of: string | null;
+  profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>>;
   timing: { duration_ms: number; cpu_time_ms: number } | null;
 }
 

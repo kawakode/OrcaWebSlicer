@@ -1,4 +1,11 @@
-import { ApiError, type Job, type ProfileCatalog, type Upload } from "./types";
+import {
+  ApiError,
+  type EffectiveProfile,
+  type Job,
+  type ProfileCatalog,
+  type SettingsCatalog,
+  type Upload,
+} from "./types";
 
 const PREFIX = "/api/v1";
 
@@ -36,6 +43,18 @@ function describeSchemaFailure(body: unknown): string | undefined {
 export function listProfiles(printer?: string): Promise<ProfileCatalog> {
   const query = printer ? `?printer=${encodeURIComponent(printer)}` : "";
   return request<ProfileCatalog>(`/profiles${query}`);
+}
+
+export const readSettingsCatalog = (): Promise<SettingsCatalog> =>
+  request<SettingsCatalog>("/settings");
+
+export function readEffectiveProfile(
+  machine: string,
+  process: string,
+  filament: string,
+): Promise<EffectiveProfile> {
+  const query = new URLSearchParams({ machine, process, filament });
+  return request<EffectiveProfile>(`/profiles/effective?${query}`);
 }
 
 export function uploadModel(file: File): Promise<Upload> {

@@ -22,11 +22,12 @@ from web_job_directory import (
     sweep_job_directories,
 )
 from web_profile_catalog import ProfileCatalog, ProfileCatalogError
+from web_settings_catalog import SettingsCatalog, SettingsCatalogError
 from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_path
 
 from . import PROTOCOL_VERSION
 from .config import ApiConfig
-from .errors import ApiError, from_catalog_error, from_job_directory_error
+from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
 from .uploads import UploadRecord, UploadStore
 
 
@@ -88,6 +89,9 @@ class JobRecord:
     error: Optional[Dict[str, str]] = None
     result: Optional[Dict[str, Any]] = None
     retry_of: Optional[str] = None
+    # The effective profile chain this job was resolved from, kept so a report
+    # names every inherited profile and not only the selected leaf.
+    profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
     cancellation: threading.Event = dataclasses.field(default_factory=threading.Event)
 
     def describe(self) -> Dict[str, Any]:
@@ -100,6 +104,7 @@ class JobRecord:
             "error": dict(self.error) if self.error else None,
             "artifacts": self._describe_artifacts(),
             "request": self.request.describe(),
+            "profiles": dict(self.profiles),
             "retry_of": self.retry_of,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -137,10 +142,14 @@ class JobService:
         config: ApiConfig,
         catalog: ProfileCatalog,
         uploads: UploadStore,
+        settings: Optional[SettingsCatalog] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._config = config
         self._catalog = catalog
+        # Without a catalog only the shape of an override is checked and the
+        # worker remains the sole judge of its value.
+        self._settings = settings
         self._uploads = uploads
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
@@ -196,6 +205,9 @@ class JobService:
         job_id = f"job-{uuid.uuid4().hex}"
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
             try:
+                selected = self._catalog.select(
+                    request.machine_profile, request.process_profile, request.filament_profile
+                )
                 profiles = self._catalog.materialize(
                     request.machine_profile,
                     request.process_profile,
@@ -227,6 +239,10 @@ class JobService:
             path=prepared.path,
             created_at=time.time(),
             retry_of=retry_of,
+            profiles={
+                kind: {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)}
+                for kind, entry in selected.items()
+            },
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -410,6 +426,11 @@ class JobService:
                     "invalid_settings",
                     f"The value of {key} must be a string of at most {MAX_SETTING_VALUE_CHARS} characters.",
                 )
+        if self._settings is not None:
+            try:
+                self._settings.validate_overrides(request.settings)
+            except SettingsCatalogError as error:
+                raise from_settings_error(error) from error
 
     def _manifest(self, job_id: str, upload: UploadRecord, request: SliceRequest) -> Dict[str, Any]:
         return {

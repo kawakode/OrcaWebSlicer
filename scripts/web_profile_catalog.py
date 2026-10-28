@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from web_baseline import resolve_profile
 
@@ -93,6 +93,9 @@ class _InheritanceIndex:
 class ProfileCatalog:
     """The bundled profiles one API instance offers, indexed for lookup."""
 
+    # Read by `effective_values`, which never needs more than the curated form.
+    MAX_EFFECTIVE_KEYS = 256
+
     def __init__(
         self,
         entries: Iterable[ProfileEntry],
@@ -135,7 +138,59 @@ class ProfileCatalog:
         entries = self._by_kind[kind]
         if printer is None or kind == "machine":
             return list(entries)
-        return [entry for entry in entries if is_compatible(entry, printer)]
+        return [entry for entry in entries if self.is_compatible(entry, printer)]
+
+    def is_compatible(self, entry: ProfileEntry, printer: ProfileEntry) -> bool:
+        """Report whether a process or filament profile suits a selected printer.
+
+        A declared `compatible_printers` list wins over the expression, exactly
+        as the desktop resolves the two. An expression the engine never
+        evaluated is treated as compatible, which is also the desktop's answer
+        for a condition it cannot parse.
+        """
+        if entry.compatible_printers:
+            return printer.name in entry.compatible_printers
+        matches = self._condition_matches.get(entry.profile_id)
+        return matches is None or printer.profile_id in matches
+
+    def select(self, machine_id: str, process_id: str, filament_id: str) -> Dict[str, ProfileEntry]:
+        """Look up one machine, process, and filament and refuse a mismatched chain."""
+        machine = self.get(machine_id, "machine")
+        selected = {
+            "machine": machine,
+            "process": self.get(process_id, "process"),
+            "filament": self.get(filament_id, "filament"),
+        }
+        for kind in ("process", "filament"):
+            if not self.is_compatible(selected[kind], machine):
+                raise ProfileCatalogError(
+                    "incompatible_profile",
+                    f"The selected {kind} profile is not compatible with {machine.name}.",
+                )
+        return selected
+
+    def effective_values(
+        self, selected: Dict[str, ProfileEntry], scopes: Mapping[str, str]
+    ) -> Dict[str, Any]:
+        """Return the flattened value the selected chain gives each named key.
+
+        `scopes` maps a key to the profile kind that carries it, as the settings
+        catalog declares, so a filament setting reads the filament chain even if
+        a process happens to mention it. Keys no profile sets are omitted.
+        """
+        resolved = {kind: self.resolve(entry) for kind, entry in selected.items()}
+        values: Dict[str, Any] = {}
+        for key, scope in list(scopes.items())[: self.MAX_EFFECTIVE_KEYS]:
+            kinds = (scope,) if scope in resolved else ("filament", "process", "machine")
+            for kind in kinds:
+                if key in resolved[kind]:
+                    values[key] = resolved[kind][key]
+                    break
+        return values
+
+    def resolve(self, entry: ProfileEntry) -> Dict[str, Any]:
+        resolved, _ = _resolve(entry.source, self._lookups.get((entry.vendor, entry.kind)))
+        return resolved
 
     def materialize(
         self, machine_id: str, process_id: str, filament_id: str, destination: Path
@@ -145,41 +200,19 @@ class ProfileCatalog:
         Inheritance is flattened here so the worker never reads the bundled
         profile tree and never resolves a path outside its own job directory.
         """
-        machine = self.get(machine_id, "machine")
-        selected = {
-            "machine": machine,
-            "process": self.get(process_id, "process"),
-            "filament": self.get(filament_id, "filament"),
-        }
-        for kind in ("process", "filament"):
-            if not is_compatible(selected[kind], machine):
-                raise ProfileCatalogError(
-                    "incompatible_profile",
-                    f"The selected {kind} profile is not compatible with {machine.name}.",
-                )
-
+        selected = self.select(machine_id, process_id, filament_id)
         destination.mkdir(parents=True, exist_ok=True)
-        written: Dict[str, Path] = {}
-        for kind, entry in selected.items():
-            resolved, _ = _resolve(entry.source, self._lookups.get((entry.vendor, entry.kind)))
-            target = destination / f"{kind}.json"
-            with target.open("w", encoding="utf-8") as stream:
-                json.dump(resolved, stream, indent=2, sort_keys=True)
-                stream.write("\n")
-            written[kind] = target
-        return written
+        return {
+            kind: _write_profile(self.resolve(entry), destination / f"{kind}.json")
+            for kind, entry in selected.items()
+        }
 
 
-def is_compatible(entry: ProfileEntry, printer: ProfileEntry) -> bool:
-    """Report whether a process or filament profile suits a selected printer.
-
-    G4 uses the declared `compatible_printers` lists only. The
-    `compatible_printers_condition` expressions need the engine's config
-    evaluator, which the generated settings catalog in G5 exports.
-    """
-    if not entry.compatible_printers:
-        return True
-    return printer.name in entry.compatible_printers
+def _write_profile(resolved: Dict[str, Any], target: Path) -> Path:
+    with target.open("w", encoding="utf-8") as stream:
+        json.dump(resolved, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    return target
 
 
 def _resolve(
@@ -233,8 +266,17 @@ def _compatible_printers(profile: Dict[str, Any]) -> Tuple[str, ...]:
     return tuple(item for item in declared if isinstance(item, str))
 
 
-def load_catalog(repo_root: Path, vendors: Sequence[str] = DEFAULT_VENDORS) -> ProfileCatalog:
-    """Read the bundled vendor indexes and keep only user-selectable profiles."""
+def load_catalog(
+    repo_root: Path,
+    vendors: Sequence[str] = DEFAULT_VENDORS,
+    evaluator: Optional[CompatibilityEvaluator] = None,
+) -> ProfileCatalog:
+    """Read the bundled vendor indexes and keep only user-selectable profiles.
+
+    `evaluator` resolves `compatible_printers_condition` expressions through
+    the engine. Without one, a conditional profile is offered for every
+    printer, so a catalog can still be read where no worker is built.
+    """
     if not vendors:
         raise ProfileCatalogError("invalid_profile_vendor", "At least one bundled vendor must be configured.")
     profiles_root = Path(repo_root) / "resources" / "profiles"
@@ -257,7 +299,7 @@ def load_catalog(repo_root: Path, vendors: Sequence[str] = DEFAULT_VENDORS) -> P
                 source = _entry_source(vendor_root, item.get("sub_path"))
                 if source is None:
                     continue
-                profile, _ = _resolve(source, lookup, cache)
+                profile, sources = _resolve(source, lookup, cache)
                 # Non-instantiable profiles are inheritance bases, not choices.
                 if profile.get("instantiation") != "true" or profile.get("type") != kind:
                     continue
@@ -275,9 +317,51 @@ def load_catalog(repo_root: Path, vendors: Sequence[str] = DEFAULT_VENDORS) -> P
                         nozzle_diameter=_first_value(profile.get("nozzle_diameter")),
                         default_process=str(profile.get("default_print_profile", "")),
                         compatible_printers=_compatible_printers(profile),
+                        compatible_condition=str(profile.get("compatible_printers_condition") or ""),
+                        # A bundled profile's file is named after the profile,
+                        # so the chain is read from the resolved sources.
+                        inherits_chain=tuple(path.stem for path in sources),
                     )
                 )
-    return ProfileCatalog(entries, lookups)
+    catalog = ProfileCatalog(entries, lookups)
+    if evaluator is None:
+        return catalog
+    return ProfileCatalog(entries, lookups, _evaluate_conditions(catalog, entries, evaluator))
+
+
+def _evaluate_conditions(
+    catalog: ProfileCatalog, entries: Sequence[ProfileEntry], evaluator: CompatibilityEvaluator
+) -> Dict[str, FrozenSet[str]]:
+    """Ask the engine which printers each conditional profile accepts.
+
+    Every printer is flattened into a private directory beside the request, so
+    the evaluator resolves nothing outside it, exactly like a slice job.
+    """
+    candidates = [
+        {"id": entry.profile_id, "condition": entry.compatible_condition}
+        for entry in entries
+        if entry.kind != "machine" and entry.compatible_condition and not entry.compatible_printers
+    ]
+    if not candidates:
+        return {}
+    with tempfile.TemporaryDirectory(prefix="orca-compatibility-") as staging:
+        root = Path(staging)
+        (root / "printers").mkdir()
+        printers = []
+        for index, printer in enumerate(catalog.list("machine")):
+            relative = f"printers/{index}.json"
+            _write_profile(catalog.resolve(printer), root / relative)
+            printers.append({"id": printer.profile_id, "name": printer.name, "profile": relative})
+        request = root / "request.json"
+        request.write_text(
+            json.dumps({"catalog_version": 1, "printers": printers, "candidates": candidates}),
+            encoding="utf-8",
+        )
+        answered = evaluator(request).get("compatibility", {})
+    return {
+        candidate["id"]: frozenset(str(item) for item in answered.get(candidate["id"], []))
+        for candidate in candidates
+    }
 
 
 def vendors_from_environment() -> Tuple[str, ...]:

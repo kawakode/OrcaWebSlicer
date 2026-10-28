@@ -16,6 +16,25 @@ import time
 from pathlib import Path
 
 mode = sys.argv[1]
+
+# The API reads the engine's setting metadata and compatibility answers through
+# the same executable it slices with, so the fake answers both too.
+if sys.argv[2] == "--export-settings-catalog":
+    print(Path(__file__).with_name("settings_catalog.json").read_text(encoding="utf-8"))
+    raise SystemExit(0)
+if sys.argv[2] == "--evaluate-compatibility":
+    request = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+    for printer in request["printers"]:
+        assert (Path(sys.argv[3]).parent / printer["profile"]).is_file(), "the printer was not staged"
+    # A condition names the printers it accepts; the real worker runs the
+    # engine's placeholder parser instead.
+    answer = {
+        candidate["id"]: [p["id"] for p in request["printers"] if p["name"] in candidate["condition"]]
+        for candidate in request["candidates"]
+    }
+    print(json.dumps({"catalog_version": 1, "compatibility": answer, "unevaluated": []}))
+    raise SystemExit(0)
+
 manifest = Path(sys.argv[3])
 request = json.loads(manifest.read_text(encoding="utf-8"))
 job_id = request["job_id"]
@@ -117,12 +136,44 @@ _FILAMENT_BASE = {
     "filament_type": ["PLA"],
 }
 
+# A reduced copy of what `--export-settings-catalog` prints, in the same shape.
+SETTINGS_CATALOG = {
+    "catalog_version": 1,
+    "engine_version": "test",
+    "groups": [{"id": "quality", "label": "Quality"}, {"id": "support", "label": "Support"}],
+    "settings": [
+        {"key": "layer_height", "group": "quality", "scope": "process", "type": "float", "vector": False,
+         "label": "Layer height", "unit": "mm", "min": 0, "default": "0.2"},
+        {"key": "sparse_infill_density", "group": "quality", "scope": "process", "type": "percent",
+         "vector": False, "label": "Sparse infill density", "unit": "%", "min": 0, "max": 100, "default": "20%"},
+        {"key": "wall_loops", "group": "quality", "scope": "process", "type": "int", "vector": False,
+         "label": "Wall loops", "min": 0, "max": 1000, "default": "2"},
+        {"key": "filament_type", "group": "quality", "scope": "filament", "type": "strings", "vector": True,
+         "label": "Type", "default": "PLA"},
+        {"key": "enable_support", "group": "support", "scope": "process", "type": "bool", "vector": False,
+         "label": "Enable support", "default": "0"},
+        {"key": "support_type", "group": "support", "scope": "process", "type": "enum", "vector": False,
+         "label": "Type", "enabled_by": "enable_support", "default": "normal(auto)",
+         "enum": [{"value": "normal(auto)", "label": "normal(auto)"}, {"value": "tree(auto)", "label": "tree(auto)"}]},
+    ],
+}
+
+
+def write_fake_worker(root: Path) -> Path:
+    """Write the fake worker and the settings catalog it exports."""
+    worker = Path(root) / "fake_worker.py"
+    worker.write_text(FAKE_WORKER, encoding="utf-8")
+    worker.with_name("settings_catalog.json").write_text(json.dumps(SETTINGS_CATALOG), encoding="utf-8")
+    return worker
+
+
 VENDOR = "Testing"
 MACHINE_ID = f"{VENDOR}/machine/Test Printer 0.4 nozzle"
 OTHER_MACHINE_ID = f"{VENDOR}/machine/Other Printer 0.4 nozzle"
 PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Test"
 FILAMENT_ID = f"{VENDOR}/filament/Test Generic PLA"
 OTHER_PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Other"
+CONDITIONAL_PROCESS_ID = f"{VENDOR}/process/0.28mm Draft @Conditional"
 
 
 def write_profile_tree(repo_root: Path) -> Path:
@@ -186,6 +237,17 @@ def write_profile_tree(repo_root: Path) -> Path:
         "from": "system",
         "instantiation": "true",
         "compatible_printers": ["Other Printer 0.4 nozzle"],
+    })
+    # Only the engine can evaluate a condition, so this one is answered by the
+    # compatibility evaluator rather than by a declared list.
+    publish("process", {
+        "type": "process",
+        "name": "0.28mm Draft @Conditional",
+        "inherits": "fdm_process_common",
+        "from": "system",
+        "instantiation": "true",
+        "layer_height": "0.28",
+        "compatible_printers_condition": "printer_notes=~/.*Other Printer 0.4 nozzle.*/",
     })
     # Branded filaments sit in a subdirectory while their base stays one level
     # up, exactly as the bundled vendors ship them.

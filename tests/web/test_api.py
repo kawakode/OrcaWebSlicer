@@ -14,13 +14,14 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (  # noqa: E402
-    FAKE_WORKER,
+    CONDITIONAL_PROCESS_ID,
     FILAMENT_ID,
     MACHINE_ID,
     OTHER_MACHINE_ID,
     OTHER_PROCESS_ID,
     PROCESS_ID,
     VENDOR,
+    write_fake_worker,
     write_profile_tree,
 )
 from test_job_service import TEST_LIMITS  # noqa: E402
@@ -42,8 +43,7 @@ class ApiTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         write_profile_tree(self.root)
-        self.worker = self.root / "fake_worker.py"
-        self.worker.write_text(FAKE_WORKER, encoding="utf-8")
+        self.worker = write_fake_worker(self.root)
         config = ApiConfig(
             repo_root=self.root,
             state_root=self.root / "state",
@@ -110,15 +110,67 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             [entry["profile_id"] for entry in catalog["machine"]], [OTHER_MACHINE_ID, MACHINE_ID]
         )
-        self.assertEqual(len(catalog["process"]), 2)
+        self.assertEqual(len(catalog["process"]), 3)
 
         narrowed = self.client.get("/api/v1/profiles", params={"printer": MACHINE_ID}).json()
         self.assertEqual([entry["profile_id"] for entry in narrowed["process"]], [PROCESS_ID])
         self.assertEqual([entry["profile_id"] for entry in narrowed["filament"]], [FILAMENT_ID])
+        # The conditional profile is narrowed by the worker's evaluation of its
+        # compatible_printers_condition, not offered everywhere.
+        other = self.client.get("/api/v1/profiles", params={"printer": OTHER_MACHINE_ID}).json()
+        self.assertEqual(
+            [entry["profile_id"] for entry in other["process"]], [OTHER_PROCESS_ID, CONDITIONAL_PROCESS_ID]
+        )
 
         unknown = self.client.get("/api/v1/profiles", params={"printer": "Testing/machine/Nope"})
         self.assertEqual(unknown.status_code, 404)
         self.assertEqual(unknown.json()["error"]["code"], "unknown_profile")
+
+    def test_serves_the_engine_settings_catalog(self):
+        response = self.client.get("/api/v1/settings")
+        self.assertEqual(response.status_code, 200)
+        catalog = response.json()
+        self.assertEqual(catalog["catalog_version"], 1)
+        keys = [setting["key"] for setting in catalog["settings"]]
+        self.assertIn("layer_height", keys)
+        support_type = next(setting for setting in catalog["settings"] if setting["key"] == "support_type")
+        self.assertEqual(support_type["enabled_by"], "enable_support")
+
+    def test_resolves_the_effective_values_of_a_selected_chain(self):
+        response = self.client.get(
+            "/api/v1/profiles/effective",
+            params={"machine": MACHINE_ID, "process": PROCESS_ID, "filament": FILAMENT_ID},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        # Values come from the flattened chain, each from the kind that owns it.
+        self.assertEqual(body["values"]["layer_height"], "0.2")
+        self.assertEqual(body["values"]["sparse_infill_density"], "15%")
+        self.assertEqual(body["values"]["filament_type"], ["PLA"])
+        self.assertNotIn("wall_loops", body["values"])
+        self.assertEqual(body["profiles"]["process"]["inherits_chain"], ["fdm_process_common", "0.20mm Standard @Test"])
+
+        mismatched = self.client.get(
+            "/api/v1/profiles/effective",
+            params={"machine": MACHINE_ID, "process": OTHER_PROCESS_ID, "filament": FILAMENT_ID},
+        )
+        self.assertEqual(mismatched.status_code, 409)
+        self.assertEqual(mismatched.json()["error"]["code"], "incompatible_profile")
+
+    def test_refuses_an_override_the_engine_definition_rejects(self):
+        for settings, code in (
+            ({"layer_height": "thick"}, "invalid_setting_value"),
+            ({"wall_loops": "2.5"}, "invalid_setting_value"),
+            ({"sparse_infill_density": "150%"}, "invalid_setting_value"),
+            ({"support_type": "sideways"}, "invalid_setting_value"),
+            ({"gcode_flavor": "marlin"}, "unknown_setting"),
+        ):
+            with self.subTest(settings=settings):
+                response = self.submit(settings=settings)
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["error"]["code"], code)
+        # Nothing reached a worker.
+        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
 
     def test_accepts_supported_models_and_refuses_the_rest(self):
         accepted = self.upload("cube.STL")
@@ -153,6 +205,11 @@ class ApiTests(unittest.TestCase):
         result = self.client.get(f"/api/v1/jobs/{job_id}/artifacts/result")
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["outcome"], "succeeded")
+        # The job names the whole inheritance chain it was resolved from.
+        self.assertEqual(
+            job["profiles"]["process"],
+            {"profile_id": PROCESS_ID, "inherits_chain": ["fdm_process_common", "0.20mm Standard @Test"]},
+        )
 
     def test_refuses_an_artifact_before_it_is_published(self):
         accepted = self.submit()

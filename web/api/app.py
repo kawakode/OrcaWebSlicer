@@ -19,10 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from web_job_directory import JOB_ID_PATTERN
 from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
+from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
 
 from . import API_VERSION, PROTOCOL_VERSION
 from .config import ApiConfig, from_environment
-from .errors import ApiError, from_catalog_error
+from .errors import ApiError, from_catalog_error, from_settings_error
 from .jobs import ARTIFACT_NAMES, MAX_SETTINGS, JobService, SliceRequest
 from .uploads import UploadStore
 
@@ -73,16 +74,29 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        catalog = load_catalog(resolved.repo_root, resolved.profile_vendors)
+        # The engine owns setting metadata and the compatibility expression
+        # language, so both are read from the worker once, before serving.
+        try:
+            settings = load_settings_catalog(resolved.worker_command)
+            catalog = load_catalog(
+                resolved.repo_root,
+                resolved.profile_vendors,
+                lambda request: evaluate_compatibility(resolved.worker_command, str(request)),
+            )
+        except SettingsCatalogError as error:
+            raise from_settings_error(error) from error
         uploads = UploadStore(resolved.uploads_root, resolved.job_limits.max_input_bytes)
-        service = JobService(resolved, catalog, uploads)
+        service = JobService(resolved, catalog, uploads, settings)
         app.state.config = resolved
         app.state.catalog = catalog
+        app.state.settings = settings
         app.state.uploads = uploads
         app.state.jobs = service
         # Reclaim whatever an earlier process left behind before serving.
         service.sweep()
-        logger.info("api ready profiles=%d state_root=%s", len(catalog), resolved.state_root)
+        logger.info(
+            "api ready profiles=%d settings=%d state_root=%s", len(catalog), len(settings), resolved.state_root
+        )
         try:
             yield
         finally:
@@ -136,6 +150,34 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
             }
         except ProfileCatalogError as error:
             raise from_catalog_error(error) from error
+
+    @app.get(f"{PREFIX}/profiles/effective", tags=["profiles"])
+    def effective_profile(
+        request: Request,
+        machine: str = Query(max_length=512),
+        process: str = Query(max_length=512),
+        filament: str = Query(max_length=512),
+    ) -> Dict[str, Any]:
+        """Show what one selected chain gives every curated setting.
+
+        The browser renders these as each control's profile default, so a blank
+        override visibly means "keep the profile's value".
+        """
+        catalog = request.app.state.catalog
+        try:
+            selected = catalog.select(machine, process, filament)
+            values = catalog.effective_values(selected, request.app.state.settings.scopes())
+        except ProfileCatalogError as error:
+            raise from_catalog_error(error) from error
+        return {
+            "profiles": {kind: entry.describe() for kind, entry in selected.items()},
+            "values": values,
+        }
+
+    @app.get(f"{PREFIX}/settings", tags=["profiles"])
+    def settings_catalog(request: Request) -> Dict[str, Any]:
+        """The engine's own definition of every setting a request may override."""
+        return request.app.state.settings.describe()
 
     @app.post(f"{PREFIX}/uploads", status_code=201, tags=["uploads"])
     def create_upload(request: Request, file: UploadFile = File()) -> Dict[str, Any]:

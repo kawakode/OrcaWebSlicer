@@ -6,6 +6,7 @@ from typing import Dict
 
 from web_job_directory import JobDirectoryError
 from web_profile_catalog import ProfileCatalogError
+from web_settings_catalog import SettingsCatalogError
 
 
 class ApiError(RuntimeError):
@@ -37,6 +38,19 @@ _CATALOG_STATUS: Dict[str, int] = {
     "unreadable_profile": 500,
     "duplicate_profile_id": 500,
 }
+
+
+_SETTINGS_STATUS: Dict[str, int] = {
+    "unknown_setting": 422,
+    "unavailable_setting": 422,
+    "invalid_setting_value": 422,
+}
+
+
+def from_settings_error(error: SettingsCatalogError) -> ApiError:
+    # Anything other than a refused override means the worker could not
+    # describe itself, which is a deployment fault rather than a client one.
+    return ApiError(error.code, str(error), _SETTINGS_STATUS.get(error.code, 500))
 
 
 def from_job_directory_error(error: JobDirectoryError) -> ApiError:

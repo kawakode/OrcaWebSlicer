@@ -4,7 +4,9 @@ import {
   artifactUrl,
   cancelJob,
   listProfiles,
+  readEffectiveProfile,
   readJob,
+  readSettingsCatalog,
   retryJob,
   submitJob,
   uploadModel,
@@ -15,18 +17,13 @@ import {
   type Job,
   type ProfileCatalog,
   type ProfileEntry,
+  type ProfileValue,
+  type SettingsCatalog,
   type Upload,
 } from "./types";
+import { SettingsForm } from "./settings/SettingsForm";
 
 const POLL_INTERVAL_MS = 400;
-
-/** The curated overrides G4 exposes. G5 generates these from engine metadata. */
-const CURATED_SETTINGS = [
-  { key: "layer_height", label: "Layer height (mm)", placeholder: "profile default" },
-  { key: "sparse_infill_density", label: "Infill density", placeholder: "e.g. 15%" },
-  { key: "wall_loops", label: "Wall loops", placeholder: "e.g. 2" },
-  { key: "enable_support", label: "Supports (0 or 1)", placeholder: "0" },
-] as const;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 
@@ -47,11 +44,31 @@ export default function App() {
   const [process, setProcess] = useState("");
   const [filament, setFilament] = useState("");
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
+  const [profileValues, setProfileValues] = useState<Record<string, ProfileValue>>({});
   const [file, setFile] = useState<File | null>(null);
   const [upload, setUpload] = useState<Upload | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [failure, setFailure] = useState<{ code: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    readSettingsCatalog()
+      .then(setSettingsCatalog)
+      .catch((error) => setFailure(describe(error)));
+  }, []);
+
+  // The selected chain's own values are what a blank override keeps.
+  useEffect(() => {
+    if (!machine || !process || !filament) return;
+    let stale = false;
+    readEffectiveProfile(machine, process, filament)
+      .then((effective) => !stale && setProfileValues(effective.values))
+      .catch((error) => !stale && setFailure(describe(error)));
+    return () => {
+      stale = true;
+    };
+  }, [machine, process, filament]);
 
   // The printer list is the unnarrowed one; the rest is filtered per printer.
   useEffect(() => {
@@ -190,20 +207,14 @@ export default function App() {
 
       <section>
         <h2>Overrides</h2>
-        {CURATED_SETTINGS.map(({ key, label, placeholder }) => (
-          <label key={key}>
-            <span>{label}</span>
-            <input
-              type="text"
-              data-testid={`setting-${key}`}
-              placeholder={placeholder}
-              value={settings[key] ?? ""}
-              onChange={(event) =>
-                setSettings((current) => ({ ...current, [key]: event.target.value }))
-              }
-            />
-          </label>
-        ))}
+        {settingsCatalog && (
+          <SettingsForm
+            catalog={settingsCatalog}
+            profileValues={profileValues}
+            overrides={settings}
+            onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
+          />
+        )}
       </section>
 
       <section className="actions">
@@ -307,6 +318,26 @@ function JobPanel({ job }: { job: Job }) {
             </li>
           ))}
         </ul>
+      )}
+      {Object.keys(job.profiles ?? {}).length > 0 && (
+        <dl className="chain" data-testid="job-profiles">
+          {(["machine", "process", "filament"] as const).map((kind) =>
+            job.profiles[kind] ? (
+              <div key={kind}>
+                <dt>{kind}</dt>
+                <dd data-testid={`job-chain-${kind}`}>{job.profiles[kind]!.inherits_chain.join(" → ")}</dd>
+              </div>
+            ) : null,
+          )}
+        </dl>
+      )}
+      {Object.keys(job.request.settings).length > 0 && (
+        <p data-testid="job-overrides">
+          Overrides:{" "}
+          {Object.entries(job.request.settings)
+            .map(([key, value]) => `${key} = ${value}`)
+            .join(", ")}
+        </p>
       )}
       {job.timing && (
         <p data-testid="job-timing">Sliced in {job.timing.duration_ms} ms</p>
