@@ -11,7 +11,11 @@ const BROWSERS = new Set(["chromium", ...(process.env.ORCA_WEB_E2E_BROWSERS ?? "
 const projects = [
   { name: "chromium", use: { browserName: "chromium" as const } },
   { name: "msedge", use: { browserName: "chromium" as const, channel: "msedge" } },
-  { name: "firefox", use: { browserName: "firefox" as const } },
+  // Headless Firefox blocklists software GL, which is all a GPU-less CI runner has.
+  {
+    name: "firefox",
+    use: { browserName: "firefox" as const, launchOptions: { firefoxUserPrefs: { "webgl.force-enabled": true } } },
+  },
   { name: "webkit", use: { browserName: "webkit" as const } },
 ].filter((project) => BROWSERS.has(project.name));
 
