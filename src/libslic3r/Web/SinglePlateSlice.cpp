@@ -497,7 +497,7 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
         for (const std::array<double, 16> &values : placed.instances) {
             Transform3d transform = Transform3d::Identity();
             transform.matrix() = Eigen::Map<const Eigen::Matrix<double, 4, 4, Eigen::RowMajor>>(values.data());
-            object->add_instance(Geometry::Transformation(transform));
+            object->add_instance()->set_transformation(Geometry::Transformation(transform));
         }
         object->invalidate_bounding_box();
     }

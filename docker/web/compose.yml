@@ -253,6 +253,15 @@ services:
       - --native-baselines
       - build/web-baseline
 
+  worker-matrix:
+    <<: *build-environment
+    network_mode: none
+    command:
+      - python3
+      - scripts/web_worker_matrix.py
+      - --worker
+      - build-worker/src/Release/orca-slicer-worker
+
   executor-smoke:
     <<: *build-environment
     network_mode: none

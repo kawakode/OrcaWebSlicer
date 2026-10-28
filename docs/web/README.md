@@ -31,7 +31,7 @@ prerequisites pass.
 | G2 | Headless boundary | A worker linked without wxWidgets, desktop OpenGL, device code, or embedded Python reproduces G1 | Complete |
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
-| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Not started |
+| G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Complete |
 | G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
 
 ## Engineering rules
@@ -56,8 +56,11 @@ the disposable job-directory lifecycle, the [minimum API](api.md), and the
 browser upload produces semantically baseline-equivalent G-code through a
 disposable worker.
 
-G5 is next, starting with the single-plate plater, the settings UI generated
-from engine metadata, and the browser layer preview.
+G5 is complete as well: the [plater](plater.md) composes one plate from several
+uploads and submits explicit transforms, settings controls come from the engine
+catalog, and the [layer preview](preview.md) pages worker-generated toolpaths.
+The next phase goes beyond the single-plate MVP; production deployment (G6)
+comes after it.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "repetitions": 2,
+  "timeout_seconds": 300,
+  "cases": [
+    {
+      "name": "overhang-support",
+      "model": "{repo}/tests/data/overhang.obj",
+      "profiles": true,
+      "settings": {"enable_support": "1", "support_type": "normal(auto)"},
+      "expect": {"outcome": "succeeded", "roles_include": ["Support"]}
+    },
+    {
+      "name": "overhang-no-support",
+      "model": "{repo}/tests/data/overhang.obj",
+      "profiles": true,
+      "settings": {"enable_support": "0"},
+      "expect": {"outcome": "succeeded", "roles_exclude": ["Support"]}
+    },
+    {
+      "name": "multipart",
+      "model": "{repo}/tests/data/two_hollow_squares.obj",
+      "profiles": true,
+      "expect": {"outcome": "succeeded", "tools": [0]}
+    },
+    {
+      "name": "unicode-3mf",
+      "model": "{repo}/tests/data/test_3mf/Geräte/Büchse.3mf",
+      "plate_index": 1,
+      "settings": {
+        "layer_height": "0.3",
+        "initial_layer_print_height": "0.3",
+        "layer_change_gcode": "G92 E0\n"
+      },
+      "expect": {"outcome": "succeeded"}
+    },
+    {
+      "name": "invalid-config",
+      "model": "{repo}/tests/data/20mm_cube.obj",
+      "profiles": true,
+      "settings": {"layer_height": "not-a-number"},
+      "expect": {"outcome": "failed", "error_code": "invalid_setting_value", "setting": "layer_height"}
+    },
+    {
+      "name": "output-limit",
+      "model": "{repo}/tests/data/20mm_cube.obj",
+      "profiles": true,
+      "limits": {"max_output_bytes": 1},
+      "expect": {"outcome": "failed", "error_code": "output_size_limit_exceeded"}
+    }
+  ]
+}
