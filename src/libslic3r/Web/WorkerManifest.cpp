@@ -78,8 +78,9 @@ WorkerManifestValidation validate_worker_manifest(std::string_view serialized)
         add_error(result, "invalid_operation", "operation must be an object.");
     } else {
         const auto name = operation->find("name");
-        if (name == operation->end() || !name->is_string() || (*name != "slice" && *name != "inspect")) {
-            add_error(result, "unsupported_operation", "operation.name must be 'slice' or 'inspect'.");
+        if (name == operation->end() || !name->is_string() ||
+            (*name != "slice" && *name != "inspect" && *name != "export_project")) {
+            add_error(result, "unsupported_operation", "operation.name must be 'slice', 'inspect', or 'export_project'.");
         } else {
             manifest.operation = name->get<std::string>();
         }

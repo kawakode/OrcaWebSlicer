@@ -18,7 +18,9 @@ enum class WorkerOperation {
     // Slice one plate into G-code and, when asked, a layer preview.
     Slice,
     // Load one model and export its display geometry for the plater.
-    Inspect
+    Inspect,
+    // Save the composed plate as a desktop-compatible project archive.
+    ExportProject
 };
 
 // One object of an uploaded model file, placed on the plate by the browser.
@@ -46,6 +48,11 @@ struct SinglePlateSliceRequest
     // Required by inspection: the display mesh and its JSON index.
     std::string output_mesh;
     std::string output_inspection;
+    // Required by a project export: the 3MF archive to write.
+    std::string output_project;
+    // Embed rendered thumbnails in the G-code, at the sizes the printer's
+    // `thumbnails` setting asks for. Off by default, as in G4.
+    bool gcode_thumbnails {false};
     std::string machine_profile;
     std::string process_profile;
     std::string filament_profile;

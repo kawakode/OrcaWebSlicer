@@ -87,7 +87,7 @@ export interface JobError {
 }
 
 export interface JobArtifact {
-  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection";
+  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection" | "project";
   media_type: string;
   size_bytes?: number;
   sha256?: string;
@@ -95,7 +95,7 @@ export interface JobArtifact {
 
 export interface Job {
   job_id: string;
-  operation: "slice" | "inspect";
+  operation: "slice" | "inspect" | "export_project";
   correlation_id: string;
   state: JobState;
   progress: JobProgress;

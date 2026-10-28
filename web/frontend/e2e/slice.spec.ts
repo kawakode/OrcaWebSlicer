@@ -1,62 +1,14 @@
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const CUBE = resolve(REPO_ROOT, "tests/data/20mm_cube.obj");
-// Displayed and sliced placement must agree within this many millimetres; see
-// docs/web/plater.md for why it is not zero.
-const PLACEMENT_TOLERANCE_MM = 0.5;
-
-test.beforeAll(() => {
-  if (!existsSync(CUBE)) throw new Error(`The fixture ${CUBE} is missing.`);
-});
-
-/** Wait for the profile lists the screen needs before it can submit anything. */
-async function waitForProfiles(page: Page) {
-  await expect(page.getByTestId("printer-select")).toBeEnabled();
-  await expect(page.getByTestId("process-select")).toBeEnabled();
-  await expect(page.getByTestId("filament-select")).toBeEnabled();
-}
-
-async function addCube(page: Page) {
-  const before = await page.getByTestId("plate-item").count();
-  await page.getByTestId("file-input").setInputFiles(CUBE);
-  await expect(page.getByTestId("plate-item")).toHaveCount(before + 1);
-}
-
-/** Read every plate item's world bounds as the plater computed them. */
-async function plateBounds(page: Page) {
-  const values = await page.getByTestId("plate-item").evaluateAll((items) =>
-    items.map((item) => (item as HTMLElement).dataset.bounds!.split(",").map(Number)),
-  );
-  return values.map(([minX, minY, minZ, maxX, maxY, maxZ]) => ({ minX, minY, minZ, maxX, maxY, maxZ }));
-}
-
-/** Outer-wall extents of the sliced job, read from its paged preview. */
-async function slicedOuterWalls(page: Page, jobId: string) {
-  const index = await (await page.request.get(`/api/v1/jobs/${jobId}/artifacts/preview_index`)).json();
-  const outer = index.roles.find((role: { name: string }) => role.name === "Outer wall").id;
-  const last = index.layers.length - 1;
-  const body = await (await page.request.get(`/api/v1/jobs/${jobId}/preview/layers?start=0&end=${last}`)).body();
-  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  const points: [number, number, number][] = [];
-  for (let at = 0; at + 36 <= body.byteLength; at += 36) {
-    if (view.getUint8(at + 32) !== outer) continue;
-    points.push([view.getFloat32(at, true), view.getFloat32(at + 4, true), view.getFloat32(at + 8, true)]);
-    points.push([view.getFloat32(at + 12, true), view.getFloat32(at + 16, true), view.getFloat32(at + 20, true)]);
-  }
-  return { index, points };
-}
-
-async function sliceAndWait(page: Page) {
-  await page.getByTestId("slice").click();
-  await expect(page.getByTestId("job-state")).toHaveText("succeeded");
-  return page.getByTestId("job-id").innerText();
-}
+import {
+  PLACEMENT_TOLERANCE_MM,
+  addCube,
+  plateBounds,
+  sliceAndWait,
+  slicedOuterWalls,
+  waitForProfiles,
+} from "./plate";
 
 test("an uploaded model shows its bounds and slices where it was placed", async ({ page }) => {
   await page.goto("/");

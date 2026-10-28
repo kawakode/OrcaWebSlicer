@@ -48,7 +48,9 @@ part's own transform applied and no instance transform.
 object without copying the file. `instances` are the placements the file
 declared. When `declares_plate` is true, a project archive placed its objects
 and the plater keeps those placements; otherwise the model is a loose mesh and
-the plater centres it on the bed and arranges the plate.
+the plater centres it on the bed and arranges the plate. A project that names
+its presets also carries a `project` object, described in
+[the projects contract](projects.md).
 
 ## Placement
 

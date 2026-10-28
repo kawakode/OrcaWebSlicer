@@ -241,6 +241,65 @@ class ApiTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertEqual(self.client.post("/api/v1/jobs", json=invalid).status_code, 422)
 
+    def test_exports_a_plate_as_a_project(self):
+        upload_id = self.upload().json()["upload_id"]
+        moved = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]
+        body = {
+            "objects": [{"upload_id": upload_id, "instances": [{"transform": moved}]}],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+            "settings": {"layer_height": "0.28"},
+        }
+        accepted = self.client.post("/api/v1/projects", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(accepted.json()["operation"], "export_project")
+        job = self.wait(accepted.json()["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        self.assertEqual(sorted(artifact["name"] for artifact in job["artifacts"]), ["project", "result"])
+
+        # The worker saves the plate it would have sliced, and nothing else.
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        payload = manifest["operation"]["payload"]
+        self.assertEqual(manifest["operation"]["name"], "export_project")
+        self.assertEqual(payload["output_project"], "output/project.3mf")
+        self.assertEqual(payload["settings"], {"layer_height": "0.28"})
+        self.assertEqual(payload["objects"][0]["instances"][0]["transform"], moved)
+        for absent in ("output_gcode", "output_preview", "thumbnails"):
+            self.assertNotIn(absent, payload)
+
+        project = self.client.get(f"/api/v1/jobs/{job['job_id']}/artifacts/project")
+        self.assertEqual(project.status_code, 200)
+        self.assertEqual(project.headers["content-type"], "model/3mf")
+        self.assertIn(f"{job['job_id']}.3mf", project.headers["content-disposition"])
+        self.assertEqual(project.content[:4], b"PK\x03\x04")
+
+        # Projects are validated like slices, and never take G-code options.
+        self.assertEqual(self.client.post("/api/v1/projects", json={**body, "thumbnails": True}).status_code, 422)
+        refused = self.client.post("/api/v1/projects", json={**body, "settings": {"no_such_setting": "1"}})
+        self.assertEqual(refused.status_code, 422)
+        self.assertEqual(refused.json()["error"]["code"], "unknown_setting")
+
+    def test_asks_for_gcode_thumbnails_only_when_requested(self):
+        plain = self.wait(self.submit().json()["job_id"])
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / plain["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("thumbnails", manifest["operation"]["payload"])
+
+        accepted = self.submit(thumbnails=True)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertTrue(accepted.json()["request"]["thumbnails"])
+        job = self.wait(accepted.json()["job_id"])
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        self.assertIs(manifest["operation"]["payload"]["thumbnails"], True)
+        retried = self.client.post(f"/api/v1/jobs/{job['job_id']}/retry")
+        self.assertEqual(retried.json()["request"], accepted.json()["request"])
+
     def test_pages_the_layer_preview(self):
         job_id = self.submit().json()["job_id"]
         self.assertEqual(self.wait(job_id)["state"], "succeeded")

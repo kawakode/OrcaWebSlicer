@@ -78,7 +78,7 @@ def written(kind, relative, contents):
 models = [placed["model"] for placed in payload.get("objects", [])] or [payload["input_model"]]
 for model in models:
     assert (job_root / model).is_file(), "the model was not staged"
-if request["operation"]["name"] == "slice":
+if request["operation"]["name"] in ("slice", "export_project"):
     for name in ("machine", "process", "filament"):
         assert (job_root / payload["profiles"][name]).is_file(), name + " profile was not staged"
 
@@ -98,6 +98,14 @@ if request["operation"]["name"] == "inspect" and mode != "crash":
     artifacts = [written("mesh", payload["output_mesh"], mesh),
                  written("inspection", payload["output_inspection"], json.dumps(inspection).encode())]
     publish("succeeded", artifacts)
+    event("state", state="succeeded")
+    raise SystemExit(0)
+
+if request["operation"]["name"] == "export_project" and mode == "success":
+    # A ZIP signature is enough: the API never opens the archive.
+    artifacts = [written("project", payload["output_project"], b"PK\x03\x04project")]
+    publish("succeeded", artifacts)
+    event("artifact", artifact=artifacts[0])
     event("state", state="succeeded")
     raise SystemExit(0)
 

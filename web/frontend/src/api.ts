@@ -82,7 +82,7 @@ export interface PlacedObjectSubmission {
   instances: { transform: number[] }[];
 }
 
-export interface SliceSubmission {
+export interface PlateSubmission {
   upload_id?: string;
   objects?: PlacedObjectSubmission[];
   machine_profile: string;
@@ -91,13 +91,23 @@ export interface SliceSubmission {
   settings: Record<string, string>;
 }
 
-export function submitJob(submission: SliceSubmission): Promise<Job> {
-  return request<Job>("/jobs", {
+export interface SliceSubmission extends PlateSubmission {
+  /** Embed rendered thumbnails in the G-code. */
+  thumbnails?: boolean;
+}
+
+function post<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(submission),
+    body: JSON.stringify(body),
   });
 }
+
+export const submitJob = (submission: SliceSubmission): Promise<Job> => post<Job>("/jobs", submission);
+
+/** Save a plate as a 3MF project; the job publishes a `project` artifact. */
+export const exportProject = (submission: PlateSubmission): Promise<Job> => post<Job>("/projects", submission);
 
 export const readJob = (jobId: string): Promise<Job> => request<Job>(`/jobs/${jobId}`);
 

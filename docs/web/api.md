@@ -25,6 +25,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/settings` | The engine's catalog of overridable settings |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
 | `POST` | `/jobs` | Submit one slice request |
+| `POST` | `/projects` | Save a plate as a 3MF project |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
@@ -69,6 +70,11 @@ millimetres per instance. The worker applies those transforms unchanged:
 
 Each upload a plate uses is staged into the job once, whatever the number of
 objects that reference it. A plate holds at most 256 objects from 16 uploads.
+
+A slice request may add `"thumbnails": true` to embed rendered thumbnails in
+the G-code; it is off by default. `POST /projects` takes the same body without
+`thumbnails` and starts a job that saves the plate as a desktop-compatible 3MF
+instead of slicing it; see [projects](projects.md).
 
 Overrides are checked against the engine's [settings catalog](#settings) before
 any worker starts: an unknown key is `unknown_setting`, and a value of the wrong
@@ -121,6 +127,7 @@ relative paths never reach a URL.
   whatever the outcome, because a failed run's report is the useful part.
 - `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
 - `mesh` and `inspection` are published by a succeeded inspection.
+- `project` is published by a succeeded project export, as `model/3mf`.
 
 The layer preview is also served in pages: `GET
 /jobs/{job_id}/preview/layers?start=a&end=b` streams layers `a` through `b`

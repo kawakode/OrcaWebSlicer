@@ -210,6 +210,25 @@ The next phase goes beyond the single-plate MVP toward desktop feature parity
 - [x] The complete supported workflow works without installing the desktop app.
 - [x] Desktop behavior and native baseline tests remain unchanged.
 
+## Phase 3b: Beyond the single-plate MVP
+
+### Projects: save and export 3MF
+
+- [x] Save the composed plate (objects, instance transforms, selected presets,
+  and overrides) as a desktop-compatible 3MF through the worker's
+  `export_project` operation and the engine's own 3MF exporter; the API never
+  writes the archive.
+- [x] Record the selection as the desktop does (`*_settings_id` and
+  `different_settings_to_system`) so the desktop opens the same presets,
+  marked as modified, and the browser restores them from an inspection.
+- [x] Render plate thumbnails on the CPU, without OpenGL, for the project and,
+  on request, for the G-code at the sizes the printer's `thumbnails` setting
+  asks for.
+- [x] Reopen a saved project in the browser with its placement, profiles, and
+  overrides; a project added to an existing plate only adds its objects.
+- [x] Catch2 round trip through `load_bbs_3mf`, API tests, and end-to-end tests.
+- [ ] Export every plate once projects hold several plates.
+
 ## Phase 4: Production readiness (G6, priority P3)
 
 ### 14. Harden isolation and deployment
