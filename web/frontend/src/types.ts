@@ -102,10 +102,23 @@ export interface Job {
   warnings: JobWarning[];
   error: JobError | null;
   artifacts: JobArtifact[];
-  request: { settings: Record<string, string> };
+  request: {
+    settings: Record<string, string>;
+    plate?: number | null;
+    plate_name?: string | null;
+  };
   retry_of: string | null;
+  /** The batch that sliced this plate with the rest of its project. */
+  batch_id?: string | null;
   profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>>;
   timing: { duration_ms: number; cpu_time_ms: number } | null;
+}
+
+/** One job per plate of a project, submitted together. */
+export interface Batch {
+  batch_id: string;
+  state: JobState;
+  jobs: Job[];
 }
 
 /** A failure the API named, kept distinct from a network or parsing failure. */

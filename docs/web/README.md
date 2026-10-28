@@ -17,6 +17,7 @@ This directory is the source of truth for the web effort:
 - [Layer preview](preview.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
+- [ADR 0003: multiple plates](adr/0003-multiple-plates.md)
 
 ## Delivery gates
 
@@ -60,7 +61,9 @@ G5 is complete as well: the [plater](plater.md) composes one plate from several
 uploads and submits explicit transforms, settings controls come from the engine
 catalog, and the [layer preview](preview.md) pages worker-generated toolpaths.
 The next phase goes beyond the single-plate MVP; production deployment (G6)
-comes after it.
+comes after it. Its first step is in place: a project holds several
+[plates](plater.md#plates), sliced one job per plate, and desktop projects
+with several plates import with their placements.
 
 The canonical build environment is defined by
 [docker/web/compose.yml](../../docker/web/compose.yml).

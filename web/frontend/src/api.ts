@@ -2,6 +2,7 @@ import type { Inspection } from "./plater/mesh";
 import type { PreviewIndex } from "./preview/preview";
 import {
   ApiError,
+  type Batch,
   type EffectiveProfile,
   type Job,
   type JobArtifact,
@@ -89,7 +90,37 @@ export interface SliceSubmission {
   process_profile: string;
   filament_profile: string;
   settings: Record<string, string>;
+  /** The archive plate whose own settings apply. */
+  plate_index?: number;
+  /** The project's plate this slices, which names its artifacts. */
+  plate?: number;
+  plate_name?: string;
 }
+
+export interface BatchSubmission {
+  plates: {
+    objects: PlacedObjectSubmission[];
+    plate: number;
+    plate_index?: number;
+    name?: string;
+  }[];
+  machine_profile: string;
+  process_profile: string;
+  filament_profile: string;
+  settings: Record<string, string>;
+}
+
+/** Slice every plate of the project at once, one job per plate. */
+export function submitBatch(submission: BatchSubmission): Promise<Batch> {
+  return request<Batch>("/batches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(submission),
+  });
+}
+
+export const cancelBatch = (batchId: string): Promise<Batch> =>
+  request<Batch>(`/batches/${batchId}/cancel`, { method: "POST" });
 
 export function submitJob(submission: SliceSubmission): Promise<Job> {
   return request<Job>("/jobs", {

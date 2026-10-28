@@ -229,13 +229,22 @@ struct ProjectPlate
     bool declares_plate {false};
     // True once a project archive supplied `config`.
     bool loaded {false};
+    // The plates the archive declares and, per object and instance, the
+    // 1-based plate holding it (0 for none), as the inspection reports them.
+    InspectedPlates plates;
 };
 
-// Loads one plate of a project archive into the neutral worker model. The
-// importer streams the archive itself, so containment and extraction limits are
-// checked against the central directory before it is handed over.
+// Loads a project archive into the neutral worker model. The importer streams
+// the archive itself, so containment and extraction limits are checked against
+// the central directory before it is handed over.
+//
+// Every plate is imported, so an object keeps the same index whichever plate is
+// sliced, and each instance is moved from the desktop's shared plate layout
+// onto its own plate's bed. A non-zero `selected_plate` then keeps only that
+// plate's instances. `config_plate` names the plate whose own settings apply.
 SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &input_path,
-                                          Model &model, ProjectPlate &project)
+                                          Model &model, ProjectPlate &project, unsigned selected_plate,
+                                          unsigned config_plate)
 {
     ProjectArchiveLimits archive_limits;
     if (request.max_extracted_bytes) {
@@ -260,29 +269,57 @@ SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request
     // embedded thumbnails or auxiliary files the desktop renders.
     const LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances;
     if (!load_bbs_3mf(input_path.string().c_str(), &loaded_config, &substitutions, &model, &plate_data_list,
-                      &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr, strategy, nullptr,
-                      static_cast<int>(request.plate_index)))
+                      &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr, strategy, nullptr, 0))
         return failure("project_load_failed", "The project archive could not be imported.", WorkerErrorCategory::Input);
 
-    // Slicing a plate other than the first requires the desktop plate-list
-    // layout that offsets every plate on one shared coordinate system, which is
-    // outside the declared single-plate scope.
-    if (plate_data_list.size() > 1)
-        return failure("multi_plate_project_unsupported",
-                       "The project contains more than one plate, which is outside the single-plate worker scope.",
-                       WorkerErrorCategory::Input);
-    if (request.plate_index != 1)
+    // A plain 3MF is one implicit plate.
+    const std::size_t plate_count = std::max<std::size_t>(1, plate_data_list.size());
+    if (selected_plate > plate_count)
         return failure("plate_index_out_of_range", "The project does not contain the requested plate.",
                        WorkerErrorCategory::Input);
 
     project.config = std::move(loaded_config);
     project.loaded = true;
     project.declares_plate = !plate_data_list.empty();
-    if (project.declares_plate) {
-        const PlateData &plate = *plate_data_list.front();
+    if (config_plate >= 1 && config_plate <= plate_data_list.size()) {
+        const PlateData &plate = *plate_data_list[config_plate - 1];
         project.config.apply(plate.config, true);
         if (!plate.filament_maps.empty())
             project.config.option<ConfigOptionInts>("filament_map", true)->values = plate.filament_maps;
+    }
+    for (const PlateData *plate : plate_data_list)
+        project.plates.names.push_back(plate->plate_name);
+
+    // The desktop assigns an instance to the plate its position falls on, and
+    // so does the worker. A single plate keeps every instance where it is, as
+    // the single-plate worker always did.
+    const ProjectPlateGrid grid = project_plate_grid(project.config, static_cast<int>(plate_count));
+    project.plates.instance_plates.assign(model.objects.size(), {});
+    for (std::size_t object_index = model.objects.size(); object_index-- > 0;) {
+        ModelObject           *object = model.objects[object_index];
+        std::vector<unsigned> &plates = project.plates.instance_plates[object_index];
+        plates.assign(object->instances.size(), 1);
+        for (std::size_t instance_index = object->instances.size(); instance_index-- > 0;) {
+            ModelInstance *instance = object->instances[instance_index];
+            if (plate_count > 1) {
+                const BoundingBoxf3 box   = object->instance_bounding_box(instance_index);
+                const int           plate = grid.plate_at(Vec2d(box.center().x(), box.center().y()));
+                plates[instance_index]    = static_cast<unsigned>(plate + 1);
+                if (plate >= 0) {
+                    const Vec2d origin = grid.origin(plate);
+                    instance->set_offset(instance->get_offset() - Vec3d(origin.x(), origin.y(), 0.));
+                }
+            }
+            if (selected_plate != 0 && plates[instance_index] != selected_plate) {
+                object->delete_instance(instance_index);
+                plates.erase(plates.begin() + instance_index);
+            }
+        }
+        object->invalidate_bounding_box();
+        if (object->instances.empty()) {
+            model.delete_object(object_index);
+            project.plates.instance_plates.erase(project.plates.instance_plates.begin() + object_index);
+        }
     }
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
@@ -412,10 +449,12 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
                   WorkerErrorCategory::Input);
 }
 
-// Loads one model file the request names. A project archive contributes its
-// selected plate, and its configuration is kept in `project`.
+// Loads one model file the request names. A project archive contributes the
+// plate `selected_plate` names, or every plate when it is 0, and its
+// configuration is kept in `project`.
 SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
-                                       const std::string &relative_path, Model &model, ProjectPlate &project)
+                                       const std::string &relative_path, Model &model, ProjectPlate &project,
+                                       unsigned selected_plate)
 {
     std::filesystem::path input_path;
     WorkerManifestError path_error;
@@ -431,7 +470,9 @@ SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, c
 
     const std::string extension = lowercase_extension(relative_path);
     if (extension == ".3mf") {
-        if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project); !loaded.success)
+        if (const SinglePlateSliceResult loaded =
+                load_project_plate(request, input_path, model, project, selected_plate, request.plate_index);
+            !loaded.success)
             return loaded;
         if (model.objects.empty())
             return failure("empty_plate_selection", "The selected plate contains no printable objects.",
@@ -478,8 +519,10 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
             Model loaded;
             // Only the first archive's configuration seeds the plate, so the
             // order of the request decides which project settings apply.
+            // Objects are numbered across every plate, exactly as the
+            // inspection the browser composed them from numbered them.
             ProjectPlate file_project;
-            if (const SinglePlateSliceResult result = load_model_file(request, job_root, placed.model, loaded, file_project);
+            if (const SinglePlateSliceResult result = load_model_file(request, job_root, placed.model, loaded, file_project, 0);
                 !result.success)
                 return result;
             if (file_project.loaded && !project.loaded) {
@@ -669,7 +712,8 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             if (const SinglePlateSliceResult assembled = assemble_plate(request, job_root, model, project, throw_if_canceled);
                 !assembled.success)
                 return assembled;
-        } else if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+        } else if (const SinglePlateSliceResult loaded =
+                       load_model_file(request, job_root, request.input_model, model, project, request.plate_index);
                    !loaded.success) {
             return loaded;
         }
@@ -837,7 +881,8 @@ SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, con
             callbacks.progress({"input", 5, "Loading model"});
         Model model;
         ProjectPlate project;
-        if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+        // Every plate is inspected, so the browser can rebuild each of them.
+        if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project, 0);
             !loaded.success)
             return loaded;
         if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
@@ -861,7 +906,7 @@ SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, con
             return failure(path_error.code, path_error.message, path_error.category);
         std::string export_error;
         const std::string model_format = lowercase_extension(request.input_model).substr(1);
-        if (!write_model_inspection(model, project.declares_plate, model_format, mesh->temporary_path(),
+        if (!write_model_inspection(model, project.declares_plate, project.plates, model_format, mesh->temporary_path(),
                                     inspection->temporary_path(), export_error))
             return failure("mesh_export_failed", export_error, WorkerErrorCategory::Internal);
         if (request.max_output_bytes) {

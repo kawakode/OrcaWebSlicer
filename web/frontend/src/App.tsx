@@ -3,6 +3,7 @@ import { Vector3 } from "three";
 
 import {
   artifactUrl,
+  cancelBatch,
   cancelJob,
   listProfiles,
   readEffectiveProfile,
@@ -11,19 +12,24 @@ import {
   readMesh,
   readSettingsCatalog,
   retryJob,
+  submitBatch,
   submitJob,
   uploadModel,
 } from "./api";
 import { decodeObjectMesh } from "./plater/mesh";
 import {
+  addToPlates,
   arrange,
   bedBounds,
   fitsBed,
   itemBounds,
   parseBed,
   placementFromMatrix,
+  plateLabel,
   plateObjects,
   type Bed,
+  type LoadedItem,
+  type Plate,
   type PlateItem,
 } from "./plater/plate";
 import { PlaterView } from "./plater/PlaterView";
@@ -67,33 +73,69 @@ async function waitForJob(jobId: string): Promise<Job> {
   }
 }
 
+const isActive = (job: Job | null) => job !== null && !TERMINAL_STATES.includes(job.state);
+const hasPreview = (job: Job | null) =>
+  job?.state === "succeeded" && job.artifacts.some((artifact) => artifact.name === "preview");
+
 let nextItemId = 0;
 const newItemId = () => `item-${++nextItemId}`;
+let nextPlateId = 0;
+const newPlate = (): Plate => ({
+  id: `plate-${++nextPlateId}`,
+  name: "",
+  items: [],
+  job: null,
+});
 
-/** Load an upload's display geometry and turn each object instance into a plate item. */
-async function loadItems(uploadId: string, inspectionJob: Job, bed: Bed): Promise<{ items: PlateItem[]; loose: boolean }> {
+/**
+ * Load an upload's display geometry and turn each object instance into a plate
+ * item, on the plate of the file that holds it.
+ */
+async function loadItems(
+  uploadId: string,
+  inspectionJob: Job,
+  bed: Bed,
+): Promise<{ items: LoadedItem[]; names: string[]; loose: boolean }> {
   const job = await waitForJob(inspectionJob.job_id);
   if (job.state !== "succeeded") {
     throw new ApiError(job.error?.code ?? "inspection_failed", job.error?.message ?? "The model could not be read.", 0);
   }
   const [inspection, buffer] = await Promise.all([readInspection(job.job_id), readMesh(job.job_id)]);
   const { minX, maxX, minY, maxY } = bedBounds(bed);
-  const items: PlateItem[] = [];
+  const items: LoadedItem[] = [];
   for (const object of inspection.objects) {
     const mesh = decodeObjectMesh(buffer, object);
     const { min, max } = object.bounding_box;
     const center = new Vector3(...min).add(new Vector3(...max)).multiplyScalar(0.5);
-    const base = { uploadId, objectIndex: object.index, name: object.name || "Object", mesh, center };
+    const base = {
+      uploadId,
+      objectIndex: object.index,
+      name: object.name || "Object",
+      mesh,
+      center,
+    };
+    const centred = {
+      x: (minX + maxX) / 2,
+      y: (minY + maxY) / 2,
+      rotation: [0, 0, 0] as [number, number, number],
+      scale: 1,
+    };
     if (inspection.declares_plate) {
-      // A project keeps the placement its author chose.
+      // A project keeps the placement its author chose, plate by plate. An
+      // instance the project left off every plate joins the first one.
       for (const instance of object.instances) {
-        items.push({ ...base, id: newItemId(), ...placementFromMatrix(instance.transform, center) });
+        const placement = instance.plate === null ? centred : placementFromMatrix(instance.transform, center);
+        items.push({
+          item: { ...base, id: newItemId(), ...placement },
+          plate: instance.plate ?? 1,
+        });
       }
     } else {
-      items.push({ ...base, id: newItemId(), x: (minX + maxX) / 2, y: (minY + maxY) / 2, rotation: [0, 0, 0], scale: 1 });
+      items.push({ item: { ...base, id: newItemId(), ...centred }, plate: 1 });
     }
   }
-  return { items, loose: !inspection.declares_plate };
+  const names = (inspection.plates ?? []).map((plate) => plate.name);
+  return { items, names, loose: !inspection.declares_plate };
 }
 
 export default function App() {
@@ -106,15 +148,28 @@ export default function App() {
   const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
   const [profileValues, setProfileValues] = useState<Record<string, ProfileValue>>({});
   const [bed, setBed] = useState<Bed>(DEFAULT_BED);
-  const [items, setItems] = useState<PlateItem[]>([]);
+  const [plates, setPlates] = useState<Plate[]>(() => [newPlate()]);
+  const [currentId, setCurrentId] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState<string[]>([]);
-  const [job, setJob] = useState<Job | null>(null);
   const [view, setView] = useState<"prepare" | "preview">("prepare");
   const [failure, setFailure] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
   const bedRef = useRef(bed);
   bedRef.current = bed;
+
+  // A removed plate falls back to the first one.
+  const currentIndex = Math.max(
+    0,
+    plates.findIndex((plate) => plate.id === currentId),
+  );
+  const plate = plates[currentIndex];
+  const items = plate.items;
+  const job = plate.job;
+  const plateRef = useRef(plate.id);
+  plateRef.current = plate.id;
+  const jobRef = useRef(job?.job_id);
+  jobRef.current = job?.job_id;
 
   useEffect(() => {
     readSettingsCatalog()
@@ -166,22 +221,29 @@ export default function App() {
     };
   }, [machine]);
 
-  const active = job !== null && !TERMINAL_STATES.includes(job.state);
-  const jobId = job?.job_id;
+  const setPlateJob = useCallback((plateId: string, assigned: Job) => {
+    setPlates((current) => current.map((entry) => (entry.id === plateId ? { ...entry, job: assigned } : entry)));
+  }, []);
+
+  // Every plate's running job is followed, so a whole project sliced at once
+  // reports each plate as it finishes.
+  const activeJobs = plates.flatMap((entry) => (isActive(entry.job) ? [entry.job!.job_id] : [])).join(",");
   useEffect(() => {
-    if (!jobId || !active) return;
+    if (!activeJobs) return;
     const timer = window.setInterval(() => {
-      readJob(jobId)
-        .then((read) => {
-          setJob(read);
-          if (read.state === "succeeded" && read.artifacts.some((artifact) => artifact.name === "preview")) {
-            setView("preview");
-          }
-        })
-        .catch((error) => setFailure(describe(error)));
+      for (const jobId of activeJobs.split(",")) {
+        readJob(jobId)
+          .then((read) => {
+            setPlates((current) =>
+              current.map((entry) => (entry.job?.job_id === read.job_id ? { ...entry, job: read } : entry)),
+            );
+            if (read.job_id === jobRef.current && hasPreview(read)) setView("preview");
+          })
+          .catch((error) => setFailure(describe(error)));
+      }
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [jobId, active]);
+  }, [activeJobs]);
 
   const addFiles = useCallback(async (files: File[]) => {
     setFailure(null);
@@ -189,9 +251,22 @@ export default function App() {
       setLoading((current) => [...current, file.name]);
       try {
         const stored = await uploadModel(file);
-        const { items: added, loose } = await loadItems(stored.upload_id, stored.inspection, bedRef.current);
-        setItems((current) => (loose ? arrange([...current, ...added], bedRef.current) : [...current, ...added]));
-        setSelectedId(added[0]?.id ?? null);
+        const { items: added, names, loose } = await loadItems(stored.upload_id, stored.inspection, bedRef.current);
+        // A file lands on the plate shown now, and a project's later plates on
+        // the plates after it.
+        setPlates((current) => {
+          const start = Math.max(
+            0,
+            current.findIndex((entry) => entry.id === plateRef.current),
+          );
+          const placed = addToPlates(current, start, added, names, newPlate);
+          return loose
+            ? placed.map((entry, index) =>
+                index === start ? { ...entry, items: arrange(entry.items, bedRef.current) } : entry,
+              )
+            : placed;
+        });
+        setSelectedId(added[0]?.item.id ?? null);
       } catch (error) {
         setFailure(describe(error));
       } finally {
@@ -200,24 +275,77 @@ export default function App() {
     }
   }, []);
 
-  const update = useCallback((id: string, change: Partial<PlateItem>) => {
-    setItems((current) => current.map((item) => (item.id === id ? { ...item, ...change } : item)));
+  /** Change the items of the plate shown now. */
+  const editItems = useCallback((change: (current: PlateItem[]) => PlateItem[]) => {
+    setPlates((current) =>
+      current.map((entry) => (entry.id === plateRef.current ? { ...entry, items: change(entry.items) } : entry)),
+    );
   }, []);
 
-  const remove = useCallback((id: string) => {
-    setItems((current) => current.filter((item) => item.id !== id));
+  const update = useCallback(
+    (id: string, change: Partial<PlateItem>) => {
+      editItems((current) => current.map((item) => (item.id === id ? { ...item, ...change } : item)));
+    },
+    [editItems],
+  );
+
+  const remove = useCallback(
+    (id: string) => {
+      editItems((current) => current.filter((item) => item.id !== id));
+      setSelectedId(null);
+    },
+    [editItems],
+  );
+
+  const duplicate = useCallback(
+    (id: string) => {
+      const source = items.find((item) => item.id === id);
+      if (!source) return;
+      const copy = {
+        ...source,
+        id: newItemId(),
+        x: source.x + DUPLICATE_OFFSET_MM,
+        y: source.y + DUPLICATE_OFFSET_MM,
+      };
+      editItems((current) => [...current, copy]);
+      setSelectedId(copy.id);
+    },
+    [items, editItems],
+  );
+
+  /** Move an item to another plate, at the same place on that plate's bed. */
+  const moveToPlate = useCallback((id: string, targetId: string) => {
+    setPlates((current) => {
+      const moved = current.find((entry) => entry.id === plateRef.current)?.items.find((item) => item.id === id);
+      if (!moved || targetId === plateRef.current) return current;
+      return current.map((entry) =>
+        entry.id === plateRef.current
+          ? { ...entry, items: entry.items.filter((item) => item.id !== id) }
+          : entry.id === targetId
+            ? { ...entry, items: [...entry.items, moved] }
+            : entry,
+      );
+    });
     setSelectedId(null);
   }, []);
 
-  const duplicate = useCallback((id: string) => {
-    setItems((current) => {
-      const source = current.find((item) => item.id === id);
-      if (!source) return current;
-      const copy = { ...source, id: newItemId(), x: source.x + DUPLICATE_OFFSET_MM, y: source.y + DUPLICATE_OFFSET_MM };
-      setSelectedId(copy.id);
-      return [...current, copy];
-    });
+  const showPlate = useCallback((plateId: string) => {
+    setCurrentId(plateId);
+    setSelectedId(null);
   }, []);
+
+  const addPlate = useCallback(() => {
+    const added = newPlate();
+    setPlates((current) => [...current, added]);
+    showPlate(added.id);
+  }, [showPlate]);
+
+  const removePlate = useCallback(() => {
+    const neighbour = plates[currentIndex - 1] ?? plates[currentIndex + 1];
+    if (!neighbour) return;
+    setPlates((current) => current.filter((entry) => entry.id !== plate.id));
+    showPlate(neighbour.id);
+  }, [plates, plate, currentIndex, showPlate]);
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
 
@@ -251,33 +379,23 @@ export default function App() {
   );
 
   const outside = useMemo(() => items.filter((item) => !fitsBed(item, bed)), [items, bed]);
+  const outsideAnywhere = useMemo(
+    () => plates.some((entry) => entry.items.some((item) => !fitsBed(item, bed))),
+    [plates, bed],
+  );
 
-  const slice = useCallback(async () => {
+  const submission = () => ({
+    machine_profile: machine,
+    process_profile: process,
+    filament_profile: filament,
+    settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim() !== "")),
+  });
+
+  const run = useCallback(async (action: () => Promise<void>) => {
     setBusy(true);
     setFailure(null);
     try {
-      const declared = Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim() !== ""));
-      setJob(
-        await submitJob({
-          objects: plateObjects(items),
-          machine_profile: machine,
-          process_profile: process,
-          filament_profile: filament,
-          settings: declared,
-        }),
-      );
-    } catch (error) {
-      setFailure(describe(error));
-    } finally {
-      setBusy(false);
-    }
-  }, [items, settings, machine, process, filament]);
-
-  const run = useCallback(async (action: () => Promise<Job>) => {
-    setBusy(true);
-    setFailure(null);
-    try {
-      setJob(await action());
+      await action();
     } catch (error) {
       setFailure(describe(error));
     } finally {
@@ -285,9 +403,59 @@ export default function App() {
     }
   }, []);
 
-  const ready =
-    items.length > 0 && outside.length === 0 && loading.length === 0 && Boolean(machine && process && filament) && !busy && !active;
-  const previewable = job?.state === "succeeded" && job.artifacts.some((artifact) => artifact.name === "preview");
+  const slice = () =>
+    run(async () => {
+      const target = plate;
+      setPlateJob(
+        target.id,
+        await submitJob({
+          ...submission(),
+          objects: plateObjects(target.items),
+          plate: currentIndex + 1,
+          plate_name: target.name || undefined,
+          plate_index: target.sourcePlate,
+        }),
+      );
+    });
+
+  // Empty plates are left out, and the rest keep their numbers.
+  const sliceAll = () =>
+    run(async () => {
+      const numbered = plates
+        .map((entry, index) => ({ entry, number: index + 1 }))
+        .filter(({ entry }) => entry.items.length > 0);
+      const batch = await submitBatch({
+        ...submission(),
+        plates: numbered.map(({ entry, number }) => ({
+          objects: plateObjects(entry.items),
+          plate: number,
+          plate_index: entry.sourcePlate,
+          name: entry.name || undefined,
+        })),
+      });
+      for (const { entry, number } of numbered) {
+        const assigned = batch.jobs.find((candidate) => candidate.request.plate === number);
+        if (assigned) setPlateJob(entry.id, assigned);
+      }
+    });
+
+  // A whole batch is canceled at once; a plate sliced on its own by itself.
+  const cancelAll = () =>
+    run(async () => {
+      const active = plates.flatMap((entry) => (isActive(entry.job) ? [entry.job!] : []));
+      const batches = new Set(active.flatMap((entry) => (entry.batch_id ? [entry.batch_id] : [])));
+      await Promise.all([
+        ...[...batches].map((batchId) => cancelBatch(batchId)),
+        ...active.filter((entry) => !entry.batch_id).map((entry) => cancelJob(entry.job_id)),
+      ]);
+    });
+
+  const active = isActive(job);
+  const anyActive = activeJobs !== "";
+  const profilesReady = Boolean(machine && process && filament) && loading.length === 0 && !busy;
+  const ready = items.length > 0 && outside.length === 0 && profilesReady && !active;
+  const readyAll = plates.some((entry) => entry.items.length > 0) && !outsideAnywhere && profilesReady && !anyActive;
+  const previewable = hasPreview(job);
 
   return (
     <div className="app">
@@ -314,6 +482,32 @@ export default function App() {
             Preview
           </button>
         </nav>
+        <div className="plates">
+          <nav className="tabs" role="tablist" aria-label="Plates">
+            {plates.map((entry, index) => (
+              <button
+                key={entry.id}
+                type="button"
+                role="tab"
+                aria-selected={entry.id === plate.id}
+                data-testid="plate-tab"
+                onClick={() => showPlate(entry.id)}
+              >
+                {plateLabel(entry, index)}
+                {entry.items.length > 0 && <span className="count"> ({entry.items.length})</span>}
+              </button>
+            ))}
+          </nav>
+          <button
+            type="button"
+            className="secondary"
+            data-testid="add-plate"
+            aria-label="Add a plate"
+            onClick={addPlate}
+          >
+            +
+          </button>
+        </div>
       </header>
 
       <main className="workspace">
@@ -327,13 +521,13 @@ export default function App() {
               onMove={(id, x, y) => update(id, { x, y })}
             />
           ) : (
-            <PreviewView jobId={job!.job_id} />
+            <PreviewView key={job!.job_id} jobId={job!.job_id} />
           )}
         </section>
 
         <aside className="sidebar">
           <section>
-            <h2>Plate</h2>
+            <h2 data-testid="plate-heading">{plateLabel(plate, currentIndex)}</h2>
             <input
               type="file"
               accept=".stl,.obj,.3mf"
@@ -371,14 +565,31 @@ export default function App() {
               })}
             </ul>
             <div className="row">
-              <button type="button" data-testid="arrange" disabled={items.length === 0} onClick={() => setItems(arrange(items, bed))}>
+              <button
+                type="button"
+                data-testid="arrange"
+                disabled={items.length === 0}
+                onClick={() => editItems((current) => arrange(current, bed))}
+              >
                 Arrange
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                data-testid="remove-plate"
+                disabled={plates.length < 2}
+                onClick={removePlate}
+              >
+                Remove plate
               </button>
             </div>
             {selected && (
               <ObjectPanel
                 item={selected}
+                plates={plates}
+                plateId={plate.id}
                 onChange={(change) => update(selected.id, change)}
+                onMove={(targetId) => moveToPlate(selected.id, targetId)}
                 onDuplicate={() => duplicate(selected.id)}
                 onDelete={() => remove(selected.id)}
               />
@@ -418,19 +629,35 @@ export default function App() {
             <button type="button" data-testid="slice" disabled={!ready} onClick={slice}>
               Slice plate
             </button>
+            {plates.length > 1 && (
+              <button type="button" data-testid="slice-all" disabled={!readyAll} onClick={sliceAll}>
+                Slice all plates
+              </button>
+            )}
             <button
               type="button"
               data-testid="cancel"
               disabled={!active || busy}
-              onClick={() => job && run(() => cancelJob(job.job_id))}
+              onClick={() => job && run(async () => setPlateJob(plate.id, await cancelJob(job.job_id)))}
             >
               Cancel
             </button>
+            {plates.length > 1 && (
+              <button
+                type="button"
+                className="secondary"
+                data-testid="cancel-all"
+                disabled={!anyActive || busy}
+                onClick={cancelAll}
+              >
+                Cancel all
+              </button>
+            )}
             <button
               type="button"
               data-testid="retry"
               disabled={!job || active || busy}
-              onClick={() => job && run(() => retryJob(job.job_id))}
+              onClick={() => job && run(async () => setPlateJob(plate.id, await retryJob(job.job_id)))}
             >
               Retry
             </button>
@@ -452,10 +679,39 @@ export default function App() {
             </p>
           )}
 
+          {plates.length > 1 && <PlateSummary plates={plates} onShow={showPlate} />}
+
           {job && <JobPanel job={job} />}
         </aside>
       </main>
     </div>
+  );
+}
+
+/** Every plate's latest slice, so a project sliced at once can be followed and downloaded. */
+function PlateSummary(props: { plates: Plate[]; onShow: (plateId: string) => void }) {
+  return (
+    <section className="plate-summary">
+      <h2>Plates</h2>
+      <ul data-testid="plate-summary">
+        {props.plates.map((entry, index) => (
+          <li key={entry.id} data-testid="plate-status" data-state={entry.job?.state ?? "unsliced"}>
+            <button type="button" className="link" onClick={() => props.onShow(entry.id)}>
+              {plateLabel(entry, index)}
+            </button>{" "}
+            {entry.items.length === 0 ? "empty" : (entry.job?.state ?? "not sliced")}
+            {entry.job?.state === "succeeded" && (
+              <>
+                {" "}
+                <a data-testid="plate-download" href={artifactUrl(entry.job.job_id, "gcode")} download>
+                  G-code
+                </a>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -495,7 +751,10 @@ function NumberField(props: {
 
 function ObjectPanel(props: {
   item: PlateItem;
+  plates: Plate[];
+  plateId: string;
   onChange: (change: Partial<PlateItem>) => void;
+  onMove: (plateId: string) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
@@ -521,6 +780,23 @@ function ObjectPanel(props: {
         step={5}
         onCommit={(percent) => percent > 0 && onChange({ scale: percent / 100 })}
       />
+      {props.plates.length > 1 && (
+        <div className="field wide">
+          <label htmlFor="object-plate">Plate</label>
+          <select
+            id="object-plate"
+            data-testid="object-plate"
+            value={props.plateId}
+            onChange={(event) => props.onMove(event.target.value)}
+          >
+            {props.plates.map((entry, index) => (
+              <option key={entry.id} value={entry.id}>
+                {plateLabel(entry, index)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="row">
         <button type="button" data-testid="duplicate" onClick={props.onDuplicate}>
           Duplicate
@@ -573,6 +849,7 @@ function JobPanel({ job }: { job: Job }) {
     <section className="job">
       <h2>Job</h2>
       <p>
+        {job.request.plate && <span data-testid="job-plate">Plate {job.request.plate}: </span>}
         <code data-testid="job-id">{job.job_id}</code> — <strong data-testid="job-state">{job.state}</strong>
         {job.retry_of && <span data-testid="retry-of"> (retry of {job.retry_of})</span>}
       </p>

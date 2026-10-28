@@ -1,8 +1,10 @@
 #include "ProjectArchive.hpp"
 
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -32,7 +34,49 @@ WorkerManifestError limit_error(const char *code, const char *message)
     return {code, message, WorkerErrorCategory::ResourceLimit};
 }
 
+// PartPlate.cpp keeps plates a fifth of a bed apart.
+constexpr double PLATE_GAP = 1. / 5.;
+
+// compute_colum_count() in PartPlate.hpp, including its float rounding.
+int plate_columns(int count)
+{
+    const float value       = std::sqrt(static_cast<float>(count));
+    const float round_value = std::round(value);
+    return value > round_value ? static_cast<int>(round_value) + 1 : static_cast<int>(round_value);
+}
+
 } // namespace
+
+Vec2d ProjectPlateGrid::origin(int plate) const
+{
+    return {(plate % columns) * stride.x(), -(plate / columns) * stride.y()};
+}
+
+int ProjectPlateGrid::plate_at(const Vec2d &point) const
+{
+    const Vec2d  relative = point - bed.center();
+    const double column   = std::round(relative.x() / stride.x());
+    const double row      = std::round(-relative.y() / stride.y());
+    if (column < 0 || column >= columns || row < 0)
+        return -1;
+    const double plate = row * columns + column;
+    return plate < plate_count ? static_cast<int>(plate) : -1;
+}
+
+ProjectPlateGrid project_plate_grid(const DynamicPrintConfig &config, int plate_count)
+{
+    ProjectPlateGrid grid;
+    if (const ConfigOptionPoints *area = config.option<ConfigOptionPoints>("printable_area"); area && !area->values.empty())
+        grid.bed = BoundingBoxf(area->values);
+    else
+        grid.bed = BoundingBoxf(Vec2d(0., 0.), Vec2d(200., 200.));
+    // The desktop stores the plate size as whole millimetres.
+    const Vec2d size = grid.bed.size();
+    grid.stride      = Vec2d(std::max(1., std::trunc(size.x())), std::max(1., std::trunc(size.y()))) * (1. + PLATE_GAP);
+    grid.plate_count = std::max(1, plate_count);
+    grid.columns     = plate_columns(grid.plate_count);
+    return grid;
+}
 
 bool is_contained_archive_entry_name(const std::string &name)
 {

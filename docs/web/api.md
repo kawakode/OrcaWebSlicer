@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract; extended for G5
+Status: Active contract; extended for G5 and for multiple plates
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -25,6 +25,9 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/settings` | The engine's catalog of overridable settings |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
 | `POST` | `/jobs` | Submit one slice request |
+| `POST` | `/batches` | Slice every plate of a project, one job per plate |
+| `GET` | `/batches/{batch_id}` | Read a batch's state and its jobs |
+| `POST` | `/batches/{batch_id}/cancel` | Cancel a batch's unfinished jobs |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
@@ -69,6 +72,39 @@ millimetres per instance. The worker applies those transforms unchanged:
 
 Each upload a plate uses is staged into the job once, whatever the number of
 objects that reference it. A plate holds at most 256 objects from 16 uploads.
+
+A request may name the browser project's plate it slices with `plate`, a number
+from 1 to 36, and `plate_name`, at most 64 characters. They are recorded on the
+job and name its artifacts, and never reach the worker. `plate_index` keeps its
+worker meaning: the archive plate selected, or whose own settings apply.
+
+## Plates and batches
+
+A project's plates are sliced as one batch, each plate an ordinary job
+([ADR 0003](adr/0003-multiple-plates.md)):
+
+```json
+{
+  "plates": [
+    {"objects": [...], "name": "Brackets"},
+    {"objects": [...], "plate": 3, "plate_index": 2}
+  ],
+  "machine_profile": "...",
+  "process_profile": "...",
+  "filament_profile": "...",
+  "settings": {"layer_height": "0.28"}
+}
+```
+
+Every plate shares the profiles and overrides. A plate's `plate` defaults to its
+position, so empty plates can be left out without renumbering the rest, and two
+plates may not share a number (`invalid_batch`). Every plate is validated before
+the first job is accepted, so a refused batch leaves no job behind. The reply is
+the batch: its `batch_id`, an aggregate `state`, and its `jobs`, each of which
+records `batch_id` and is read, canceled, retried, and downloaded like any
+other job. A batch is `queued` while all its jobs are, `running` until the last
+one finishes, then `failed` if any plate failed, `canceled` if any was canceled,
+and otherwise `succeeded`. Cancelling a batch cancels its unfinished jobs.
 
 Overrides are checked against the engine's [settings catalog](#settings) before
 any worker starts: an unknown key is `unknown_setting`, and a value of the wrong
@@ -120,6 +156,8 @@ relative paths never reach a URL.
 - `result` is available once the executor validated a terminal `result.json`,
   whatever the outcome, because a failed run's report is the useful part.
 - `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
+  A job that names its `plate` downloads them as `<job>-plate-<n>.gcode`,
+  `<job>-plate-<n>-preview.bin`, and so on, so a project's files stay apart.
 - `mesh` and `inspection` are published by a succeeded inspection.
 
 The layer preview is also served in pages: `GET

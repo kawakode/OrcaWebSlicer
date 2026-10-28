@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { Vector3 } from "three";
 
-import { arrange, fitsBed, itemBounds, itemMatrix, parseBed, placementFromMatrix, plateObjects, rowMajor, type PlateItem } from "./plate";
+import {
+  addToPlates,
+  arrange,
+  fitsBed,
+  itemBounds,
+  itemMatrix,
+  parseBed,
+  placementFromMatrix,
+  plateLabel,
+  plateObjects,
+  rowMajor,
+  type Plate,
+  type PlateItem,
+} from "./plate";
 
 // A 20 mm cube from 0 to 20 on every axis, as tests/data/20mm_cube.obj is.
 const CUBE = {
@@ -91,5 +104,48 @@ describe("plate placement", () => {
     expect(objects).toHaveLength(2);
     expect(objects[0].instances).toHaveLength(2);
     expect(objects[1].object).toBe(1);
+  });
+});
+
+describe("project plates", () => {
+  let created = 0;
+  const plate = (overrides: Partial<Plate> = {}): Plate => ({ id: `plate-${++created}`, name: "", items: [], job: null, ...overrides });
+
+  it("lands a project's plates in order from the plate shown", () => {
+    const start = [plate({ items: [cube("kept")] }), plate()];
+    const placed = addToPlates(
+      start,
+      1,
+      [
+        { item: cube("a"), plate: 1 },
+        { item: cube("b"), plate: 2 },
+        { item: cube("c"), plate: 2 },
+      ],
+      ["Brackets", ""],
+      () => plate(),
+    );
+    expect(placed).toHaveLength(3);
+    expect(placed[0].items.map((item) => item.id)).toEqual(["kept"]);
+    expect(placed[1].items.map((item) => item.id)).toEqual(["a"]);
+    expect(placed[2].items.map((item) => item.id)).toEqual(["b", "c"]);
+    // The file's plate names and numbers follow its plates.
+    expect(placed[1].name).toBe("Brackets");
+    expect(placed[1].sourcePlate).toBe(1);
+    expect(placed[2].sourcePlate).toBe(2);
+    expect(plateLabel(placed[2], 2)).toBe("Plate 3");
+    // The input is left untouched.
+    expect(start[1].items).toHaveLength(0);
+  });
+
+  it("puts a mesh on the plate shown without naming it", () => {
+    const placed = addToPlates([plate({ name: "Mine" })], 0, [{ item: cube("a"), plate: 1 }], [], () => plate());
+    expect(placed).toHaveLength(1);
+    expect(placed[0].name).toBe("Mine");
+    expect(placed[0].sourcePlate).toBeUndefined();
+  });
+
+  it("creates the empty plates a project declares", () => {
+    const placed = addToPlates([plate()], 0, [{ item: cube("a"), plate: 1 }], ["", "", ""], () => plate());
+    expect(placed.map((entry) => entry.items.length)).toEqual([1, 0, 0]);
   });
 });
