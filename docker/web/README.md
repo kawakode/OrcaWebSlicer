@@ -50,6 +50,9 @@ a project archive. Override them with `ORCA_WEB_MAX_INPUT_BYTES`,
 `ORCA_WEB_MAX_EXTRACTED_BYTES`. Values are byte counts except wall time, which
 is milliseconds. Manifest limits can only tighten these server ceilings.
 
+The same services run in CI through `scripts/run_web_service.py`; see
+[Continuous integration](../../docs/web/baseline.md#continuous-integration).
+
 ## Run the API and the browser screen
 
 ```powershell

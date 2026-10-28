@@ -1,0 +1,300 @@
+name: Web checks
+
+# Runs the docker/web/compose.yml checks on every pull request. Each step calls
+# scripts/run_web_service.py, which executes the Compose service's own command
+# on the runner, so the Compose file stays the single definition of each check.
+# Caches and expected durations are documented in docs/web/baseline.md.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'localization/**'
+      - 'doc/**'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'localization/**'
+      - 'doc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Interpolated into the Compose services' CMAKE_BUILD_PARALLEL_LEVEL.
+  ORCA_WEB_BUILD_JOBS: 4
+  CCACHE_MAXSIZE: 1500M
+
+jobs:
+  deps:
+    name: Dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      cache-key: ${{ steps.key.outputs.cache-key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      # Same key and path as build_check_cache.yml's amd64 Linux build, so the
+      # desktop and web workflows share one dependency build.
+      - name: Compute the cache key
+        id: key
+        run: echo "cache-key=linux-clang-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Look up the dependency build
+        id: lookup
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: ${{ steps.key.outputs.cache-key }}
+          lookup-only: true
+
+      - name: Apt-Install Dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: ./.github/actions/apt-install-deps
+
+      - uses: lukka/get-cmake@latest
+        if: steps.lookup.outputs.cache-hit != 'true'
+        with:
+          cmakeVersion: "4.3.0"
+
+      - name: Build the dependencies
+        if: steps.lookup.outputs.cache-hit != 'true'
+        run: ./build_linux.sh -drlL
+
+      - name: Save the dependency build
+        if: steps.lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+          key: ${{ steps.key.outputs.cache-key }}
+
+  worker:
+    name: Worker build, smoke and matrix
+    needs: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - uses: ./.github/actions/web-host
+        with:
+          native: 'true'
+          deps-cache-key: ${{ needs.deps.outputs.cache-key }}
+
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: /cache/ccache
+          key: web-worker-ccache-${{ github.sha }}
+          restore-keys: web-worker-ccache-
+
+      - name: worker-build
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: python3 scripts/run_web_service.py worker-build
+
+      # Pull requests read main's compiler cache; they only save one when none
+      # existed, so parallel branches cannot evict the dependency build.
+      - name: Save ccache
+        if: always() && (steps.ccache.outputs.cache-matched-key == '' || github.event_name != 'pull_request')
+        uses: actions/cache/save@v6
+        with:
+          path: /cache/ccache
+          key: web-worker-ccache-${{ github.sha }}
+
+      - name: worker-smoke
+        run: python3 scripts/run_web_service.py worker-smoke
+
+      - name: worker-matrix
+        run: python3 scripts/run_web_service.py worker-matrix
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: orca-slicer-worker
+          path: build-worker/src/Release/orca-slicer-worker
+          retention-days: 7
+
+  native-baseline:
+    name: Native baseline
+    needs: deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      ORCA_WEB_GIT_COMMIT: ${{ github.sha }}
+      ORCA_WEB_GIT_DIRTY: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      # The reference only changes with the desktop slicer, its dependencies,
+      # the baseline profiles, or the baseline runner. Web-only changes reuse it.
+      - name: Restore the native baseline
+        id: baseline
+        uses: actions/cache/restore@v6
+        with:
+          path: build/web-baseline
+          key: web-native-baseline-${{ hashFiles('deps/**', 'deps_src/**', 'src/**', '!src/libslic3r/Web/**', '!src/OrcaSlicerWorker.cpp', 'CMakeLists.txt', 'cmake/**', 'resources/profiles/Anycubic.json', 'resources/profiles/Anycubic/**', 'docs/web/baseline-cases.json', 'scripts/web_baseline.py') }}
+
+      - uses: ./.github/actions/web-host
+        if: steps.baseline.outputs.cache-hit != 'true'
+        with:
+          native: 'true'
+          deps-cache-key: ${{ needs.deps.outputs.cache-key }}
+
+      - name: Restore ccache
+        id: ccache
+        if: steps.baseline.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: /cache/ccache
+          key: web-desktop-ccache-${{ github.sha }}
+          restore-keys: web-desktop-ccache-
+
+      # The Compose "build" service also rebuilds the dependencies and the
+      # whole test suite; the baseline only needs the packaged desktop slicer.
+      - name: Build the desktop slicer
+        if: steps.baseline.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: /cache/ccache
+          CMAKE_CCACHE: ccache
+        run: ./build_linux.sh -j "$ORCA_WEB_BUILD_JOBS" -srlL
+
+      - name: Save ccache
+        if: always() && steps.baseline.outputs.cache-hit != 'true' && (steps.ccache.outputs.cache-matched-key == '' || github.event_name != 'pull_request')
+        uses: actions/cache/save@v6
+        with:
+          path: /cache/ccache
+          key: web-desktop-ccache-${{ github.sha }}
+
+      - name: baseline
+        if: steps.baseline.outputs.cache-hit != 'true'
+        run: python3 scripts/run_web_service.py baseline
+
+      - name: Save the native baseline
+        if: steps.baseline.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: build/web-baseline
+          key: ${{ steps.baseline.outputs.cache-primary-key }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-native-baseline
+          path: build/web-baseline
+          retention-days: 30
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      # Same Node line as docker/web/Dockerfile.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - uses: ./.github/actions/web-host
+
+      - name: frontend-build
+        run: python3 scripts/run_web_service.py frontend-build
+
+  integration:
+    name: Executor and baseline parity
+    needs: [worker, native-baseline]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - uses: ./.github/actions/web-host
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: orca-slicer-worker
+          path: build-worker/src/Release
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-native-baseline
+          path: build/web-baseline
+
+      - name: Restore the worker's executable bit
+        run: chmod +x build-worker/src/Release/orca-slicer-worker
+
+      - name: executor-smoke
+        run: python3 scripts/run_web_service.py executor-smoke
+
+      - name: worker-baseline
+        run: python3 scripts/run_web_service.py worker-baseline
+
+      - name: api-baseline
+        run: python3 scripts/run_web_service.py api-baseline
+
+  e2e:
+    name: Browser end-to-end
+    needs: worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - uses: ./.github/actions/web-host
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: orca-slicer-worker
+          path: build-worker/src/Release
+
+      - name: Restore the worker's executable bit
+        run: chmod +x build-worker/src/Release/orca-slicer-worker
+
+      - name: Restore the Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: /cache/playwright
+          key: web-playwright-${{ hashFiles('web/frontend/package-lock.json') }}
+
+      # Chromium and Firefox block; the service reports WebKit failures
+      # without failing, as docs/web/mvp.md requires.
+      - name: frontend-e2e
+        run: python3 scripts/run_web_service.py frontend-e2e
+
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-traces
+          path: web/frontend/test-results
+          retention-days: 7
