@@ -11,7 +11,16 @@ const BROWSERS = new Set(["chromium", ...(process.env.ORCA_WEB_E2E_BROWSERS ?? "
 const projects = [
   { name: "chromium", use: { browserName: "chromium" as const } },
   { name: "msedge", use: { browserName: "chromium" as const, channel: "msedge" } },
-  { name: "firefox", use: { browserName: "firefox" as const } },
+  // Headless Firefox cannot create a WebGL context without a GPU. CI sets
+  // ORCA_WEB_E2E_HEADED and runs under Xvfb, where Mesa's software GL works.
+  {
+    name: "firefox",
+    use: {
+      browserName: "firefox" as const,
+      headless: !process.env.ORCA_WEB_E2E_HEADED,
+      launchOptions: { firefoxUserPrefs: { "webgl.force-enabled": true } },
+    },
+  },
   { name: "webkit", use: { browserName: "webkit" as const } },
 ].filter((project) => BROWSERS.has(project.name));
 

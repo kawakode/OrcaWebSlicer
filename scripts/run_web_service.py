@@ -36,11 +36,13 @@ def main():
     if service is None or not service.get("command"):
         parser.error("compose service {!r} has no command".format(args.service))
 
+    # `config` keeps Compose's `$$` escapes; a container would see a single `$`.
+    command = [argument.replace("$$", "$") for argument in service["command"]]
     environment = dict(os.environ)
     environment.update({key: value for key, value in (service.get("environment") or {}).items() if value is not None})
     os.chdir(service.get("working_dir", "/workspace"))
     sys.stdout.flush()
-    os.execvpe(service["command"][0], service["command"], environment)
+    os.execvpe(command[0], command, environment)
 
 
 if __name__ == "__main__":
