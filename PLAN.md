@@ -210,7 +210,21 @@ The next phase goes beyond the single-plate MVP toward desktop feature parity
 - [x] The complete supported workflow works without installing the desktop app.
 - [x] Desktop behavior and native baseline tests remain unchanged.
 
-## Phase 3b: Beyond the single-plate MVP
+## Phase 3b: Beyond the MVP
+
+Work toward desktop feature parity, in independent batches. Each batch keeps the
+checks below green in CI.
+
+### Continuous integration of the web checks
+
+- [x] Run the Compose checks on every pull request with GitHub Actions:
+  worker build, `worker-smoke`, `worker-matrix`, `executor-smoke`,
+  `frontend-build`, Chromium and Firefox end-to-end tests (WebKit reported but
+  not blocking), `worker-baseline`, and `api-baseline`.
+- [x] Produce the native desktop baseline in CI and cache it until the desktop
+  slicer, its dependencies, or the baseline inputs change.
+- [x] Document the jobs, caches, and expected durations in
+  [`docs/web/baseline.md`](docs/web/baseline.md#continuous-integration).
 
 ### Multiple plates
 
@@ -257,8 +271,9 @@ The next phase goes beyond the single-plate MVP toward desktop feature parity
 
 ### 17. Complete release and compliance work
 
-- [ ] Add CI jobs for headless builds, contract tests, semantic parity, browser
-  tests, dependency audits, and container security checks.
+- [x] Add CI jobs for headless builds, contract tests, semantic parity, and
+  browser tests (`.github/workflows/web.yml`, see Phase 3b).
+- [ ] Add CI jobs for dependency audits and container security checks.
 - [ ] Review AGPLv3 section 13 obligations before public hosting.
 - [ ] Prominently offer the exact corresponding source for the deployed version.
 - [ ] Document third-party licenses, privacy behavior, retention, security
