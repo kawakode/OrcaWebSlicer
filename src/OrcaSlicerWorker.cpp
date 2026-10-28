@@ -654,25 +654,38 @@ int main(int argc, char **argv)
         callbacks.cancellation_requested = []() { return cancellation_requested(); };
         callbacks.memory_usage_bytes = []() { return peak_memory_bytes(); };
         const Slic3r::Web::SinglePlateSliceResult result =
-            Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
+            validation.request->operation == Slic3r::Web::WorkerOperation::Inspect ?
+                Slic3r::Web::inspect_model(*validation.request, job_root, callbacks) :
+                Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);
+        // Every published artifact is withdrawn together, so a job never
+        // reports some of its outputs and silently drops the rest.
+        const auto withdraw_artifacts = [&job_root, &result]() {
+            std::error_code ignored;
+            for (const auto &[kind, path] : result.artifacts)
+                std::filesystem::remove(job_root / path, ignored);
+        };
         if (result.success) {
-            const std::filesystem::path artifact_path = job_root / validation.request->output_gcode;
-            std::string sha256;
-            if (!cancellation_requested())
-                sha256 = sha256_file(artifact_path, error);
+            std::vector<Slic3r::Web::WorkerArtifact> artifacts;
+            for (const auto &[kind, path] : result.artifacts) {
+                if (cancellation_requested())
+                    break;
+                const std::filesystem::path artifact_path = job_root / path;
+                const std::string sha256 = sha256_file(artifact_path, error);
+                if (sha256.empty())
+                    break;
+                artifacts.push_back({kind, path, std::filesystem::file_size(artifact_path), sha256});
+            }
             if (cancellation_requested()) {
-                std::error_code ignored;
-                std::filesystem::remove(artifact_path, ignored);
+                withdraw_artifacts();
                 const Slic3r::Web::WorkerManifestError cancellation_error {
                     "job_canceled", "The slicing job was canceled.", Slic3r::Web::WorkerErrorCategory::Cancellation
                 };
                 emitter.error(cancellation_error);
                 final_result.outcome = Slic3r::Web::WorkerJobState::Canceled;
                 final_result.error = cancellation_error;
-            } else if (sha256.empty()) {
-                std::error_code ignored;
-                std::filesystem::remove(artifact_path, ignored);
+            } else if (artifacts.size() != result.artifacts.size()) {
+                withdraw_artifacts();
                 const Slic3r::Web::WorkerManifestError hash_error {
                     "artifact_hash_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
                 };
@@ -680,12 +693,11 @@ int main(int argc, char **argv)
                 final_result.outcome = Slic3r::Web::WorkerJobState::Failed;
                 final_result.error = hash_error;
             } else {
-                Slic3r::Web::WorkerArtifact artifact {
-                    "gcode", validation.request->output_gcode, std::filesystem::file_size(artifact_path), sha256
-                };
                 final_result.outcome = Slic3r::Web::WorkerJobState::Succeeded;
-                final_result.artifacts.push_back(artifact);
-                emitter.artifact(artifact);
+                for (const Slic3r::Web::WorkerArtifact &artifact : artifacts) {
+                    final_result.artifacts.push_back(artifact);
+                    emitter.artifact(artifact);
+                }
             }
         } else {
             const Slic3r::Web::WorkerManifestError slice_error {
@@ -699,10 +711,8 @@ int main(int argc, char **argv)
 
         finish_timing(final_result, started, cpu_started);
         if (!write_result(job_root, final_result, error)) {
-            if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded) {
-                std::error_code ignored;
-                std::filesystem::remove(job_root / validation.request->output_gcode, ignored);
-            }
+            if (final_result.outcome == Slic3r::Web::WorkerJobState::Succeeded)
+                withdraw_artifacts();
             const Slic3r::Web::WorkerManifestError result_error {
                 "result_publish_failed", error, Slic3r::Web::WorkerErrorCategory::Internal
             };

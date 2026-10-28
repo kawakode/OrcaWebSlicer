@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import io
 import sys
 import tempfile
@@ -78,6 +79,11 @@ class ApiTests(unittest.TestCase):
         body.update(overrides)
         return self.client.post("/api/v1/jobs", json=body)
 
+    def slice_jobs(self):
+        # Every upload is also inspected by a worker; only slices count here.
+        jobs = self.client.get("/api/v1/jobs").json()["jobs"]
+        return [job for job in jobs if job["operation"] == "slice"]
+
     def wait(self, job_id, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -100,7 +106,7 @@ class ApiTests(unittest.TestCase):
         submission = document["components"]["schemas"]["SliceSubmission"]
         self.assertEqual(
             sorted(submission["required"]),
-            ["filament_profile", "machine_profile", "process_profile", "upload_id"],
+            ["filament_profile", "machine_profile", "process_profile"],
         )
 
     def test_lists_bundled_profiles_and_narrows_them_to_a_printer(self):
@@ -148,6 +154,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(body["values"]["sparse_infill_density"], "15%")
         self.assertEqual(body["values"]["filament_type"], ["PLA"])
         self.assertNotIn("wall_loops", body["values"])
+        self.assertEqual(body["bed"]["printable_height"], "250")
         self.assertEqual(body["profiles"]["process"]["inherits_chain"], ["fdm_process_common", "0.20mm Standard @Test"])
 
         mismatched = self.client.get(
@@ -169,8 +176,86 @@ class ApiTests(unittest.TestCase):
                 response = self.submit(settings=settings)
                 self.assertEqual(response.status_code, 422)
                 self.assertEqual(response.json()["error"]["code"], code)
-        # Nothing reached a worker.
-        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
+        # Nothing reached a slicing worker.
+        self.assertEqual(self.slice_jobs(), [])
+
+    def test_inspects_every_upload_through_a_worker(self):
+        uploaded = self.upload()
+        self.assertEqual(uploaded.status_code, 201)
+        inspection = uploaded.json()["inspection"]
+        self.assertEqual(inspection["operation"], "inspect")
+        job = self.wait(inspection["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        self.assertEqual(
+            sorted(artifact["name"] for artifact in job["artifacts"]), ["inspection", "mesh", "result"]
+        )
+        index = self.client.get(f"/api/v1/jobs/{job['job_id']}/artifacts/inspection")
+        self.assertEqual(index.status_code, 200)
+        self.assertEqual(index.json()["objects"][0]["bounding_box"]["max"], [20, 20, 20])
+        mesh = self.client.get(f"/api/v1/jobs/{job['job_id']}/artifacts/mesh")
+        self.assertEqual(mesh.content[:8], b"OWMESH01")
+
+    def test_slices_a_plate_of_placed_objects(self):
+        first = self.upload().json()["upload_id"]
+        second = self.upload("other.obj").json()["upload_id"]
+        moved = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]
+        objects = [
+            {"upload_id": first, "instances": [{"transform": moved}, {"transform": moved}]},
+            {"upload_id": second, "object": 0, "instances": [{"transform": moved}]},
+            {"upload_id": first, "instances": [{"transform": moved}]},
+        ]
+        body = {
+            "objects": objects,
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        accepted = self.client.post("/api/v1/jobs", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(accepted.json()["request"]["objects"][0]["instances"][0]["transform"], moved)
+        job = self.wait(accepted.json()["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+
+        # Each upload is staged once, and every object keeps its transforms.
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        payload = manifest["operation"]["payload"]
+        self.assertNotIn("input_model", payload)
+        self.assertEqual(
+            [placed["model"] for placed in payload["objects"]],
+            ["input/model-0.stl", "input/model-1.obj", "input/model-0.stl"],
+        )
+        self.assertEqual(payload["objects"][0]["instances"][1]["transform"], moved)
+
+        retried = self.client.post(f"/api/v1/jobs/{job['job_id']}/retry")
+        self.assertEqual(retried.json()["request"], accepted.json()["request"])
+
+        for invalid in (
+            {**body, "upload_id": first},
+            {**body, "objects": [{"upload_id": first, "instances": []}]},
+            {**body, "objects": [{"upload_id": first, "instances": [{"transform": [1, 0, 0]}]}]},
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.client.post("/api/v1/jobs", json=invalid).status_code, 422)
+
+    def test_pages_the_layer_preview(self):
+        job_id = self.submit().json()["job_id"]
+        self.assertEqual(self.wait(job_id)["state"], "succeeded")
+        index = self.client.get(f"/api/v1/jobs/{job_id}/artifacts/preview_index").json()
+        self.assertEqual(len(index["layers"]), 3)
+
+        page = self.client.get(f"/api/v1/jobs/{job_id}/preview/layers", params={"start": 1, "end": 2})
+        self.assertEqual(page.status_code, 200)
+        # Layers 1 and 2 hold three and one segments of 36 bytes.
+        self.assertEqual(len(page.content), 4 * 36)
+        self.assertEqual(page.content[:36], bytes(range(36)))
+
+        whole = self.client.get(f"/api/v1/jobs/{job_id}/artifacts/preview")
+        self.assertEqual(page.content, whole.content[72:])
+        refused = self.client.get(f"/api/v1/jobs/{job_id}/preview/layers", params={"start": 2, "end": 3})
+        self.assertEqual(refused.status_code, 416)
+        self.assertEqual(refused.json()["error"]["code"], "invalid_preview_range")
 
     def test_accepts_supported_models_and_refuses_the_rest(self):
         accepted = self.upload("cube.STL")
@@ -237,7 +322,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(retried.json()["retry_of"], job_id)
         self.assertEqual(retried.json()["request"], accepted.json()["request"])
         self.assertEqual(self.wait(retried.json()["job_id"])["state"], "succeeded")
-        self.assertEqual(len(self.client.get("/api/v1/jobs").json()["jobs"]), 2)
+        self.assertEqual(len(self.slice_jobs()), 2)
 
     def test_validates_the_slice_request_before_it_reaches_a_worker(self):
         upload_id = self.upload().json()["upload_id"]
@@ -264,7 +349,7 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(incompatible.status_code, 409)
         self.assertEqual(incompatible.json()["error"]["code"], "incompatible_profile")
-        self.assertEqual(self.client.get("/api/v1/jobs").json()["jobs"], [])
+        self.assertEqual(self.slice_jobs(), [])
 
     def test_reports_an_unknown_job_without_touching_the_filesystem(self):
         for job_id in ("job-missing", "../../etc", "job-" + "x" * 200):

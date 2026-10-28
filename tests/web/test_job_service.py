@@ -117,7 +117,9 @@ class JobServiceTests(unittest.TestCase):
         self.assertEqual(job["state"], "succeeded")
         self.assertEqual(job["progress"], {"stage": "finalize", "percent": 100, "message": ""})
         self.assertEqual([warning["code"] for warning in job["warnings"]], ["thin_wall"])
-        self.assertEqual(sorted(item["name"] for item in job["artifacts"]), ["gcode", "result"])
+        self.assertEqual(
+            sorted(item["name"] for item in job["artifacts"]), ["gcode", "preview", "preview_index", "result"]
+        )
         self.assertEqual(job["timing"], {"duration_ms": 3, "cpu_time_ms": 2})
 
         path, media_type, filename = service.artifact(accepted["job_id"], "gcode")

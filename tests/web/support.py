@@ -65,30 +65,62 @@ def publish(outcome, artifacts=None, error=None, warnings=()):
     (job_root / "result.json").write_text(json.dumps(value), encoding="utf-8")
 
 
+
+def written(kind, relative, contents):
+    target = job_root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(contents)
+    return {"kind": kind, "path": relative, "size_bytes": len(contents),
+            "sha256": hashlib.sha256(contents).hexdigest()}
+
+
 # Every mode proves the request reached the worker intact.
-assert (job_root / payload["input_model"]).is_file(), "the model was not staged"
-for name in ("machine", "process", "filament"):
-    assert (job_root / payload["profiles"][name]).is_file(), name + " profile was not staged"
+models = [placed["model"] for placed in payload.get("objects", [])] or [payload["input_model"]]
+for model in models:
+    assert (job_root / model).is_file(), "the model was not staged"
+if request["operation"]["name"] == "slice":
+    for name in ("machine", "process", "filament"):
+        assert (job_root / payload["profiles"][name]).is_file(), name + " profile was not staged"
 
 event("state", state="accepted")
 event("state", state="running")
+
+if request["operation"]["name"] == "inspect" and mode != "crash":
+    # One 20 mm cube-shaped object: eight corners and no triangles suffice for
+    # the API, which never reads the mesh.
+    import struct
+    mesh = b"OWMESH01" + struct.pack("<III", 1, 8, 0) + struct.pack("<24f", *([0.0] * 24))
+    inspection = {"format": "orca-web-mesh", "version": 1, "model_format": models[0].rsplit(".", 1)[1],
+                  "declares_plate": False, "objects": [{"index": 0, "name": "cube", "offset": 12,
+                  "vertex_count": 8, "triangle_count": 0,
+                  "bounding_box": {"min": [0, 0, 0], "max": [20, 20, 20]},
+                  "instances": [{"transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]}]}]}
+    artifacts = [written("mesh", payload["output_mesh"], mesh),
+                 written("inspection", payload["output_inspection"], json.dumps(inspection).encode())]
+    publish("succeeded", artifacts)
+    event("state", state="succeeded")
+    raise SystemExit(0)
 
 if mode == "success":
     warnings = [{"code": "thin_wall", "message": "A thin wall was detected."}]
     event("progress", progress={"stage": "slicing", "percent": 50, "message": "Slicing"})
     event("warning", warning=warnings[0])
-    target = job_root / payload["output_gcode"]
-    target.parent.mkdir(parents=True, exist_ok=True)
     contents = ("; layer_height = " + payload["settings"].get("layer_height", "default") + "\nG1 X1\n")
-    target.write_text(contents, encoding="utf-8")
-    artifact = {
-        "kind": "gcode",
-        "path": payload["output_gcode"],
-        "size_bytes": target.stat().st_size,
-        "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-    }
-    publish("succeeded", [artifact], warnings=warnings)
-    event("artifact", artifact=artifact)
+    artifacts = [written("gcode", payload["output_gcode"], contents.encode())]
+    if "output_preview" in payload:
+        # Three layers of two, three, and one 36-byte segments.
+        counts = [2, 3, 1]
+        offsets = [0, 72, 180]
+        layers = [{"index": i, "z": 0.2 * (i + 1), "height": 0.2, "offset": offsets[i], "count": counts[i]}
+                  for i in range(3)]
+        index = {"format": "orca-web-preview", "version": 1, "segment_bytes": 36, "roles": [], "tools": [0],
+                 "layers": layers}
+        segments = bytes(range(36)) * 6
+        artifacts.append(written("preview", payload["output_preview"], segments))
+        artifacts.append(written("preview_index", payload["output_preview_index"], json.dumps(index).encode()))
+    publish("succeeded", artifacts, warnings=warnings)
+    for artifact in artifacts:
+        event("artifact", artifact=artifact)
     event("state", state="succeeded")
 elif mode == "fail":
     error = {"category": "slicing", "code": "slicing_failed", "message": "The model could not be sliced."}
