@@ -25,6 +25,7 @@
 #include <string_view>
 #include <vector>
 
+#include <boost/log/utility/setup/console.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 
@@ -477,6 +478,11 @@ void finish_timing(Slic3r::Web::WorkerResult &result,
 
 int main(int argc, char **argv)
 {
+    // stdout carries only protocol records. Without a sink of its own, Boost.Log
+    // prints engine diagnostics there and the executor rejects the stream.
+    boost::log::add_console_log(std::cerr);
+    Slic3r::set_logging_level(1);
+
     if (argc == 2 && std::string(argv[1]) == "--version") {
         std::cout << "orca-slicer-worker " << SLIC3R_VERSION
                   << " (worker protocol " << Slic3r::Web::WORKER_PROTOCOL_VERSION << ")\n";

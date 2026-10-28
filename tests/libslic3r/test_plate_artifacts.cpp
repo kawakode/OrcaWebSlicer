@@ -164,7 +164,8 @@ TEST_CASE("Explicit placement is sliced as submitted and previewed", "[PlateArti
         ]}],
         "output_gcode": "output/plate.gcode",
         "output_preview": "output/preview.bin",
-        "output_preview_index": "output/preview.json"
+        "output_preview_index": "output/preview.json",
+        "settings": {"layer_change_gcode": "G92 E0\n"}
     })"));
 
     const SinglePlateSliceResult result = slice_single_plate(request, root.path);

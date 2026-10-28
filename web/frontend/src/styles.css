@@ -178,6 +178,7 @@ summary {
   margin: 0.6rem 0;
   padding: 0;
   list-style: none;
+  color: var(--ink);
 }
 
 .objects li {
@@ -192,6 +193,11 @@ summary {
 
 .objects li[aria-selected="true"] {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Muted text loses contrast on the selection tint. */
+.objects li[aria-selected="true"] .dimensions {
+  color: var(--ink);
 }
 
 .dimensions,

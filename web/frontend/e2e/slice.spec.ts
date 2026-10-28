@@ -93,9 +93,10 @@ test("an uploaded model shows its bounds and slices where it was placed", async 
   expect(Math.abs(Math.max(...xs) - shown.maxX)).toBeLessThan(PLACEMENT_TOLERANCE_MM);
   expect(Math.abs(Math.min(...ys) - shown.minY)).toBeLessThan(PLACEMENT_TOLERANCE_MM);
   expect(Math.abs(Math.max(...ys) - shown.maxY)).toBeLessThan(PLACEMENT_TOLERANCE_MM);
-  // The preview's Z range is the G-code's.
-  const zs = [...gcode.matchAll(/^G1 Z([\d.]+)/gm)].map((match) => Number(match[1]));
-  expect(index.layers.at(-1).z).toBeCloseTo(Math.max(...zs.filter((z) => z <= 20.5)), 1);
+  // The preview's Z range is the G-code's layer range; Z hops are not layers.
+  const zs = [...gcode.matchAll(/^;Z:([\d.]+)/gm)].map((match) => Number(match[1]));
+  expect(index.layers[0].z).toBeCloseTo(zs[0], 2);
+  expect(index.layers.at(-1).z).toBeCloseTo(zs.at(-1)!, 2);
 
   await page.getByTestId("preview-slider").fill("0");
   await expect(page.getByTestId("preview-layer")).toHaveText("1");
