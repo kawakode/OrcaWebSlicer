@@ -120,6 +120,67 @@ remaining limits by `scripts/test_web_worker_limits.py`, both run by
 `worker-smoke`. Multi-filament tool ordering is deferred with multi-material
 support: the MVP worker accepts one filament profile per job.
 
+## Continuous integration
+
+[`.github/workflows/web.yml`](../../.github/workflows/web.yml) runs the Compose
+checks on every pull request to `main`, on every push to `main`, and on demand.
+Each check step calls `scripts/run_web_service.py <service>`, which reads the
+service's command, working directory, and environment from
+`docker compose config` and runs it directly on the Ubuntu 24.04 runner. The
+Compose file therefore stays the only definition of each check: a new assertion
+added to a service runs in CI without touching the workflow. The runner exposes
+the checkout as `/workspace` and creates `/cache`, the two paths the services
+use. Container-only settings (`user`, `read_only`, `network_mode`, `pids_limit`)
+are not reproduced on the runner; the executor's own process limits still apply.
+
+| Job | Compose services | Needs |
+| --- | --- | --- |
+| Dependencies | none (`build_linux.sh -drlL`) | |
+| Worker build, smoke and matrix | `worker-build`, `worker-smoke`, `worker-matrix` | Dependencies |
+| Native baseline | `baseline`, after `build_linux.sh -srlL` | Dependencies |
+| Frontend build | `frontend-build` | |
+| Executor and baseline parity | `executor-smoke`, `worker-baseline`, `api-baseline` | Worker, native baseline |
+| Browser end-to-end | `frontend-e2e` (Chromium and Firefox block; WebKit is reported only) | Worker |
+
+The native baseline is a CI artifact (`web-native-baseline`, kept 30 days)
+together with its raw G-code; it is never committed. The worker binary is passed
+between jobs as the `orca-slicer-worker` artifact.
+
+### Caches
+
+| Cache | Key | Saved by |
+| --- | --- | --- |
+| Dependency build `deps/build/OrcaSlicer_dep` | `linux-clang-cache-orcaslicer_deps-build-<hash of deps/**>` | Dependencies job on a miss; shared with `build_all.yml` |
+| Worker ccache `/cache/ccache` | `web-worker-ccache-<sha>`, restored by prefix | `main`, or a pull request that found none |
+| Desktop ccache `/cache/ccache` | `web-desktop-ccache-<sha>`, restored by prefix | as above |
+| Native baseline `build/web-baseline` | `web-native-baseline-<hash of the desktop sources, deps, Anycubic profiles, baseline manifest and runner>` | Native baseline job on a miss |
+| npm | `actions/setup-node` cache of `package-lock.json` | every run |
+| Playwright browsers `/cache/playwright` | `web-playwright-<hash of package-lock.json>` | every run on a miss |
+
+Pull requests read the caches saved on `main`. They save a compiler cache only
+when none existed, so several open branches cannot evict the dependency build
+from the repository's 10 GB cache budget. The baseline key excludes
+`src/libslic3r/Web/**` and `src/OrcaSlicerWorker.cpp`, which the desktop slicer
+does not use, so web-only changes reuse the recorded reference. Each compiler
+cache is capped at 1.5 GB (`CCACHE_MAXSIZE`).
+
+### Durations
+
+Expected wall-clock times on a standard 4-core `ubuntu-24.04` runner, before
+the first measured run replaces them:
+
+| Job | Cold caches | Warm caches |
+| --- | ---: | ---: |
+| Dependencies | about 90 min | under 1 min |
+| Worker build, smoke and matrix | about 60 min | about 15 min |
+| Native baseline | about 75 min | under 1 min (cache hit) |
+| Frontend build | about 2 min | about 1 min |
+| Executor and baseline parity | about 5 min | about 5 min |
+| Browser end-to-end | about 10 min | about 6 min |
+
+A pull request with warm caches finishes in about 25 minutes; the first run on
+a new dependency hash takes about three hours.
+
 ## Reproducibility rules
 
 - Pin the compiler, dependency build, profiles, locale, and worker resource limits.

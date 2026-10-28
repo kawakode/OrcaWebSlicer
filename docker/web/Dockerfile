@@ -56,15 +56,14 @@ RUN case "$(uname -m)" in \
 # The API service and its integration tests are the project's only Python
 # dependencies. They are installed for the image's own interpreter so the API,
 # the smoke services, and the baseline tooling all share one environment. This
-# layer stays last so a dependency bump never rebuilds the C++ toolchain.
+# layer stays last so a dependency bump never rebuilds the C++ toolchain. CI
+# installs the same pinned list.
+COPY docker/web/requirements.txt /tmp/orca-web-requirements.txt
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pip \
     && pip3 install --break-system-packages --no-cache-dir \
-        "fastapi==0.115.6" \
-        "uvicorn==0.34.0" \
-        "httpx==0.28.1" \
-        "python-multipart==0.0.20" \
-    && rm -rf /var/lib/apt/lists/*
+        -r /tmp/orca-web-requirements.txt \
+    && rm -rf /var/lib/apt/lists/* /tmp/orca-web-requirements.txt
 
 # Node builds and tests the browser screen only. It is pinned and installed from
 # the official tarball for the same reason CMake is: the distribution package
