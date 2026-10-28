@@ -2,6 +2,7 @@
 
 #include "ArtifactTransaction.hpp"
 #include "PlateThumbnail.hpp"
+#include "ProjectArchive.hpp"
 
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
@@ -110,20 +111,6 @@ void name_enum_lists(DynamicPrintConfig &config)
     }
 }
 
-// Removes the exporter's scratch directory however the export ends.
-struct ScratchDirectory
-{
-    Model                &model;
-    std::filesystem::path path;
-
-    ~ScratchDirectory()
-    {
-        model.set_backup_path("detach");
-        std::error_code ignored;
-        std::filesystem::remove_all(path, ignored);
-    }
-};
-
 } // namespace
 
 SinglePlateSliceResult export_plate_project(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
@@ -141,15 +128,10 @@ SinglePlateSliceResult export_plate_project(const SinglePlateSliceRequest &reque
     if (!artifact)
         return failure(path_error.code, path_error.message, path_error.category);
 
-    // The exporter stages its configuration files in the model's backup
-    // directory, which otherwise lives in the system temporary directory. It is
-    // kept inside the job so the worker writes nowhere else.
-    const ScratchDirectory scratch {model, job_root / ("." + request.envelope.job_id + ".project")};
-    std::error_code        filesystem_error;
-    std::filesystem::remove_all(scratch.path, filesystem_error);
-    if (!std::filesystem::create_directories(scratch.path, filesystem_error))
+    const ModelScratchDirectory scratch(model, job_root / ("." + request.envelope.job_id + ".project"));
+    if (!scratch.ready())
         return failure("project_export_failed", "Unable to stage the project archive.");
-    model.set_backup_path(scratch.path.string());
+    std::error_code filesystem_error;
 
     std::set<std::pair<int, int>> placed;
     for (std::size_t object = 0; object < model.objects.size(); ++object)

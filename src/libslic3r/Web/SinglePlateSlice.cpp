@@ -236,8 +236,8 @@ struct ProjectPlate
 // Loads one plate of a project archive into the neutral worker model. The
 // importer streams the archive itself, so containment and extraction limits are
 // checked against the central directory before it is handed over.
-SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &input_path,
-                                          Model &model, ProjectPlate &project)
+SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                          const std::filesystem::path &input_path, Model &model, ProjectPlate &project)
 {
     ProjectArchiveLimits archive_limits;
     if (request.max_extracted_bytes) {
@@ -257,6 +257,10 @@ SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request
     bool                      is_orca_3mf = false;
     Semver                    file_version;
     const ProjectImportGuard  import_guard {plate_data_list, project_presets};
+    const ModelScratchDirectory scratch(model, job_root / ("." + request.envelope.job_id + ".import-" +
+                                                           std::to_string(model.id().id)));
+    if (!scratch.ready())
+        return failure("project_load_failed", "Unable to stage the project archive.");
 
     // LoadAuxiliary is deliberately omitted: the worker never needs the
     // embedded thumbnails or auxiliary files the desktop renders.
@@ -433,7 +437,7 @@ SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, c
 
     const std::string extension = lowercase_extension(relative_path);
     if (extension == ".3mf") {
-        if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project); !loaded.success)
+        if (const SinglePlateSliceResult loaded = load_project_plate(request, job_root, input_path, model, project); !loaded.success)
             return loaded;
         if (model.objects.empty())
             return failure("empty_plate_selection", "The selected plate contains no printable objects.",

@@ -6,6 +6,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/PlateThumbnail.hpp"
+#include "libslic3r/Web/ProjectArchive.hpp"
 #include "libslic3r/Web/SinglePlateSlice.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
@@ -123,7 +124,7 @@ TEST_CASE("An exported project reloads in the desktop importer", "[ProjectExport
     CHECK(result.artifacts.front().first == "project");
     // The exporter's staging directory and temporary archive are gone.
     for (const auto &entry : std::filesystem::directory_iterator(root.path))
-        CHECK(entry.path().filename().string().rfind(".project-1", 0) == std::string::npos);
+        CHECK(entry.path().filename().string().rfind("." + request.envelope.job_id, 0) == std::string::npos);
     CHECK_FALSE(std::filesystem::exists(root.path / "output" / "project.3mf.tmp"));
 
     const std::string archive = (root.path / "output" / "project.3mf").string();
@@ -135,6 +136,9 @@ TEST_CASE("An exported project reloads in the desktop importer", "[ProjectExport
     bool                      is_bbl_3mf = false;
     bool                      is_orca_3mf = false;
     Semver                    version;
+    // The desktop stages the project configuration in its temporary directory.
+    const ModelScratchDirectory scratch(model, root.path / "desktop");
+    REQUIRE(scratch.ready());
     // The same strategy the desktop opens a project with.
     REQUIRE(load_bbs_3mf(archive.c_str(), &config, &substitutions, &model, &plates, &presets, &is_bbl_3mf, &is_orca_3mf,
                          &version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary));
