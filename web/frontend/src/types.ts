@@ -82,6 +82,8 @@ export interface JobError {
   category: string;
   code: string;
   message: string;
+  /** The setting a configuration error is about, when the engine named one. */
+  setting?: string;
 }
 
 export interface JobArtifact {
@@ -113,6 +115,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly correlationId?: string,
+    readonly setting?: string,
   ) {
     super(message);
     this.name = "ApiError";

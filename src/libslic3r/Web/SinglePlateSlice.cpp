@@ -704,8 +704,15 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             config.apply(profile);
             throw_if_canceled();
         }
-        for (const auto &[key, value] : request.settings)
-            config.set_deserialize_strict(key, value);
+        for (const auto &[key, value] : request.settings) {
+            try {
+                config.set_deserialize_strict(key, value);
+            } catch (const std::exception &error) {
+                SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
+                refused.setting = key;
+                return refused;
+            }
+        }
 
         // A plate carries the placement its author chose, so only loose meshes
         // and plate-less archives are arranged.
@@ -740,8 +747,12 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
                 return placed;
         print.apply(model, config);
         const StringObjectException validation_error = print.validate();
-        if (!validation_error.string.empty())
-            return failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
+        if (!validation_error.string.empty()) {
+            SinglePlateSliceResult refused =
+                failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
+            refused.setting = validation_error.opt_key;
+            return refused;
+        }
 
         unsigned last_public_percent = 25;
         bool exporting = false;

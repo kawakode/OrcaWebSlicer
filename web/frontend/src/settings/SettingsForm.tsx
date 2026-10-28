@@ -24,9 +24,11 @@ export function SettingsForm(props: {
   catalog: SettingsCatalog;
   profileValues: Record<string, ProfileValue>;
   overrides: Record<string, string>;
+  /** The setting the last refusal named, marked invalid until it is edited. */
+  invalidKey?: string;
   onChange: (key: string, value: string) => void;
 }) {
-  const { catalog, profileValues, overrides, onChange } = props;
+  const { catalog, profileValues, overrides, invalidKey, onChange } = props;
   const effective = (key: string) => overrides[key] || scalar(profileValues[key]);
   const available = catalog.settings.filter((setting) => !setting.missing);
 
@@ -44,6 +46,7 @@ export function SettingsForm(props: {
                 setting={setting}
                 profileValue={scalar(profileValues[setting.key]) ?? setting.default}
                 value={overrides[setting.key] ?? ""}
+                invalid={setting.key === invalidKey}
                 disabled={Boolean(setting.enabled_by) && !isOn(effective(setting.enabled_by!))}
                 onChange={(value) => onChange(setting.key, value)}
               />
@@ -59,10 +62,11 @@ function SettingControl(props: {
   setting: SettingDefinition;
   profileValue: string | undefined;
   value: string;
+  invalid: boolean;
   disabled: boolean;
   onChange: (value: string) => void;
 }) {
-  const { setting, profileValue, value, disabled, onChange } = props;
+  const { setting, profileValue, value, invalid, disabled, onChange } = props;
   const testId = `setting-${setting.key}`;
   const id = `setting-input-${setting.key}`;
   const shown = profileValue ?? "";
@@ -70,7 +74,7 @@ function SettingControl(props: {
   let control;
   if (BOOLEAN_TYPES.has(setting.type)) {
     control = (
-      <select id={id} data-testid={testId} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <select id={id} data-testid={testId} value={value} disabled={disabled} aria-invalid={invalid} onChange={(e) => onChange(e.target.value)}>
         <option value="">Profile ({isOn(shown) ? "on" : "off"})</option>
         <option value="1">On</option>
         <option value="0">Off</option>
@@ -79,7 +83,7 @@ function SettingControl(props: {
   } else if (ENUM_TYPES.has(setting.type) && setting.enum) {
     const profileLabel = setting.enum.find((item) => item.value === shown)?.label ?? shown;
     control = (
-      <select id={id} data-testid={testId} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <select id={id} data-testid={testId} value={value} disabled={disabled} aria-invalid={invalid} onChange={(e) => onChange(e.target.value)}>
         <option value="">Profile ({profileLabel})</option>
         {setting.enum.map((item) => (
           <option key={item.value} value={item.value}>
@@ -101,6 +105,7 @@ function SettingControl(props: {
         placeholder={shown}
         value={value}
         disabled={disabled}
+        aria-invalid={invalid}
         aria-describedby={setting.unit ? `${id}-unit` : undefined}
         onChange={(e) => onChange(e.target.value)}
       />

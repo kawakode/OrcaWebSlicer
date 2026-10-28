@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -192,6 +193,8 @@ test("a rejected setting is reported without leaving a job behind", async ({ pag
 
   // The engine's own definition refuses the value before a worker is started.
   await expect(page.getByTestId("failure")).toContainText("invalid_setting_value");
+  // The refusal names the setting, and its control is marked for correction.
+  await expect(page.getByTestId("setting-layer_height")).toHaveAttribute("aria-invalid", "true");
   await expect(page.getByTestId("job-state")).toHaveCount(0);
   await expect(page.getByTestId("download-gcode")).toHaveCount(0);
 });
@@ -223,4 +226,15 @@ test("an unreadable model reports the worker's stable error", async ({ page }) =
 
   await expect(page.getByTestId("failure")).toContainText("model_load_failed");
   await expect(page.getByTestId("plate-item")).toHaveCount(0);
+});
+
+test("the prepared plate has no serious accessibility violations", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+  await addCube(page);
+  await page.getByTestId("plate-item").click();
+
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const serious = results.violations.filter((violation) => ["serious", "critical"].includes(violation.impact ?? ""));
+  expect(serious.map((violation) => `${violation.id}: ${violation.help}`)).toEqual([]);
 });

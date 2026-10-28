@@ -362,3 +362,8 @@ ul {
     border-left: none;
   }
 }
+
+[aria-invalid="true"] {
+  border-color: var(--failure);
+  box-shadow: 0 0 0 1px var(--failure);
+}

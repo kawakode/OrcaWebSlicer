@@ -168,12 +168,12 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
         identifier = correlation_id(request)
         logger.info("request failed code=%s correlation_id=%s", error.code, identifier)
+        described = {"code": error.code, "message": str(error)}
+        if error.setting:
+            described["setting"] = error.setting
         return JSONResponse(
             status_code=error.status,
-            content={
-                "error": {"code": error.code, "message": str(error)},
-                "correlation_id": identifier,
-            },
+            content={"error": described, "correlation_id": identifier},
             headers={CORRELATION_HEADER: identifier} if identifier else None,
         )
 

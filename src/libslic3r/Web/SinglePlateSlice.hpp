@@ -75,6 +75,8 @@ struct SinglePlateSliceResult
     std::string code;
     std::string message;
     WorkerErrorCategory category {WorkerErrorCategory::Slicing};
+    // The setting a validation failure names, when the engine reports one.
+    std::string setting;
     // On success, the committed artifacts as (kind, relative path) pairs.
     std::vector<std::pair<std::string, std::string>> artifacts;
 };

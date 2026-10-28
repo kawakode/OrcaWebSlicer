@@ -17,6 +17,7 @@
     "three": "0.169.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
     "@playwright/test": "1.49.1",
     "@types/node": "22.10.5",
     "@types/react": "18.3.18",

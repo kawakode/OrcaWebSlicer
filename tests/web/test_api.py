@@ -176,6 +176,8 @@ class ApiTests(unittest.TestCase):
                 response = self.submit(settings=settings)
                 self.assertEqual(response.status_code, 422)
                 self.assertEqual(response.json()["error"]["code"], code)
+                # The refused override is named so the browser can point at it.
+                self.assertEqual(response.json()["error"]["setting"], next(iter(settings)))
         # Nothing reached a slicing worker.
         self.assertEqual(self.slice_jobs(), [])
 

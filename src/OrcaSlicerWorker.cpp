@@ -701,7 +701,7 @@ int main(int argc, char **argv)
             }
         } else {
             const Slic3r::Web::WorkerManifestError slice_error {
-                result.code, result.message, result.category
+                result.code, result.message, result.category, result.setting
             };
             emitter.error(slice_error);
             final_result.outcome = result.category == Slic3r::Web::WorkerErrorCategory::Cancellation ?

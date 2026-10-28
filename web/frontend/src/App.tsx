@@ -47,10 +47,10 @@ const DUPLICATE_OFFSET_MM = 10;
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 const DEFAULT_BED: Bed = parseBed(["0x0", "200x0", "200x200", "0x200"], "200");
 
-type Failure = { code: string; message: string };
+type Failure = { code: string; message: string; setting?: string };
 
 function describe(error: unknown): Failure {
-  if (error instanceof ApiError) return { code: error.code, message: error.message };
+  if (error instanceof ApiError) return { code: error.code, message: error.message, setting: error.setting };
   return { code: "unexpected_error", message: String(error) };
 }
 
@@ -407,6 +407,7 @@ export default function App() {
                   catalog={settingsCatalog}
                   profileValues={profileValues}
                   overrides={settings}
+                  invalidKey={failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined)}
                   onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
                 />
               )}

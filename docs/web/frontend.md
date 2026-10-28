@@ -58,8 +58,18 @@ against the API serving the real built bundle and the real native worker:
 - An object outside the printable volume blocks slicing.
 - The settings form is generated from the engine catalog, including dependent
   controls.
-- A rejected setting is refused with a stable code before any job exists.
+- A rejected setting is refused with a stable code before any job exists, and
+  its control is marked invalid. A configuration error the engine raises while
+  slicing names its setting the same way.
 - An unsupported or unreadable model never reaches the plate.
+- The prepared plate has no serious or critical axe-core WCAG 2 A/AA
+  violations.
+
+Chromium always runs. `ORCA_WEB_E2E_BROWSERS` adds `firefox`, `webkit`, or
+`msedge` when that browser is installed. The `frontend-e2e` service runs
+Chromium and Firefox as release-blocking and WebKit, Safari's engine, as
+reported but non-blocking, as `docs/web/mvp.md` requires. Edge shares
+Chromium's engine and runs wherever its `msedge` channel is installed.
 
 Semantic equivalence is checked separately, by
 `scripts/test_web_api_baseline.py`, which slices the recorded baseline fixtures

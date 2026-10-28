@@ -38,6 +38,7 @@ async function send(path: string, init?: RequestInit): Promise<Response> {
       named?.message ?? describeSchemaFailure(body) ?? response.statusText,
       response.status,
       correlationId,
+      named?.setting,
     );
   }
   return response;

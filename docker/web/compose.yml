@@ -337,8 +337,10 @@ services:
       - >-
         npm ci --no-audit --no-fund
         && npm run build
-        && npx playwright install --with-deps chromium
-        && npm run e2e
+        && npx playwright install --with-deps chromium firefox webkit
+        && ORCA_WEB_E2E_BROWSERS=chromium,firefox npm run e2e
+        && (ORCA_WEB_E2E_BROWSERS=webkit npx playwright test --project webkit
+            || echo "WebKit failures are reported but not release-blocking.")
 
   baseline:
     <<: *build-environment

@@ -32,9 +32,11 @@ _BOOLEAN_LITERALS = frozenset({"0", "1", "true", "false", "yes", "no"})
 class SettingsCatalogError(RuntimeError):
     """A stable settings failure that is safe to return to the API layer."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, setting: str = "") -> None:
         super().__init__(message)
         self.code = code
+        # The refused override, so a client can point at its control.
+        self.setting = setting
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,17 +83,17 @@ class SettingsCatalog:
             definition = self.definition(key)
             if definition is None:
                 raise SettingsCatalogError(
-                    "unknown_setting", f"{key} is not one of the settings this deployment exposes."
+                    "unknown_setting", f"{key} is not one of the settings this deployment exposes.", key
                 )
             if definition.get("missing"):
                 raise SettingsCatalogError(
-                    "unavailable_setting", f"{key} is not available in this engine build."
+                    "unavailable_setting", f"{key} is not available in this engine build.", key
                 )
             _validate_value(definition, value)
 
 
 def _fail(key: str, message: str) -> None:
-    raise SettingsCatalogError("invalid_setting_value", f"{key}: {message}")
+    raise SettingsCatalogError("invalid_setting_value", f"{key}: {message}", key)
 
 
 def _validate_value(definition: Mapping[str, Any], value: str) -> None:
