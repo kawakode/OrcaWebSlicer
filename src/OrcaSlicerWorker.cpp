@@ -1,4 +1,5 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
+#include "libslic3r/Web/ModelEdit.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/ProfileCompatibility.hpp"
 #include "libslic3r/Web/SettingsCatalog.hpp"
@@ -659,9 +660,12 @@ int main(int argc, char **argv)
         };
         callbacks.cancellation_requested = []() { return cancellation_requested(); };
         callbacks.memory_usage_bytes = []() { return peak_memory_bytes(); };
+        const Slic3r::Web::WorkerOperation operation = validation.request->operation;
         const Slic3r::Web::SinglePlateSliceResult result =
-            validation.request->operation == Slic3r::Web::WorkerOperation::Inspect ?
+            operation == Slic3r::Web::WorkerOperation::Inspect ?
                 Slic3r::Web::inspect_model(*validation.request, job_root, callbacks) :
+            operation == Slic3r::Web::WorkerOperation::Edit ?
+                Slic3r::Web::edit_model(*validation.request, job_root, callbacks) :
                 Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);
         // Every published artifact is withdrawn together, so a job never

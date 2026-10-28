@@ -241,6 +241,82 @@ class ApiTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertEqual(self.client.post("/api/v1/jobs", json=invalid).status_code, 422)
 
+    def test_cuts_an_upload_into_new_inspected_uploads(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 100, 0, 1, 0, 100, 0, 0, 1, 0, 0, 0, 0, 1]
+        body = {"tool": "cut", "transform": placed, "cut": {"point": [110, 110, 10], "normal": [0, 0, 1]}}
+        accepted = self.client.post(f"/api/v1/uploads/{upload_id}/edits", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(accepted.json()["operation"], "edit")
+        self.assertEqual(accepted.json()["request"]["edit"]["cut"]["keep"], "both")
+        self.assertEqual(accepted.json()["derived_uploads"], [])
+        job = self.wait(accepted.json()["job_id"])
+        self.assertEqual(job["state"], "succeeded", job["error"])
+
+        # The worker is told the tool, the placement, and where to write.
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        payload = manifest["operation"]["payload"]
+        self.assertEqual(manifest["operation"]["name"], "edit")
+        self.assertEqual(payload["transform"], placed)
+        self.assertEqual(payload["cut"]["point"], [110, 110, 10])
+        self.assertEqual(payload["output_models"], ["output/part-0.stl", "output/part-1.stl"])
+
+        # Each part is a new upload, inspected by its own worker.
+        derived = job["derived_uploads"]
+        self.assertEqual([upload["filename"] for upload in derived], ["cube (upper).stl", "cube (lower).stl"])
+        for upload in derived:
+            self.assertEqual(upload["format"], "stl")
+            self.assertEqual(self.wait(upload["inspection"]["job_id"])["state"], "succeeded")
+        report = self.client.get(f"/api/v1/jobs/{job['job_id']}/artifacts/edit_report")
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual([part["side"] for part in report.json()["parts"]], ["upper", "lower"])
+
+        # A derived upload is sliced like any other.
+        sliced = self.client.post("/api/v1/jobs", json={
+            "objects": [{"upload_id": upload["upload_id"], "instances": [{"transform": placed}]} for upload in derived],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        })
+        self.assertEqual(sliced.status_code, 202, sliced.text)
+        self.assertEqual(self.wait(sliced.json()["job_id"])["state"], "succeeded")
+
+        repaired = self.client.post(
+            f"/api/v1/uploads/{upload_id}/edits", json={"tool": "repair", "transform": placed}
+        )
+        self.assertEqual(repaired.status_code, 202, repaired.text)
+        repaired_job = self.wait(repaired.json()["job_id"])
+        self.assertEqual([upload["filename"] for upload in repaired_job["derived_uploads"]], ["cube (repaired).stl"])
+
+    def test_validates_an_edit_before_it_reaches_a_worker(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        plane = {"point": [0, 0, 10], "normal": [0, 0, 1]}
+        for body in (
+            {"tool": "cut", "transform": placed},
+            {"tool": "repair", "transform": placed, "cut": plane},
+            {"tool": "drill", "transform": placed},
+            {"tool": "repair", "transform": [1, 0, 0]},
+            {"tool": "cut", "transform": placed, "cut": {**plane, "keep": "middle"}},
+            {"tool": "cut", "transform": placed, "cut": {**plane, "angle": 3}},
+        ):
+            with self.subTest(body=body):
+                response = self.client.post(f"/api/v1/uploads/{upload_id}/edits", json=body)
+                self.assertEqual(response.status_code, 422, response.text)
+        flat = self.client.post(
+            f"/api/v1/uploads/{upload_id}/edits",
+            json={"tool": "cut", "transform": placed, "cut": {"point": [0, 0, 1], "normal": [0, 0, 0]}},
+        )
+        self.assertEqual(flat.status_code, 400)
+        self.assertEqual(flat.json()["error"]["code"], "invalid_edit")
+        unknown = self.client.post("/api/v1/uploads/" + "0" * 32 + "/edits", json={"tool": "repair", "transform": placed})
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(unknown.json()["error"]["code"], "unknown_upload")
+        jobs = self.client.get("/api/v1/jobs").json()["jobs"]
+        self.assertEqual([job for job in jobs if job["operation"] == "edit"], [])
+
     def test_pages_the_layer_preview(self):
         job_id = self.submit().json()["job_id"]
         self.assertEqual(self.wait(job_id)["state"], "succeeded")

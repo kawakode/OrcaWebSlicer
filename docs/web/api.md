@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract; extended for G5
+Status: Active contract; extended for G5 and the phase 3b object tools
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -24,6 +24,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `GET` | `/profiles/effective` | A selected chain's curated values and bed |
 | `GET` | `/settings` | The engine's catalog of overridable settings |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
+| `POST` | `/uploads/{upload_id}/edits` | Cut or repair one object into new uploads |
 | `POST` | `/jobs` | Submit one slice request |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
@@ -111,6 +112,31 @@ the plater draws. An unreadable model fails that job with the worker's own
 `input` error, such as `model_load_failed`, and is never offered to a slice.
 Inspections share the worker pool, limits, and retention of slices.
 
+## Edits
+
+`POST /uploads/{upload_id}/edits` applies one object tool through a disposable
+worker running the [edit operation](worker-protocol.md#edit-operation). The
+body names the tool, the 0-based `object`, and the object's placement as one
+row-major 4x4 `transform`; a cut adds its plane:
+
+```json
+{"tool": "cut", "object": 0, "transform": [1,0,0,100, 0,1,0,100, 0,0,1,0, 0,0,0,1],
+ "cut": {"point": [110, 110, 10], "normal": [0, 0, 1], "keep": "both", "flip_upper": false}}
+```
+
+`{"tool": "repair", "transform": [...]}` repairs the mesh instead. A cut
+without a plane, a repair with one, or an unknown field is a 422; a zero normal
+is `invalid_edit`. The response is the edit job, whose `operation` is `edit`.
+
+When the job succeeds, every model the worker published is stored as a new
+upload named after its source and side, such as `bracket (upper).stl` or
+`bracket (repaired).stl`, and inspected like any other upload. The job lists
+them under `derived_uploads`, each with its `inspection` job, so the browser
+loads an edited part exactly as it loads a fresh file, and a slice names it by
+its `upload_id`. Because a part's geometry is already in plate coordinates,
+the plater places it with an identity rotation at its own centre. The source
+upload is never changed, and derived uploads share the uploads' retention.
+
 ## Artifacts
 
 Artifacts are named, not addressed by path. A client asks for one by name, and
@@ -121,6 +147,8 @@ relative paths never reach a URL.
   whatever the outcome, because a failed run's report is the useful part.
 - `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
 - `mesh` and `inspection` are published by a succeeded inspection.
+- `edit_report` is published by a succeeded edit; its models become uploads
+  rather than artifacts.
 
 The layer preview is also served in pages: `GET
 /jobs/{job_id}/preview/layers?start=a&end=b` streams layers `a` through `b`

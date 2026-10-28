@@ -87,7 +87,7 @@ export interface JobError {
 }
 
 export interface JobArtifact {
-  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection";
+  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection" | "edit_report";
   media_type: string;
   size_bytes?: number;
   sha256?: string;
@@ -95,7 +95,7 @@ export interface JobArtifact {
 
 export interface Job {
   job_id: string;
-  operation: "slice" | "inspect";
+  operation: "slice" | "inspect" | "edit";
   correlation_id: string;
   state: JobState;
   progress: JobProgress;
@@ -106,6 +106,17 @@ export interface Job {
   retry_of: string | null;
   profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>>;
   timing: { duration_ms: number; cpu_time_ms: number } | null;
+  /** An edit's resulting models, each a new upload with its own inspection. */
+  derived_uploads?: Upload[];
+}
+
+/** The report of an edit, documented in `docs/web/plater.md`. */
+export interface EditReport {
+  format: "orca-web-edit";
+  version: number;
+  tool: "cut" | "repair";
+  parts: { side: "upper" | "lower" | "whole"; name: string; triangle_count: number }[];
+  repair?: { open_edges_before: number; open_edges_after: number; facets_added: number; facets_removed: number; facets_reversed: number };
 }
 
 /** A failure the API named, kept distinct from a network or parsing failure. */

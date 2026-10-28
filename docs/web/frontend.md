@@ -1,6 +1,6 @@
 # Browser application
 
-Status: Active contract for G5
+Status: Active contract for G5; phase 3b adds the object tools
 
 `web/frontend/` is the React, TypeScript, and Vite application chosen in
 [ADR 0002](adr/0002-web-stack.md), with three.js for the plate and the preview.
@@ -12,6 +12,8 @@ Status: Active contract for G5
 - Select, move, rotate, scale, duplicate, delete, and arrange objects with the
   pointer, the object panel, or the keyboard. An object outside the printer's
   printable volume is flagged and blocks slicing.
+- Cut, repair, lay on a face, and measure an object from its Tools panel; see
+  [the plater](plater.md#object-tools).
 - Choose a bundled printer, then a process and filament narrowed to that
   printer by the [API](api.md), including `compatible_printers_condition`
   answers from the engine.
@@ -64,6 +66,9 @@ against the API serving the real built bundle and the real native worker:
 - An unsupported or unreadable model never reaches the plate.
 - The prepared plate has no serious or critical axe-core WCAG 2 A/AA
   violations.
+- Cutting a cube at half height gives two 10 mm objects that slice below
+  10 mm, repair leaves a closed cube unchanged, laying the cube on its front
+  face turns it a quarter about X, and measuring reports a distance.
 
 Chromium always runs. `ORCA_WEB_E2E_BROWSERS` adds `firefox`, `webkit`, or
 `msedge` when that browser is installed. The `frontend-e2e` service runs

@@ -1,7 +1,9 @@
 import type { Inspection } from "./plater/mesh";
+import type { EditSubmission } from "./plater/tools";
 import type { PreviewIndex } from "./preview/preview";
 import {
   ApiError,
+  type EditReport,
   type EffectiveProfile,
   type Job,
   type JobArtifact,
@@ -74,6 +76,18 @@ export function uploadModel(file: File): Promise<Upload> {
   body.append("file", file);
   return request<Upload>("/uploads", { method: "POST", body });
 }
+
+/** Cut or repair one object of an upload; the parts become new uploads. */
+export function editUpload(uploadId: string, submission: EditSubmission): Promise<Job> {
+  return request<Job>(`/uploads/${uploadId}/edits`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(submission),
+  });
+}
+
+export const readEditReport = (jobId: string): Promise<EditReport> =>
+  request<EditReport>(`/jobs/${jobId}/artifacts/edit_report`);
 
 export interface PlacedObjectSubmission {
   upload_id: string;

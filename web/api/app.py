@@ -6,11 +6,12 @@ bytes are streamed to disk and only ever read by a disposable worker process.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,6 +24,7 @@ from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, l
 
 from . import API_VERSION, PROTOCOL_VERSION
 from .config import ApiConfig, from_environment
+from .edits import EditSpec
 from .errors import ApiError, from_catalog_error, from_settings_error
 from .jobs import (
     ARTIFACT_NAMES,
@@ -100,6 +102,49 @@ class SliceSubmission(BaseModel):
                 )
                 for placed in self.objects or ()
             ),
+        )
+
+
+class CutSubmission(BaseModel):
+    """A planar cut: a point on the plane and the normal pointing at the upper part, in plate millimetres."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    point: List[float] = Field(min_length=3, max_length=3)
+    normal: List[float] = Field(min_length=3, max_length=3)
+    keep: Literal["both", "upper", "lower"] = "both"
+    flip_upper: bool = False
+    place_on_cut: bool = False
+
+
+class EditSubmission(BaseModel):
+    """One object tool applied to one object of an upload, where the plater placed it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: Literal["cut", "repair"]
+    object: int = Field(default=0, ge=0, lt=MAX_PLATE_OBJECTS)
+    # Row-major 4x4 affine matrix in millimetres: the object's placement.
+    transform: List[float] = Field(min_length=16, max_length=16)
+    cut: Optional[CutSubmission] = None
+
+    @model_validator(mode="after")
+    def cut_has_a_plane(self) -> "EditSubmission":
+        if (self.tool == "cut") != (self.cut is not None):
+            raise ValueError("a cut, and only a cut, names its plane")
+        return self
+
+    def to_spec(self) -> EditSpec:
+        spec = EditSpec(tool=self.tool, transform=tuple(self.transform), object_index=self.object)
+        if self.cut is None:
+            return spec
+        return dataclasses.replace(
+            spec,
+            point=tuple(self.cut.point),
+            normal=tuple(self.cut.normal),
+            keep=self.cut.keep,
+            flip_upper=self.cut.flip_upper,
+            place_on_cut=self.cut.place_on_cut,
         )
 
 
@@ -247,6 +292,13 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         described = record.describe()
         described["inspection"] = request.app.state.jobs.inspect(record.upload_id, correlation_id(request))
         return described
+
+    @app.post(f"{PREFIX}/uploads/{{upload_id}}/edits", status_code=202, tags=["uploads"])
+    def edit_upload(
+        request: Request, submission: EditSubmission, upload_id: str = PathParam(max_length=64)
+    ) -> Dict[str, Any]:
+        """Cut or repair one object. Each resulting model becomes a new, inspected upload."""
+        return request.app.state.jobs.edit(upload_id, submission.to_spec(), correlation_id(request))
 
     @app.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
     def submit_job(request: Request, submission: SliceSubmission) -> Dict[str, Any]:

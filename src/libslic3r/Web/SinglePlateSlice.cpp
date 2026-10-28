@@ -412,6 +412,101 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
                   WorkerErrorCategory::Input);
 }
 
+// An edit produces at most an upper and a lower part.
+constexpr std::size_t MAX_EDIT_MODELS = 2;
+
+bool read_vector3(const nlohmann::json &value, std::array<double, 3> &target)
+{
+    if (!value.is_array() || value.size() != 3)
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        if (!value[axis].is_number() || !std::isfinite(value[axis].get<double>()) ||
+            std::abs(value[axis].get<double>()) > MAX_TRANSLATION_MM)
+            return false;
+        target[axis] = value[axis].get<double>();
+    }
+    return true;
+}
+
+void read_model_edit(const nlohmann::json &payload, SinglePlateSliceRequest &request,
+                     SinglePlateSliceRequestValidation &result)
+{
+    ModelEdit &edit = request.edit;
+    const auto index = payload.find("object");
+    if (index != payload.end()) {
+        if (!index->is_number_unsigned() || index->get<std::uint64_t>() >= MAX_PLATE_OBJECTS)
+            add_error(result, "invalid_plate_object", "object must be the 0-based index of an object in its model.",
+                      WorkerErrorCategory::Input);
+        else
+            edit.object_index = index->get<unsigned>();
+    }
+
+    const auto transform = payload.find("transform");
+    bool readable = transform != payload.end() && transform->is_array() && transform->size() == edit.transform.size();
+    for (std::size_t position = 0; readable && position < edit.transform.size(); ++position) {
+        readable = (*transform)[position].is_number();
+        if (readable)
+            edit.transform[position] = (*transform)[position].get<double>();
+    }
+    if (!readable || !is_valid_transform(edit.transform))
+        add_error(result, "invalid_instance_transform",
+                  "transform must be a finite, invertible, row-major 4x4 affine matrix in millimetres.",
+                  WorkerErrorCategory::Input);
+
+    const auto tool = payload.find("tool");
+    if (tool != payload.end() && *tool == "repair") {
+        edit.tool = ModelEdit::Tool::Repair;
+    } else if (tool != payload.end() && *tool == "cut") {
+        edit.tool = ModelEdit::Tool::Cut;
+        const auto cut = payload.find("cut");
+        const auto point = cut != payload.end() && cut->is_object() ? cut->find("point") : payload.end();
+        const auto normal = cut != payload.end() && cut->is_object() ? cut->find("normal") : payload.end();
+        if (point == payload.end() || normal == payload.end() || !read_vector3(*point, edit.plane_point) ||
+            !read_vector3(*normal, edit.plane_normal) ||
+            Vec3d(edit.plane_normal[0], edit.plane_normal[1], edit.plane_normal[2]).norm() < 1e-6) {
+            add_error(result, "invalid_cut_plane", "cut needs a finite point and a non-zero normal, both in millimetres.",
+                      WorkerErrorCategory::Input);
+            return;
+        }
+        const auto        keep_value = cut->find("keep");
+        const std::string keep       = keep_value == cut->end() ? "both" :
+                                       keep_value->is_string()  ? keep_value->get<std::string>() :
+                                                                  "";
+        if (keep != "both" && keep != "upper" && keep != "lower")
+            add_error(result, "invalid_cut_plane", "cut.keep must be 'both', 'upper', or 'lower'.", WorkerErrorCategory::Input);
+        edit.keep_upper = keep != "lower";
+        edit.keep_lower = keep != "upper";
+        for (const auto &[key, target] : {std::pair<const char *, bool *>{"flip_upper", &edit.flip_upper},
+                                          std::pair<const char *, bool *>{"place_on_cut", &edit.place_on_cut}}) {
+            const auto flag = cut->find(key);
+            if (flag == cut->end())
+                continue;
+            if (!flag->is_boolean())
+                add_error(result, "invalid_cut_plane", "cut.flip_upper and cut.place_on_cut are booleans.",
+                          WorkerErrorCategory::Input);
+            else
+                *target = flag->get<bool>();
+        }
+    } else {
+        add_error(result, "invalid_edit_tool", "tool must be 'cut' or 'repair'.");
+    }
+
+    const auto models = payload.find("output_models");
+    if (models == payload.end() || !models->is_array() || models->empty() || models->size() > MAX_EDIT_MODELS ||
+        !std::all_of(models->begin(), models->end(), [](const nlohmann::json &model) {
+            return model.is_string() && is_safe_relative_path(model.get_ref<const std::string &>()) &&
+                   lowercase_extension(model.get_ref<const std::string &>()) == ".stl";
+        })) {
+        add_error(result, "invalid_output_path", "output_models must list one or two safe relative .stl paths.");
+    } else {
+        for (const nlohmann::json &model : *models)
+            request.output_models.push_back(model.get<std::string>());
+    }
+    read_output_path(payload, "output_report", ".json", request.output_report, result);
+    if (request.output_report.empty())
+        add_error(result, "invalid_output_path", "An edit requires output_report.");
+}
+
 // Loads one model file the request names. A project archive contributes its
 // selected plate, and its configuration is kept in `project`.
 SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
@@ -527,7 +622,28 @@ SinglePlateSliceResult check_placement(const Model &model, const DynamicPrintCon
     return {true, {}, {}, WorkerErrorCategory::Validation};
 }
 
+SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                        Model &model, ProjectPlate &project)
+{
+    if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+        !loaded.success)
+        return loaded;
+    if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
+        return limited;
+    // A loose mesh declares no placement; the identity it is given here is
+    // what the browser replaces when it centers the object on the bed.
+    model.add_default_instances();
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
 } // namespace
+
+SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                        Model &model)
+{
+    ProjectPlate project;
+    return load_input_model(request, job_root, model, project);
+}
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized)
 {
@@ -543,8 +659,11 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     SinglePlateSliceRequest request;
     request.envelope = *envelope_validation.manifest;
 
-    request.operation = request.envelope.operation == "inspect" ? WorkerOperation::Inspect : WorkerOperation::Slice;
-    const bool inspecting = request.operation == WorkerOperation::Inspect;
+    request.operation = request.envelope.operation == "inspect" ? WorkerOperation::Inspect :
+                        request.envelope.operation == "edit"    ? WorkerOperation::Edit :
+                                                                  WorkerOperation::Slice;
+    // Inspections and edits read exactly one input model, never a composed plate.
+    const bool inspecting = request.operation != WorkerOperation::Slice;
 
     const auto input_model = payload.find("input_model");
     const auto objects = payload.find("objects");
@@ -562,7 +681,9 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         request.input_model = input_model->get<std::string>();
     }
 
-    if (inspecting) {
+    if (request.operation == WorkerOperation::Edit) {
+        read_model_edit(payload, request, result);
+    } else if (inspecting) {
         read_output_path(payload, "output_mesh", ".bin", request.output_mesh, result);
         read_output_path(payload, "output_inspection", ".json", request.output_inspection, result);
         if (request.output_mesh.empty() || request.output_inspection.empty())
@@ -837,16 +958,10 @@ SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, con
             callbacks.progress({"input", 5, "Loading model"});
         Model model;
         ProjectPlate project;
-        if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
-            !loaded.success)
+        if (const SinglePlateSliceResult loaded = load_input_model(request, job_root, model, project); !loaded.success)
             return loaded;
-        if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
-            return limited;
         if (callbacks.cancellation_requested && callbacks.cancellation_requested())
             return failure("job_canceled", "The inspection was canceled.", WorkerErrorCategory::Cancellation);
-        // A loose mesh declares no placement; the identity it is given here is
-        // what the browser replaces when it centers the object on the bed.
-        model.add_default_instances();
 
         if (callbacks.progress)
             callbacks.progress({"export", 60, "Exporting display mesh"});

@@ -1,6 +1,6 @@
 # Browser plater
 
-Status: Active contract for G5
+Status: Active contract for G5; phase 3b adds the object tools
 
 The plater lets a user compose one build plate in the browser and submit it as
 explicit placements. It never parses a model itself: every uploaded file is
@@ -92,11 +92,41 @@ unsliced surface, so the two are not expected to coincide exactly.
   90 degrees, Ctrl+D duplicates it, Delete removes it, Escape clears the
   selection.
 
+## Object tools
+
+The Tools panel of a selected object offers four tools. Two change geometry
+and run in a worker; two only read or change a placement and stay in the
+browser, which already holds the display mesh.
+
+- **Cut** shows a horizontal plane across the object at a chosen height above
+  the bed and keeps both parts, the upper, or the lower one, optionally turning
+  the upper part upside down. The worker and API accept any plane; the panel
+  offers the desktop's default horizontal one.
+- **Repair** closes holes, removes degenerate and unconnected facets, and fixes
+  normals, then reports what it changed.
+- **Lay on face** waits for a click on the object and rotates it so the
+  clicked face points straight down; the usual resting step then puts that
+  face on the bed. The rotation is composed with the current one and stored as
+  the item's X, Y, Z angles, so it is submitted like any other placement.
+- **Measure** waits for two clicks on any objects and shows the distance
+  between the points and its X, Y, and Z components.
+
+A cut or repair is submitted with the item's current matrix, so the worker
+edits the object exactly as shown. Its parts are new uploads whose geometry is
+already in plate coordinates, so each part replaces the item with an identity
+rotation, unit scale, and its own centre as the pivot. A cut's parts are then
+laid side by side, 6 mm apart, because the upper part would otherwise drop into
+the lower one's footprint. Other instances of the same upload are untouched.
+
 ## Tests
 
-`src/plater/plate.test.ts` covers the transform order, row-major
+`src/plater/tools.test.ts` covers laying on a face, measurement, cut and
+repair requests, and the spacing of cut parts. `src/plater/plate.test.ts` covers the transform order, row-major
 serialization, resting on the bed, round-tripping a declared placement, the
 printable-volume check, non-overlapping arrangement, and request grouping.
 `tests/libslic3r/test_plate_artifacts.cpp` covers inspection output, request
 validation, explicit placement, and the outside-the-plate refusal in the
-engine. The Playwright suite checks displayed bounds against the sliced result.
+engine. `tests/libslic3r/test_model_edit.cpp` covers edit requests, cut bounds,
+kept sides, flipped and tilted cuts, refused planes, and hole repair. The
+Playwright suite checks displayed bounds against the sliced result, and
+`e2e/tools.spec.ts` drives every tool in the browser.

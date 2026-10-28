@@ -12,13 +12,20 @@
 #include <utility>
 #include <vector>
 
+namespace Slic3r {
+class Model;
+}
+
 namespace Slic3r::Web {
 
 enum class WorkerOperation {
     // Slice one plate into G-code and, when asked, a layer preview.
     Slice,
     // Load one model and export its display geometry for the plater.
-    Inspect
+    Inspect,
+    // Apply one object tool, such as a planar cut or a mesh repair, and
+    // publish the resulting objects as new models.
+    Edit
 };
 
 // One object of an uploaded model file, placed on the plate by the browser.
@@ -29,6 +36,27 @@ struct PlateObject
     std::string                         model;
     unsigned                            object_index {0};
     std::vector<std::array<double, 16>> instances;
+};
+
+// The tool an edit applies to one object of its input model. The object is
+// first placed with `transform`, a row-major 4x4 matrix in millimetres, so the
+// plane and the produced models are all in plate coordinates.
+struct ModelEdit
+{
+    enum class Tool { Cut, Repair };
+
+    Tool                   tool {Tool::Repair};
+    unsigned               object_index {0};
+    std::array<double, 16> transform {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    // Cut only: a point on the plane and its normal, which points at the upper part.
+    std::array<double, 3>  plane_point {0, 0, 0};
+    std::array<double, 3>  plane_normal {0, 0, 1};
+    bool                   keep_upper {true};
+    bool                   keep_lower {true};
+    // Turn the upper part upside down, as the desktop cut tool offers.
+    bool                   flip_upper {false};
+    // Lay each part on its cut face, which matters only for a tilted plane.
+    bool                   place_on_cut {false};
 };
 
 struct SinglePlateSliceRequest
@@ -46,6 +74,11 @@ struct SinglePlateSliceRequest
     // Required by inspection: the display mesh and its JSON index.
     std::string output_mesh;
     std::string output_inspection;
+    // Required by an edit: the tool, the paths its models may be written to in
+    // order, and its JSON report.
+    ModelEdit edit;
+    std::vector<std::string> output_models;
+    std::string output_report;
     std::string machine_profile;
     std::string process_profile;
     std::string filament_profile;
@@ -101,5 +134,9 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
                                           const SinglePlateSliceCallbacks &callbacks = {});
 SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                      const SinglePlateSliceCallbacks &callbacks = {});
+// Loads `input_model` under the request's size, archive, and triangle limits,
+// giving every object at least one instance, as inspections and edits need.
+SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                        Model &model);
 
 } // namespace Slic3r::Web
