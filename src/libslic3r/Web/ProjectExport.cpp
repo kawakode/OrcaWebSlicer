@@ -92,6 +92,24 @@ void record_selection(const SinglePlateSliceRequest &request, const std::filesys
         config.erase(key);
 }
 
+// Engine defaults build enum lists without their names, which serialize as
+// empty tokens that no importer can read back. Every list is given the names
+// its definition declares before the configuration is written.
+template<typename Enums> void name_enum_list(DynamicPrintConfig &config, const std::string &key)
+{
+    if (auto *values = dynamic_cast<Enums *>(config.option(key)); values != nullptr && values->keys_map == nullptr)
+        if (const ConfigOptionDef *definition = config.def()->get(key))
+            values->keys_map = definition->enum_keys_map;
+}
+
+void name_enum_lists(DynamicPrintConfig &config)
+{
+    for (const std::string &key : config.keys()) {
+        name_enum_list<ConfigOptionEnumsGeneric>(config, key);
+        name_enum_list<ConfigOptionEnumsGenericNullable>(config, key);
+    }
+}
+
 // Removes the exporter's scratch directory however the export ends.
 struct ScratchDirectory
 {
@@ -115,6 +133,7 @@ SinglePlateSliceResult export_plate_project(const SinglePlateSliceRequest &reque
     if (callbacks.progress)
         callbacks.progress({"export", 40, "Writing project"});
     record_selection(request, job_root, config);
+    name_enum_lists(config);
 
     WorkerManifestError path_error;
     std::optional<ArtifactTransaction> artifact =

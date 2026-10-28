@@ -77,6 +77,9 @@ const std::string TWO_CUBES = R"("objects": [{"model": "input/cube.obj", "instan
     {"transform": [0,-1,0,140, 1,0,0,80, 0,0,1,10, 0,0,0,1]}
 ]}])";
 
+// The engine defaults use relative extrusion, which needs a reset per layer.
+const std::string RESET_EXTRUSION = R"("settings": {"layer_change_gcode": "G92 E0\n"})";
+
 const std::string OVERRIDES = R"("settings": {"sparse_infill_density": "35%", "nozzle_temperature": "215"})";
 
 BoundingBoxf3 instance_box(const ModelObject &object, std::size_t instance)
@@ -138,7 +141,9 @@ TEST_CASE("An exported project reloads in the desktop importer", "[ProjectExport
     CHECK(is_orca_3mf);
 
     REQUIRE(plates.size() == 1);
-    CHECK(plates.front()->objects_and_instances.size() == 2);
+    // The importer records plate membership per object; the desktop places
+    // each instance on its plate from its position.
+    CHECK(plates.front()->obj_inst_map.size() == 1);
     REQUIRE(model.objects.size() == 1);
     REQUIRE(model.objects.front()->instances.size() == 2);
     // Both copies keep their placement, the floating one dropped onto the bed.
@@ -207,7 +212,8 @@ TEST_CASE("An exported project reopens in the browser with its selection", "[Pro
     const nlohmann::json &first = inspection["objects"][0]["instances"][0]["transform"];
     const SinglePlateSliceResult sliced = slice_single_plate(
         valid_request(manifest("slice", R"({"objects": [{"model": "input/saved.3mf", "instances": [{"transform": )" +
-                                            first.dump() + R"(}]}], "output_gcode": "output/plate.gcode"})")),
+                                            first.dump() + R"(}]}], "output_gcode": "output/plate.gcode", )" +
+                                            RESET_EXTRUSION + "}")),
         root.path);
     INFO(sliced.code << ": " << sliced.message);
     CHECK(sliced.success);
@@ -220,12 +226,14 @@ TEST_CASE("Sliced G-code embeds rendered thumbnails only when asked", "[ProjectE
         {"transform": [1,0,0,100, 0,1,0,100, 0,0,1,10, 0,0,0,1]}]}])";
 
     const SinglePlateSliceResult plain = slice_single_plate(
-        valid_request(manifest("slice", "{" + plate + R"(, "output_gcode": "output/plain.gcode"})")), root.path);
+        valid_request(manifest("slice", "{" + plate + R"(, "output_gcode": "output/plain.gcode", )" + RESET_EXTRUSION + "}")),
+        root.path);
     REQUIRE(plain.success);
     CHECK(root.read("output/plain.gcode").find("thumbnail begin") == std::string::npos);
 
     const SinglePlateSliceResult thumbnails = slice_single_plate(
-        valid_request(manifest("slice", "{" + plate + R"(, "output_gcode": "output/thumb.gcode", "thumbnails": true})")),
+        valid_request(manifest("slice", "{" + plate + R"(, "output_gcode": "output/thumb.gcode", "thumbnails": true, )" +
+                                            RESET_EXTRUSION + "}")),
         root.path);
     INFO(thumbnails.code << ": " << thumbnails.message);
     REQUIRE(thumbnails.success);

@@ -31,7 +31,9 @@ names of the selected bundled presets, and `different_settings_to_system`
 lists the overridden settings in the desktop's order (process, each filament,
 printer). The desktop therefore opens the project on the same system presets,
 marked as modified by the overrides. `inherits`, `compatible_printers`, and
-the other keys the desktop strips from a project are removed.
+the other keys the desktop strips from a project are removed. Enum lists the engine
+defaults build without their value names, such as `extruder_type`, are given
+those names first, because an empty token cannot be read back by any importer.
 
 A plate may be saved with objects outside the printable volume, as on the
 desktop; only slicing refuses them. Multiple plates are not exported yet: the
