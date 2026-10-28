@@ -1,0 +1,49 @@
+name: 'Web host setup'
+description: 'Prepare a runner to execute docker/web/compose.yml service commands directly'
+inputs:
+  native:
+    description: 'Also install the native toolchain and restore the dependency build'
+    required: false
+    default: 'false'
+  deps-cache-key:
+    description: 'Dependency build cache key, required when native is true'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    # The Compose services address the repository as /workspace and their
+    # caches below /cache; scripts/run_web_service.py relies on both paths.
+    - name: Map the Compose paths onto the runner
+      shell: bash
+      run: |
+        sudo ln -sfn "$GITHUB_WORKSPACE" /workspace
+        sudo mkdir -p /cache
+        sudo chown "$USER" /cache
+
+    - name: Install the API's Python packages
+      shell: bash
+      run: python3 -m pip install --user --break-system-packages -r docker/web/requirements.txt
+
+    - name: Apt-Install Dependencies
+      if: inputs.native == 'true'
+      uses: ./.github/actions/apt-install-deps
+
+    - name: Install ccache
+      if: inputs.native == 'true'
+      shell: bash
+      run: sudo apt-get install -y --no-install-recommends ccache
+
+    # Same CMake line as docker/web/Dockerfile.
+    - uses: lukka/get-cmake@latest
+      if: inputs.native == 'true'
+      with:
+        cmakeVersion: "4.3.0"
+
+    - name: Restore the dependency build
+      if: inputs.native == 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/deps/build/OrcaSlicer_dep
+        key: ${{ inputs.deps-cache-key }}
+        fail-on-cache-miss: true
