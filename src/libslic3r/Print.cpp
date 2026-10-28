@@ -2331,6 +2331,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             return false;
         if (model_obj1->config.get() != model_obj2->config.get())
             return false;
+        // Height range modifiers change how an object is sliced, so two
+        // otherwise identical objects only share slices when their ranges match.
+        if (!std::equal(model_obj1->layer_config_ranges.begin(), model_obj1->layer_config_ranges.end(),
+                        model_obj2->layer_config_ranges.begin(), model_obj2->layer_config_ranges.end(),
+                        [](const auto &range1, const auto &range2) {
+                            return range1.first == range2.first && range1.second.get() == range2.second.get();
+                        }))
+            return false;
         return true;
     };
     int object_count = m_objects.size();

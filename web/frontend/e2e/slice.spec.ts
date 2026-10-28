@@ -193,17 +193,17 @@ test("the settings mode shows more of the engine catalog", async ({ page }) => {
   await page.goto("/");
   await waitForProfiles(page);
 
-  // Wall loops are an advanced setting on the desktop, and so here.
-  await page.getByTestId("settings-search").fill("wall loops");
-  await expect(page.getByTestId("setting-wall_loops")).toHaveCount(0);
+  // The outer wall speed is an advanced setting on the desktop, and so here.
+  await page.getByTestId("settings-search").fill("outer_wall_speed");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toHaveCount(0);
   await expect(page.getByTestId("settings-empty")).toBeVisible();
   await page.getByTestId("settings-mode").selectOption("advanced");
-  await expect(page.getByTestId("setting-wall_loops")).toBeVisible();
-  await page.getByTestId("setting-wall_loops").fill("4");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toBeVisible();
+  await page.getByTestId("setting-outer_wall_speed").fill("120");
 
   // An overridden setting stays visible when the mode would hide it.
   await page.getByTestId("settings-mode").selectOption("simple");
-  await expect(page.getByTestId("setting-wall_loops")).toHaveValue("4");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toHaveValue("120");
 });
 
 test("an object and a height range of it carry their own settings", async ({ page }) => {

@@ -301,7 +301,7 @@ std::string two_cubes(const std::string &second_cube_fields)
         "output_gcode": "output/plate.gcode",
         "output_preview": "output/preview.bin",
         "output_preview_index": "output/preview.json",
-        "settings": {"layer_height": "0.2", "initial_layer_print_height": "0.2"}
+        "settings": {"layer_height": "0.2", "initial_layer_print_height": "0.2", "layer_change_gcode": "G92 E0\n"}
     })");
 }
 
