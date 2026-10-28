@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract for G4
+Status: Active contract; extended for G5
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -21,18 +21,22 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | --- | --- | --- |
 | `GET` | `/health` | Liveness plus the protocol and API versions |
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
-| `POST` | `/uploads` | Store one STL, OBJ, or 3MF model |
+| `GET` | `/profiles/effective` | A selected chain's curated values and bed |
+| `GET` | `/settings` | The engine's catalog of overridable settings |
+| `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
 | `POST` | `/jobs` | Submit one slice request |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
 | `POST` | `/jobs/{job_id}/retry` | Rerun the same inputs under a new job ID |
-| `GET` | `/jobs/{job_id}/artifacts/{name}` | Download `gcode` or `result` |
+| `GET` | `/jobs/{job_id}/artifacts/{name}` | Download one named artifact |
+| `GET` | `/jobs/{job_id}/preview/layers` | Stream a range of preview layers |
 
 Request bodies are validated against the published schema before any handler
 runs, and unknown fields are refused rather than ignored. A slice request names
-an upload, one profile of each kind, optional curated setting overrides, and an
-optional 1-based `plate_index`:
+its geometry, one profile of each kind, optional curated setting overrides, and
+an optional 1-based `plate_index`. The geometry is either one `upload_id`,
+which the worker arranges as in G4:
 
 ```json
 {
@@ -44,6 +48,32 @@ optional 1-based `plate_index`:
   "plate_index": 1
 }
 ```
+
+or the `objects` of a plate composed in the [plater](plater.md), each naming an
+upload, an object index inside it, and one row-major 4x4 transform in
+millimetres per instance. The worker applies those transforms unchanged:
+
+```json
+{
+  "objects": [
+    {"upload_id": "3f2a...", "object": 0, "instances": [
+      {"transform": [1,0,0,60, 0,1,0,70, 0,0,1,0, 0,0,0,1]},
+      {"transform": [1,0,0,90, 0,1,0,70, 0,0,1,0, 0,0,0,1]}
+    ]}
+  ],
+  "machine_profile": "Anycubic/machine/Anycubic Kobra 0.4 nozzle",
+  "process_profile": "Anycubic/process/0.20mm Standard @Anycubic Kobra",
+  "filament_profile": "Anycubic/filament/Anycubic Generic PLA"
+}
+```
+
+Each upload a plate uses is staged into the job once, whatever the number of
+objects that reference it. A plate holds at most 256 objects from 16 uploads.
+
+Overrides are checked against the engine's [settings catalog](#settings) before
+any worker starts: an unknown key is `unknown_setting`, and a value of the wrong
+type, outside its range, or not among its choices is `invalid_setting_value`,
+both 422. The worker still validates everything it receives.
 
 A failure is always the same shape, and always carries a stable code from the
 layer that produced it:
@@ -72,15 +102,47 @@ Every terminal path is contained. A worker crash, a malformed event stream, a
 timeout, a limit violation, and a missing artifact are all one job's failure,
 recorded with the executor's own error code, and the API process keeps serving.
 
+## Inspections
+
+Every upload is inspected as soon as it is stored. `POST /uploads` returns the
+upload record together with `inspection`, an ordinary job whose `operation` is
+`inspect`. When it succeeds it publishes the `mesh` and `inspection` artifacts
+the plater draws. An unreadable model fails that job with the worker's own
+`input` error, such as `model_load_failed`, and is never offered to a slice.
+Inspections share the worker pool, limits, and retention of slices.
+
 ## Artifacts
 
-Artifacts are named, not addressed by path. A client asks for `gcode` or
-`result`, and the API returns the file it validated inside that job directory;
-the worker's relative paths never reach a URL.
+Artifacts are named, not addressed by path. A client asks for one by name, and
+the API returns the file it validated inside that job directory; the worker's
+relative paths never reach a URL.
 
 - `result` is available once the executor validated a terminal `result.json`,
   whatever the outcome, because a failed run's report is the useful part.
-- `gcode` is available only for a `succeeded` job that declared it.
+- `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
+- `mesh` and `inspection` are published by a succeeded inspection.
+
+The layer preview is also served in pages: `GET
+/jobs/{job_id}/preview/layers?start=a&end=b` streams layers `a` through `b`
+without loading the file, as described in [the preview contract](preview.md).
+
+## Settings
+
+`GET /settings` serves the catalog the worker exports with
+`--export-settings-catalog`, read once at startup. Each curated setting carries
+its group, the profile kind that owns it, its type, unit, range, choices,
+default, and the setting that enables it, all taken from `PrintConfig.cpp`. The
+browser builds its settings form from this document alone.
+
+`GET /profiles/effective?machine=...&process=...&filament=...` resolves a
+selected chain and returns each curated setting's flattened value, the three
+profiles with their `inherits_chain`, and the printer's `printable_area` and
+`printable_height`. A blank override in the browser keeps exactly the value
+shown here.
+
+Every job records `profiles`, the full inheritance chain of each selected
+profile, root first, next to the overrides it applied, so a report names every
+profile that contributed to the result.
 
 Anything the executor did not validate is deleted rather than served. A
 cancellation, crash, timeout, or output-limit failure removes the whole job
@@ -92,10 +154,13 @@ directory, so a partially written G-code file is never downloadable.
 lists only user-selectable profiles. Passing `?printer=<machine profile id>`
 narrows the process and filament lists to those the printer accepts.
 
-Compatibility in G4 uses the profiles' declared `compatible_printers` lists
-only. `compatible_printers_condition` expressions need the engine's config
-evaluator, which arrives with the generated settings catalog in G5. A profile
-that declares no restriction is offered for every printer.
+A declared `compatible_printers` list wins, as on the desktop. A profile that
+only declares a `compatible_printers_condition` is evaluated once at startup by
+the worker's `--evaluate-compatibility`, which runs the engine's own placeholder
+parser against every bundled printer; the API never interprets the expression
+language. A condition the engine cannot parse is treated as compatible, again
+as on the desktop. A profile that declares no restriction is offered for every
+printer.
 
 A selected chain is flattened once, at submission, into three job-local JSON
 files. The worker therefore never reads the bundled profile tree and never

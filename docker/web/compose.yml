@@ -122,6 +122,8 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[FlushVolumes]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SliceRequest]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[SettingsCatalog]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[PlateArtifacts]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -309,6 +311,7 @@ services:
       - -lc
       - >-
         npm ci --no-audit --no-fund
+        && npm test
         && npm run build
 
   frontend:

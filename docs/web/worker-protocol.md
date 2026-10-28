@@ -1,6 +1,6 @@
 # Worker protocol version 1
 
-Status: Active contract for G3
+Status: Active contract; G5 added plate composition, inspection, and preview
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
@@ -76,6 +76,52 @@ forcibly terminate a worker that does not stop within its grace period.
 The implemented [isolated executor](executor.md) applies those hard Linux
 limits, bounds event and diagnostic capture, and validates the terminal worker
 contract before returning it to a future API.
+
+## Plate composition
+
+A slice names its geometry in one of two ways, never both
+(`ambiguous_plate`):
+
+- `input_model` slices one file. Loose meshes and plate-less archives are
+  arranged by the engine, exactly as in G4.
+- `objects` slices a plate the browser composed. Each entry names a `model`
+  file, the 0-based `object` inside it (default 0), and 1 to 64 `instances`,
+  each a `transform`: a row-major 4x4 matrix in millimetres.
+
+```json
+"objects": [
+  {"model": "input/model-0.stl", "object": 0, "instances": [
+    {"transform": [1,0,0,60, 0,1,0,70, 0,0,1,0, 0,0,0,1]}
+  ]}
+]
+```
+
+A plate holds at most 256 objects from at most 16 model files. A transform must
+be finite and affine with an invertible linear part and a translation within
+100 m (`invalid_instance_transform`); an object index the file does not contain
+is `unknown_model_object`. The matrix replaces the instance placement the file
+declared and is applied to the object's own coordinates, the same coordinates
+an inspection exports. The worker neither arranges nor centers such a plate:
+it only lifts objects that are entirely below the bed, and refuses any instance
+whose footprint leaves the printer's `printable_area` or whose top exceeds
+`printable_height` with the `validation` error `object_outside_plate`. When
+the plate draws on a project archive, the first archive listed contributes its
+embedded configuration.
+
+`output_preview` and `output_preview_index` optionally ask for a layer preview
+of the produced G-code, always together. The format is documented in
+[the preview contract](preview.md). The preview is published only alongside its
+G-code, and withdrawn with it if either fails.
+
+## Inspection operation
+
+`operation.name` may be `inspect`. Its payload names one `input_model` and two
+outputs, `output_mesh` (`.bin`) and `output_inspection` (`.json`); profiles and
+settings are not read. The model is loaded with the same importer, size,
+triangle, and archive limits as a slice, and its display geometry is published
+as artifacts of kind `mesh` and `inspection`, described in
+[the plater contract](plater.md). An inspection is how the browser sees a model
+without the API ever parsing one.
 
 ## Event transport
 
@@ -165,7 +211,8 @@ The worker canonicalizes the job root once. Input, profile, and output paths
 must be relative paths contained by that root; absolute paths, parent traversal,
 and symlinks that resolve outside the root are rejected.
 
-G-code is first written to a hidden, job-specific `.partial` file beside its
+Every artifact, including the inspection and preview files, follows the same
+rule. G-code is first written to a hidden, job-specific `.partial` file beside its
 requested target. The worker validates that temporary file and atomically
 renames it to the requested path without replacing an existing target. Normal
 validation, slicing, export, cancellation, and output-limit failures remove the

@@ -12,7 +12,9 @@ This directory is the source of truth for the web effort:
 - [Worker protocol version 1](worker-protocol.md)
 - [Isolated worker executor and job directories](executor.md)
 - [Minimum API](api.md)
-- [First browser screen](frontend.md)
+- [Browser application](frontend.md)
+- [Browser plater](plater.md)
+- [Layer preview](preview.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 
