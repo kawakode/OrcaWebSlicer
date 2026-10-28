@@ -459,10 +459,8 @@ void read_model_edit(const nlohmann::json &payload, SinglePlateSliceRequest &req
     } else if (tool != payload.end() && *tool == "cut") {
         edit.tool = ModelEdit::Tool::Cut;
         const auto cut = payload.find("cut");
-        const auto point = cut != payload.end() && cut->is_object() ? cut->find("point") : payload.end();
-        const auto normal = cut != payload.end() && cut->is_object() ? cut->find("normal") : payload.end();
-        if (point == payload.end() || normal == payload.end() || !read_vector3(*point, edit.plane_point) ||
-            !read_vector3(*normal, edit.plane_normal) ||
+        if (cut == payload.end() || !cut->is_object() || !cut->contains("point") || !cut->contains("normal") ||
+            !read_vector3(cut->at("point"), edit.plane_point) || !read_vector3(cut->at("normal"), edit.plane_normal) ||
             Vec3d(edit.plane_normal[0], edit.plane_normal[1], edit.plane_normal[2]).norm() < 1e-6) {
             add_error(result, "invalid_cut_plane", "cut needs a finite point and a non-zero normal, both in millimetres.",
                       WorkerErrorCategory::Input);
