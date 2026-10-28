@@ -122,6 +122,8 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[FlushVolumes]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SliceRequest]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[SettingsCatalog]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[PlateArtifacts]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -251,6 +253,15 @@ services:
       - --native-baselines
       - build/web-baseline
 
+  worker-matrix:
+    <<: *build-environment
+    network_mode: none
+    command:
+      - python3
+      - scripts/web_worker_matrix.py
+      - --worker
+      - build-worker/src/Release/orca-slicer-worker
+
   executor-smoke:
     <<: *build-environment
     network_mode: none
@@ -309,6 +320,7 @@ services:
       - -lc
       - >-
         npm ci --no-audit --no-fund
+        && npm test
         && npm run build
 
   frontend:
@@ -334,8 +346,10 @@ services:
       - >-
         npm ci --no-audit --no-fund
         && npm run build
-        && npx playwright install --with-deps chromium
-        && npm run e2e
+        && npx playwright install --with-deps chromium firefox webkit
+        && ORCA_WEB_E2E_BROWSERS=chromium,firefox npm run e2e
+        && (ORCA_WEB_E2E_BROWSERS=webkit npx playwright test --project webkit
+            || echo "WebKit failures are reported but not release-blocking.")
 
   baseline:
     <<: *build-environment

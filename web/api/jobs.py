@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import tempfile
@@ -22,22 +23,42 @@ from web_job_directory import (
     sweep_job_directories,
 )
 from web_profile_catalog import ProfileCatalog, ProfileCatalogError
+from web_settings_catalog import SettingsCatalog, SettingsCatalogError
 from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_path
 
 from . import PROTOCOL_VERSION
 from .config import ApiConfig
-from .errors import ApiError, from_catalog_error, from_job_directory_error
-from .uploads import UploadRecord, UploadStore
+from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
+from .uploads import UploadStore
 
 
 MAX_SETTINGS = 256
 MAX_SETTING_VALUE_CHARS = 4096
 MAX_PLATE_INDEX = 64
+# Mirrors the worker's own plate bounds so an oversized plate is refused here.
+MAX_PLATE_OBJECTS = 256
+MAX_OBJECT_INSTANCES = 64
+MAX_PLATE_UPLOADS = 16
+# One preview page is read in chunks, never held whole.
+MAX_PREVIEW_PAGE_BYTES = 256 * 1024 * 1024
+PREVIEW_CHUNK_BYTES = 1024 * 1024
 SETTING_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled"})
 OUTPUT_GCODE = "output/model.gcode"
+OUTPUT_PREVIEW = "output/preview.bin"
+OUTPUT_PREVIEW_INDEX = "output/preview.json"
+OUTPUT_MESH = "output/mesh.bin"
+OUTPUT_INSPECTION = "output/inspection.json"
 # Artifacts are downloaded by name, never by the worker's own relative path.
-ARTIFACT_NAMES = ("gcode", "result")
+# A worker artifact's kind is its public name.
+ARTIFACT_MEDIA_TYPES = {
+    "gcode": ("text/x.gcode", ".gcode"),
+    "preview": ("application/octet-stream", "-preview.bin"),
+    "preview_index": ("application/json", "-preview.json"),
+    "mesh": ("application/octet-stream", "-mesh.bin"),
+    "inspection": ("application/json", "-inspection.json"),
+}
+ARTIFACT_NAMES = ("result",) + tuple(ARTIFACT_MEDIA_TYPES)
 
 # An executor status that is not "completed" never carries a worker result, so
 # the API states the failure in the worker's own error vocabulary instead.
@@ -50,25 +71,68 @@ _EXECUTOR_FAILURES = {
 
 
 @dataclasses.dataclass(frozen=True)
-class SliceRequest:
-    """The immutable inputs of one job, reused verbatim by a retry."""
+class PlacedObject:
+    """One object of an upload, with the instance transforms the plater chose.
+
+    Each transform is a row-major 4x4 matrix in millimetres that replaces the
+    placement the file declared.
+    """
 
     upload_id: str
-    machine_profile: str
-    process_profile: str
-    filament_profile: str
-    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
-    plate_index: int = 1
+    object_index: int = 0
+    instances: Tuple[Tuple[float, ...], ...] = ()
 
     def describe(self) -> Dict[str, Any]:
         return {
             "upload_id": self.upload_id,
-            "machine_profile": self.machine_profile,
-            "process_profile": self.process_profile,
-            "filament_profile": self.filament_profile,
-            "settings": dict(self.settings),
-            "plate_index": self.plate_index,
+            "object": self.object_index,
+            "instances": [{"transform": list(transform)} for transform in self.instances],
         }
+
+
+@dataclasses.dataclass(frozen=True)
+class SliceRequest:
+    """The immutable inputs of one job, reused verbatim by a retry.
+
+    A slice names either one `upload_id`, which the worker arranges, or the
+    placed `objects` of a plate. An inspection names one upload and nothing
+    else.
+    """
+
+    upload_id: Optional[str] = None
+    machine_profile: str = ""
+    process_profile: str = ""
+    filament_profile: str = ""
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+    plate_index: int = 1
+    objects: Tuple[PlacedObject, ...] = ()
+    operation: str = "slice"
+
+    def describe(self) -> Dict[str, Any]:
+        described: Dict[str, Any] = {"operation": self.operation, "upload_id": self.upload_id}
+        if self.operation == "slice":
+            described.update(
+                {
+                    "machine_profile": self.machine_profile,
+                    "process_profile": self.process_profile,
+                    "filament_profile": self.filament_profile,
+                    "settings": dict(self.settings),
+                    "plate_index": self.plate_index,
+                }
+            )
+            if self.objects:
+                described["objects"] = [placed.describe() for placed in self.objects]
+        return described
+
+    def upload_ids(self) -> List[str]:
+        """The uploads this job stages, each once, in first-use order."""
+        if not self.objects:
+            return [self.upload_id] if self.upload_id else []
+        ordered: List[str] = []
+        for placed in self.objects:
+            if placed.upload_id not in ordered:
+                ordered.append(placed.upload_id)
+        return ordered
 
 
 @dataclasses.dataclass
@@ -88,11 +152,17 @@ class JobRecord:
     error: Optional[Dict[str, str]] = None
     result: Optional[Dict[str, Any]] = None
     retry_of: Optional[str] = None
+    # The effective profile chain this job was resolved from, kept so a report
+    # names every inherited profile and not only the selected leaf.
+    profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    # The parsed preview index, read once on the first page request.
+    preview_index: Optional[Dict[str, Any]] = None
     cancellation: threading.Event = dataclasses.field(default_factory=threading.Event)
 
     def describe(self) -> Dict[str, Any]:
         return {
             "job_id": self.job_id,
+            "operation": self.request.operation,
             "correlation_id": self.correlation_id,
             "state": self.state,
             "progress": dict(self.progress),
@@ -100,6 +170,7 @@ class JobRecord:
             "error": dict(self.error) if self.error else None,
             "artifacts": self._describe_artifacts(),
             "request": self.request.describe(),
+            "profiles": dict(self.profiles),
             "retry_of": self.retry_of,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -117,11 +188,12 @@ class JobRecord:
             return []
         described = [{"name": "result", "media_type": "application/json"}]
         for artifact in self.result.get("artifacts", []):
-            if isinstance(artifact, dict) and artifact.get("kind") == "gcode":
+            kind = artifact.get("kind") if isinstance(artifact, dict) else None
+            if kind in ARTIFACT_MEDIA_TYPES:
                 described.append(
                     {
-                        "name": "gcode",
-                        "media_type": "text/x.gcode",
+                        "name": kind,
+                        "media_type": ARTIFACT_MEDIA_TYPES[kind][0],
                         "size_bytes": artifact.get("size_bytes"),
                         "sha256": artifact.get("sha256"),
                     }
@@ -137,10 +209,14 @@ class JobService:
         config: ApiConfig,
         catalog: ProfileCatalog,
         uploads: UploadStore,
+        settings: Optional[SettingsCatalog] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._config = config
         self._catalog = catalog
+        # Without a catalog only the shape of an override is checked and the
+        # worker remains the sole judge of its value.
+        self._settings = settings
         self._uploads = uploads
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
@@ -175,45 +251,102 @@ class JobService:
                     )
                 return self._readable(record.path / "result.json"), "application/json", f"{job_id}-result.json"
 
-            if record.state == "succeeded" and record.result is not None:
-                for artifact in record.result.get("artifacts", []):
-                    if not isinstance(artifact, dict) or artifact.get("kind") != "gcode":
-                        continue
-                    path = resolve_artifact_path(record.path, artifact.get("path"))
-                    if path is not None:
-                        return self._readable(path), "text/x.gcode", f"{job_id}.gcode"
-            raise ApiError("artifact_unavailable", "This job published no G-code.", 409)
+            path = self._artifact_path(record, name)
+            media_type, suffix = ARTIFACT_MEDIA_TYPES[name]
+            return self._readable(path), media_type, f"{job_id}{suffix}"
+
+    def preview_page(self, job_id: str, start: int, end: int) -> Tuple[Path, int, int]:
+        """Locate the bytes of preview layers `start` to `end`, inclusive.
+
+        The index is validated against the segment file once, so a page is a
+        single contiguous range that is streamed rather than loaded.
+        """
+        with self._lock:
+            record = self._require(job_id)
+            segments = self._readable(self._artifact_path(record, "preview"))
+            if record.preview_index is None:
+                record.preview_index = self._load_preview_index(record, segments.stat().st_size)
+            layers = record.preview_index["layers"]
+        if not 0 <= start <= end < len(layers):
+            raise ApiError("invalid_preview_range", f"Layers must lie within 0 to {len(layers) - 1}.", 416)
+        offset = layers[start]["offset"]
+        length = layers[end]["offset"] + layers[end]["count"] * record.preview_index["segment_bytes"] - offset
+        if length > MAX_PREVIEW_PAGE_BYTES:
+            raise ApiError("preview_page_too_large", "Request fewer layers at a time.", 413)
+        return segments, offset, length
+
+    def _artifact_path(self, record: JobRecord, name: str) -> Path:
+        if record.state == "succeeded" and record.result is not None:
+            for artifact in record.result.get("artifacts", []):
+                if not isinstance(artifact, dict) or artifact.get("kind") != name:
+                    continue
+                path = resolve_artifact_path(record.path, artifact.get("path"))
+                if path is not None:
+                    return path
+        raise ApiError("artifact_unavailable", f"This job published no {name} artifact.", 409)
+
+    def _load_preview_index(self, record: JobRecord, segment_file_bytes: int) -> Dict[str, Any]:
+        path = self._readable(self._artifact_path(record, "preview_index"))
+        try:
+            index = json.loads(path.read_text(encoding="utf-8"))
+            segment_bytes = int(index["segment_bytes"])
+            layers = [{"offset": int(layer["offset"]), "count": int(layer["count"])} for layer in index["layers"]]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ApiError("preview_unreadable", "The preview index could not be read.", 500) from error
+        expected = 0
+        for layer in layers:
+            # Layers are contiguous and ordered, so every page is one range.
+            if layer["offset"] != expected or layer["count"] < 0:
+                raise ApiError("preview_unreadable", "The preview index does not match its segments.", 500)
+            expected += layer["count"] * segment_bytes
+        if segment_bytes <= 0 or expected != segment_file_bytes:
+            raise ApiError("preview_unreadable", "The preview index does not match its segments.", 500)
+        return {"segment_bytes": segment_bytes, "layers": layers}
 
     # Commands
 
     def submit(
         self, request: SliceRequest, correlation_id: str, retry_of: Optional[str] = None
     ) -> Dict[str, Any]:
-        upload = self._uploads.get(request.upload_id)
-        self._validate(request)
+        uploads = [self._uploads.get(upload_id) for upload_id in request.upload_ids()]
+        self._validate(request, len(uploads))
         self.sweep()
 
         job_id = f"job-{uuid.uuid4().hex}"
+        # A single legacy upload keeps its original staged name.
+        models = {
+            upload.upload_id: (
+                f"input/model.{upload.model_format}"
+                if not request.objects
+                else f"input/model-{position}.{upload.model_format}"
+            )
+            for position, upload in enumerate(uploads)
+        }
+        inputs = [JobInput(models[upload.upload_id], upload.path, "model") for upload in uploads]
+        selected: Dict[str, Any] = {}
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
-            try:
-                profiles = self._catalog.materialize(
-                    request.machine_profile,
-                    request.process_profile,
-                    request.filament_profile,
-                    Path(staging),
-                )
-            except ProfileCatalogError as error:
-                raise from_catalog_error(error) from error
-            inputs = [JobInput(f"input/model.{upload.model_format}", upload.path, "model")]
-            inputs += [
-                JobInput(f"profiles/{kind}.json", path, "profile")
-                for kind, path in sorted(profiles.items())
-            ]
+            if request.operation == "slice":
+                try:
+                    selected = self._catalog.select(
+                        request.machine_profile, request.process_profile, request.filament_profile
+                    )
+                    profiles = self._catalog.materialize(
+                        request.machine_profile,
+                        request.process_profile,
+                        request.filament_profile,
+                        Path(staging),
+                    )
+                except ProfileCatalogError as error:
+                    raise from_catalog_error(error) from error
+                inputs += [
+                    JobInput(f"profiles/{kind}.json", path, "profile")
+                    for kind, path in sorted(profiles.items())
+                ]
             try:
                 prepared = prepare_job_directory(
                     self._config.jobs_root,
                     job_id,
-                    self._manifest(job_id, upload, request),
+                    self._manifest(job_id, models, request),
                     inputs,
                     self._config.job_limits,
                 )
@@ -227,6 +360,10 @@ class JobService:
             path=prepared.path,
             created_at=time.time(),
             retry_of=retry_of,
+            profiles={
+                kind: {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)}
+                for kind, entry in selected.items()
+            },
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -395,7 +532,27 @@ class JobService:
             raise ApiError("artifact_unavailable", "The artifact is no longer available.", 410)
         return path
 
-    def _validate(self, request: SliceRequest) -> None:
+    def inspect(self, upload_id: str, correlation_id: str) -> Dict[str, Any]:
+        """Export an upload's display geometry through a disposable worker."""
+        return self.submit(SliceRequest(upload_id=upload_id, operation="inspect"), correlation_id)
+
+    def _validate(self, request: SliceRequest, upload_count: int) -> None:
+        if request.operation == "inspect":
+            if upload_count != 1 or request.objects:
+                raise ApiError("invalid_inspection", "An inspection names exactly one upload.")
+            return
+        if bool(request.upload_id) == bool(request.objects):
+            raise ApiError("invalid_plate", "A slice names either upload_id or objects, not both.")
+        if len(request.objects) > MAX_PLATE_OBJECTS or upload_count > MAX_PLATE_UPLOADS:
+            raise ApiError(
+                "invalid_plate",
+                f"A plate holds at most {MAX_PLATE_OBJECTS} objects from {MAX_PLATE_UPLOADS} uploads.",
+            )
+        for placed in request.objects:
+            if not 1 <= len(placed.instances) <= MAX_OBJECT_INSTANCES:
+                raise ApiError("invalid_plate", f"Every object needs 1 to {MAX_OBJECT_INSTANCES} instances.")
+            if any(len(transform) != 16 for transform in placed.instances):
+                raise ApiError("invalid_instance_transform", "Every transform is a row-major 4x4 matrix.")
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
         if len(request.settings) > MAX_SETTINGS:
@@ -410,24 +567,45 @@ class JobService:
                     "invalid_settings",
                     f"The value of {key} must be a string of at most {MAX_SETTING_VALUE_CHARS} characters.",
                 )
+        if self._settings is not None:
+            try:
+                self._settings.validate_overrides(request.settings)
+            except SettingsCatalogError as error:
+                raise from_settings_error(error) from error
 
-    def _manifest(self, job_id: str, upload: UploadRecord, request: SliceRequest) -> Dict[str, Any]:
+    def _manifest(self, job_id: str, models: Dict[str, str], request: SliceRequest) -> Dict[str, Any]:
+        if request.operation == "inspect":
+            payload: Dict[str, Any] = {
+                "input_model": models[request.upload_id or ""],
+                "output_mesh": OUTPUT_MESH,
+                "output_inspection": OUTPUT_INSPECTION,
+            }
+        else:
+            payload = {
+                "output_gcode": OUTPUT_GCODE,
+                "output_preview": OUTPUT_PREVIEW,
+                "output_preview_index": OUTPUT_PREVIEW_INDEX,
+                "profiles": {
+                    "machine": "profiles/machine.json",
+                    "process": "profiles/process.json",
+                    "filament": "profiles/filament.json",
+                },
+                "settings": dict(request.settings),
+                "plate_index": request.plate_index,
+            }
+            if request.objects:
+                payload["objects"] = [
+                    {
+                        "model": models[placed.upload_id],
+                        "object": placed.object_index,
+                        "instances": [{"transform": list(transform)} for transform in placed.instances],
+                    }
+                    for placed in request.objects
+                ]
+            else:
+                payload["input_model"] = models[request.upload_id or ""]
         return {
             "protocol_version": PROTOCOL_VERSION,
             "job_id": job_id,
-            "operation": {
-                "name": "slice",
-                "version": 1,
-                "payload": {
-                    "input_model": f"input/model.{upload.model_format}",
-                    "output_gcode": OUTPUT_GCODE,
-                    "profiles": {
-                        "machine": "profiles/machine.json",
-                        "process": "profiles/process.json",
-                        "filament": "profiles/filament.json",
-                    },
-                    "settings": dict(request.settings),
-                    "plate_index": request.plate_index,
-                },
-            },
+            "operation": {"name": request.operation, "version": 1, "payload": payload},
         }

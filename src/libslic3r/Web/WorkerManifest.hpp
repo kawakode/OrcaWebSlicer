@@ -36,6 +36,9 @@ struct WorkerManifestError
     std::string code;
     std::string message;
     WorkerErrorCategory category {WorkerErrorCategory::Request};
+    // The setting a configuration error is about, when the engine names one,
+    // so a client can point at the control that needs changing.
+    std::string setting;
 };
 
 struct WorkerManifestValidation

@@ -1,7 +1,11 @@
 #include "SinglePlateSlice.hpp"
 
 #include "ArtifactTransaction.hpp"
+#include "PlateArtifacts.hpp"
 #include "ProjectArchive.hpp"
+
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/STL.hpp"
@@ -14,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -222,6 +227,8 @@ struct ProjectPlate
     // container whose coordinates carry no plate placement, so it is arranged
     // like a loose mesh instead.
     bool declares_plate {false};
+    // True once a project archive supplied `config`.
+    bool loaded {false};
 };
 
 // Loads one plate of a project archive into the neutral worker model. The
@@ -269,6 +276,7 @@ SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request
                        WorkerErrorCategory::Input);
 
     project.config = std::move(loaded_config);
+    project.loaded = true;
     project.declares_plate = !plate_data_list.empty();
     if (project.declares_plate) {
         const PlateData &plate = *plate_data_list.front();
@@ -293,6 +301,232 @@ bool read_profile_path(const nlohmann::json &profiles, const char *key, std::str
     return true;
 }
 
+bool is_model_extension(const std::string &extension)
+{
+    return extension == ".stl" || extension == ".obj" || extension == ".3mf";
+}
+
+// Reads an optional output path. A present but unsafe path, or one with the
+// wrong extension, is refused; an absent one leaves `target` empty.
+void read_output_path(const nlohmann::json &payload, const char *key, const char *extension, std::string &target,
+                      SinglePlateSliceRequestValidation &result)
+{
+    const auto value = payload.find(key);
+    if (value == payload.end())
+        return;
+    if (!value->is_string() || !is_safe_relative_path(value->get_ref<const std::string &>()) ||
+        lowercase_extension(value->get_ref<const std::string &>()) != extension) {
+        const std::string message = std::string(key) + " must be a safe relative path ending in " + extension + ".";
+        add_error(result, "invalid_output_path", message.c_str());
+        return;
+    }
+    target = value->get<std::string>();
+}
+
+// Bounded so a request cannot ask the worker to load an unbounded number of
+// files or instantiate an unbounded number of copies.
+constexpr std::size_t MAX_PLATE_OBJECTS    = 256;
+constexpr std::size_t MAX_OBJECT_INSTANCES = 64;
+constexpr std::size_t MAX_PLATE_MODELS     = 16;
+// A plate is at most a few metres across; anything beyond this is a mistake.
+constexpr double      MAX_TRANSLATION_MM   = 100000.;
+
+// A placement is an affine, invertible transform in millimetres. Scale and
+// rotation are otherwise unconstrained, exactly as the desktop allows.
+bool is_valid_transform(const std::array<double, 16> &values)
+{
+    if (!std::all_of(values.begin(), values.end(), [](double value) { return std::isfinite(value); }))
+        return false;
+    if (std::abs(values[12]) > 1e-9 || std::abs(values[13]) > 1e-9 || std::abs(values[14]) > 1e-9 ||
+        std::abs(values[15] - 1.) > 1e-9)
+        return false;
+    if (std::abs(values[3]) > MAX_TRANSLATION_MM || std::abs(values[7]) > MAX_TRANSLATION_MM ||
+        std::abs(values[11]) > MAX_TRANSLATION_MM)
+        return false;
+    const double determinant = values[0] * (values[5] * values[10] - values[6] * values[9]) -
+                               values[1] * (values[4] * values[10] - values[6] * values[8]) +
+                               values[2] * (values[4] * values[9] - values[5] * values[8]);
+    return std::abs(determinant) > 1e-9 && std::abs(determinant) < 1e9;
+}
+
+void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &request,
+                        SinglePlateSliceRequestValidation &result)
+{
+    if (!objects.is_array() || objects.empty() || objects.size() > MAX_PLATE_OBJECTS) {
+        add_error(result, "invalid_plate_objects", "objects must be an array of 1 to 256 placed objects.",
+                  WorkerErrorCategory::Input);
+        return;
+    }
+    std::vector<std::string> models;
+    for (const nlohmann::json &described : objects) {
+        PlateObject object;
+        const auto model = described.is_object() ? described.find("model") : described.end();
+        if (model == described.end() || !model->is_string() || !is_safe_relative_path(model->get_ref<const std::string &>()) ||
+            !is_model_extension(lowercase_extension(model->get_ref<const std::string &>()))) {
+            add_error(result, "invalid_plate_object", "Every object must name a safe relative STL, OBJ, or 3MF model.",
+                      WorkerErrorCategory::Input);
+            return;
+        }
+        object.model = model->get<std::string>();
+        if (std::find(models.begin(), models.end(), object.model) == models.end())
+            models.push_back(object.model);
+
+        const auto index = described.find("object");
+        if (index != described.end()) {
+            if (!index->is_number_unsigned() || index->get<std::uint64_t>() >= MAX_PLATE_OBJECTS) {
+                add_error(result, "invalid_plate_object", "object must be the 0-based index of an object in its model.",
+                          WorkerErrorCategory::Input);
+                return;
+            }
+            object.object_index = index->get<unsigned>();
+        }
+
+        const auto instances = described.find("instances");
+        if (instances == described.end() || !instances->is_array() || instances->empty() ||
+            instances->size() > MAX_OBJECT_INSTANCES) {
+            add_error(result, "invalid_plate_object", "Every object must declare 1 to 64 instances.",
+                      WorkerErrorCategory::Input);
+            return;
+        }
+        for (const nlohmann::json &instance : *instances) {
+            const auto transform = instance.is_object() ? instance.find("transform") : instance.end();
+            std::array<double, 16> values {};
+            bool readable = transform != instance.end() && transform->is_array() && transform->size() == values.size();
+            for (std::size_t position = 0; readable && position < values.size(); ++position) {
+                readable = (*transform)[position].is_number();
+                if (readable)
+                    values[position] = (*transform)[position].get<double>();
+            }
+            if (!readable || !is_valid_transform(values)) {
+                add_error(result, "invalid_instance_transform",
+                          "Every instance transform must be a finite, invertible, row-major 4x4 affine matrix in millimetres.",
+                          WorkerErrorCategory::Input);
+                return;
+            }
+            object.instances.push_back(values);
+        }
+        request.objects.push_back(std::move(object));
+    }
+    if (models.size() > MAX_PLATE_MODELS)
+        add_error(result, "invalid_plate_objects", "A plate may reference at most 16 model files.",
+                  WorkerErrorCategory::Input);
+}
+
+// Loads one model file the request names. A project archive contributes its
+// selected plate, and its configuration is kept in `project`.
+SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                       const std::string &relative_path, Model &model, ProjectPlate &project)
+{
+    std::filesystem::path input_path;
+    WorkerManifestError path_error;
+    if (!resolve_job_file(job_root, relative_path, WorkerErrorCategory::Input, input_path, path_error))
+        return failure(path_error.code, path_error.message, path_error.category);
+    std::error_code filesystem_error;
+    const std::uintmax_t input_size = std::filesystem::file_size(input_path, filesystem_error);
+    if (filesystem_error)
+        return failure("input_size_unavailable", "Unable to determine the input model size.", WorkerErrorCategory::Input);
+    if (request.max_input_bytes && input_size > *request.max_input_bytes)
+        return failure("input_size_limit_exceeded", "The input model exceeds the configured size limit.",
+                       WorkerErrorCategory::ResourceLimit);
+
+    const std::string extension = lowercase_extension(relative_path);
+    if (extension == ".3mf") {
+        if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project); !loaded.success)
+            return loaded;
+        if (model.objects.empty())
+            return failure("empty_plate_selection", "The selected plate contains no printable objects.",
+                           WorkerErrorCategory::Input);
+        return {true, {}, {}, WorkerErrorCategory::Input};
+    }
+    bool loaded = false;
+    if (extension == ".stl") {
+        loaded = load_stl(input_path.string().c_str(), &model);
+    } else {
+        ObjInfo obj_info;
+        std::string message;
+        loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
+    }
+    if (!loaded || model.objects.empty())
+        return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
+SinglePlateSliceResult check_triangle_limit(const SinglePlateSliceRequest &request, const Model &model)
+{
+    std::uintmax_t triangle_count = 0;
+    for (const ModelObject *object : model.objects) {
+        const std::uintmax_t object_triangles = object->facets_count();
+        if (request.max_triangles && (triangle_count > *request.max_triangles ||
+            object_triangles > *request.max_triangles - triangle_count))
+            return failure("triangle_limit_exceeded", "The input model exceeds the configured triangle limit.",
+                           WorkerErrorCategory::ResourceLimit);
+        triangle_count += object_triangles;
+    }
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
+// Builds the plate the browser composed: each listed object is copied out of
+// its model file and given exactly the submitted instance transforms.
+SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                      Model &model, ProjectPlate &project,
+                                      const std::function<void()> &throw_if_canceled)
+{
+    std::map<std::string, Model> sources;
+    for (const PlateObject &placed : request.objects) {
+        auto source = sources.find(placed.model);
+        if (source == sources.end()) {
+            Model loaded;
+            // Only the first archive's configuration seeds the plate, so the
+            // order of the request decides which project settings apply.
+            ProjectPlate file_project;
+            if (const SinglePlateSliceResult result = load_model_file(request, job_root, placed.model, loaded, file_project);
+                !result.success)
+                return result;
+            if (file_project.loaded && !project.loaded) {
+                project.config = std::move(file_project.config);
+                project.loaded = true;
+            }
+            source = sources.emplace(placed.model, std::move(loaded)).first;
+            throw_if_canceled();
+        }
+        if (placed.object_index >= source->second.objects.size())
+            return failure("unknown_model_object", "An object index does not exist in its model file.",
+                           WorkerErrorCategory::Input);
+        ModelObject *object = model.add_object(*source->second.objects[placed.object_index]);
+        object->clear_instances();
+        for (const std::array<double, 16> &values : placed.instances) {
+            Transform3d transform = Transform3d::Identity();
+            transform.matrix() = Eigen::Map<const Eigen::Matrix<double, 4, 4, Eigen::RowMajor>>(values.data());
+            object->add_instance()->set_transformation(Geometry::Transformation(transform));
+        }
+        object->invalidate_bounding_box();
+    }
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
+// Refuses a submitted placement that leaves the printable volume, which the
+// desktop also refuses to slice. Arranged plates are never checked here, so
+// existing single-model behaviour is unchanged.
+SinglePlateSliceResult check_placement(const Model &model, const DynamicPrintConfig &config)
+{
+    const Polygon  bed(get_bed_shape(config));
+    const Polygons printable = offset(bed, float(scaled(0.05)));
+    const double   height    = config.opt_float("printable_height");
+    for (const ModelObject *object : model.objects) {
+        for (std::size_t index = 0; index < object->instances.size(); ++index) {
+            const Polygon hull = object->convex_hull_2d(object->instances[index]->get_matrix());
+            const bool    inside = std::all_of(hull.points.begin(), hull.points.end(), [&printable](const Point &point) {
+                return std::any_of(printable.begin(), printable.end(),
+                                   [&point](const Polygon &polygon) { return polygon.contains(point); });
+            });
+            if (!inside || object->instance_bounding_box(index).max.z() > height + 0.05)
+                return failure("object_outside_plate", "\"" + object->name + "\" does not fit inside the printable volume.",
+                               WorkerErrorCategory::Validation);
+        }
+    }
+    return {true, {}, {}, WorkerErrorCategory::Validation};
+}
+
 } // namespace
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized)
@@ -309,24 +543,43 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     SinglePlateSliceRequest request;
     request.envelope = *envelope_validation.manifest;
 
+    request.operation = request.envelope.operation == "inspect" ? WorkerOperation::Inspect : WorkerOperation::Slice;
+    const bool inspecting = request.operation == WorkerOperation::Inspect;
+
     const auto input_model = payload.find("input_model");
-    if (input_model == payload.end() || !input_model->is_string() || !is_safe_relative_path(input_model->get_ref<const std::string &>())) {
+    const auto objects = payload.find("objects");
+    if (input_model != payload.end() && objects != payload.end()) {
+        add_error(result, "ambiguous_plate", "A request names either input_model or objects, not both.",
+                  WorkerErrorCategory::Input);
+    } else if (objects != payload.end() && !inspecting) {
+        read_plate_objects(*objects, request, result);
+    } else if (input_model == payload.end() || !input_model->is_string() || !is_safe_relative_path(input_model->get_ref<const std::string &>())) {
         add_error(result, "invalid_input_model", "input_model must be a safe relative path.", WorkerErrorCategory::Input);
-    } else if (const std::string extension = lowercase_extension(input_model->get_ref<const std::string &>());
-               extension != ".stl" && extension != ".obj" && extension != ".3mf") {
+    } else if (!is_model_extension(lowercase_extension(input_model->get_ref<const std::string &>()))) {
         add_error(result, "unsupported_input_format", "input_model must be an STL, OBJ, or 3MF file.",
                   WorkerErrorCategory::Input);
     } else {
         request.input_model = input_model->get<std::string>();
     }
 
-    const auto output_gcode = payload.find("output_gcode");
-    if (output_gcode == payload.end() || !output_gcode->is_string() || !is_safe_relative_path(output_gcode->get_ref<const std::string &>())) {
-        add_error(result, "invalid_output_gcode", "output_gcode must be a safe relative path.");
-    } else if (lowercase_extension(output_gcode->get_ref<const std::string &>()) != ".gcode") {
-        add_error(result, "unsupported_output_format", "output_gcode must use the .gcode extension.");
+    if (inspecting) {
+        read_output_path(payload, "output_mesh", ".bin", request.output_mesh, result);
+        read_output_path(payload, "output_inspection", ".json", request.output_inspection, result);
+        if (request.output_mesh.empty() || request.output_inspection.empty())
+            add_error(result, "invalid_output_path", "An inspection requires output_mesh and output_inspection.");
     } else {
-        request.output_gcode = output_gcode->get<std::string>();
+        const auto output_gcode = payload.find("output_gcode");
+        if (output_gcode == payload.end() || !output_gcode->is_string() || !is_safe_relative_path(output_gcode->get_ref<const std::string &>())) {
+            add_error(result, "invalid_output_gcode", "output_gcode must be a safe relative path.");
+        } else if (lowercase_extension(output_gcode->get_ref<const std::string &>()) != ".gcode") {
+            add_error(result, "unsupported_output_format", "output_gcode must use the .gcode extension.");
+        } else {
+            request.output_gcode = output_gcode->get<std::string>();
+        }
+        read_output_path(payload, "output_preview", ".bin", request.output_preview, result);
+        read_output_path(payload, "output_preview_index", ".json", request.output_preview_index, result);
+        if (request.output_preview.empty() != request.output_preview_index.empty())
+            add_error(result, "invalid_output_path", "output_preview and output_preview_index are given together.");
     }
 
     const auto settings = payload.find("settings");
@@ -408,61 +661,31 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
 
         throw_if_canceled();
         progress("input", 2, "Loading model");
-        std::filesystem::path input_path;
-        WorkerManifestError path_error;
-        if (!resolve_job_file(job_root, request.input_model, WorkerErrorCategory::Input, input_path, path_error))
-            return failure(path_error.code, path_error.message, path_error.category);
-        std::error_code filesystem_error;
-        const std::uintmax_t input_size = std::filesystem::file_size(input_path, filesystem_error);
-        if (filesystem_error)
-            return failure("input_size_unavailable", "Unable to determine the input model size.", WorkerErrorCategory::Input);
-        if (request.max_input_bytes && input_size > *request.max_input_bytes)
-            return failure("input_size_limit_exceeded", "The input model exceeds the configured size limit.",
-                           WorkerErrorCategory::ResourceLimit);
-
-        const std::string extension = lowercase_extension(request.input_model);
-        const bool is_project = extension == ".3mf";
+        const bool explicit_placement = !request.objects.empty();
+        const bool is_project = !explicit_placement && lowercase_extension(request.input_model) == ".3mf";
         Model model;
         ProjectPlate project;
-        if (is_project) {
-            if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project);
-                !loaded.success)
-                return loaded;
-            if (model.objects.empty())
-                return failure("empty_plate_selection", "The selected plate contains no printable objects.",
-                               WorkerErrorCategory::Input);
-        } else {
-            bool loaded = false;
-            if (extension == ".stl") {
-                loaded = load_stl(input_path.string().c_str(), &model);
-            } else {
-                ObjInfo obj_info;
-                std::string message;
-                loaded = load_obj(input_path.string().c_str(), &model, obj_info, message);
-            }
-            if (!loaded || model.objects.empty())
-                return failure("model_load_failed", "The input model could not be loaded.", WorkerErrorCategory::Input);
+        if (explicit_placement) {
+            if (const SinglePlateSliceResult assembled = assemble_plate(request, job_root, model, project, throw_if_canceled);
+                !assembled.success)
+                return assembled;
+        } else if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+                   !loaded.success) {
+            return loaded;
         }
-
-        std::uintmax_t triangle_count = 0;
-        for (const ModelObject *object : model.objects) {
-            const std::uintmax_t object_triangles = object->facets_count();
-            if (request.max_triangles && (triangle_count > *request.max_triangles ||
-                object_triangles > *request.max_triangles - triangle_count))
-                return failure("triangle_limit_exceeded", "The input model exceeds the configured triangle limit.",
-                               WorkerErrorCategory::ResourceLimit);
-            triangle_count += object_triangles;
-        }
+        if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
+            return limited;
+        WorkerManifestError path_error;
 
         throw_if_canceled();
         progress("input", 10, "Model loaded");
-        if (!is_project)
+        if (!is_project && !explicit_placement)
             model.add_default_instances();
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         progress("configuration", 12, "Loading profiles");
         // The embedded project configuration is the base for a project archive;
         // profiles resolved by the request and curated overrides still win.
-        if (is_project)
+        if (project.loaded)
             config.apply(project.config, true);
         for (const std::string *profile_path : {&request.machine_profile, &request.process_profile, &request.filament_profile}) {
             if (profile_path->empty())
@@ -481,12 +704,21 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             config.apply(profile);
             throw_if_canceled();
         }
-        for (const auto &[key, value] : request.settings)
-            config.set_deserialize_strict(key, value);
+        for (const auto &[key, value] : request.settings) {
+            try {
+                config.set_deserialize_strict(key, value);
+            } catch (const std::exception &error) {
+                SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
+                refused.setting = key;
+                return refused;
+            }
+        }
 
         // A plate carries the placement its author chose, so only loose meshes
         // and plate-less archives are arranged.
-        if (project.declares_plate) {
+        if (explicit_placement) {
+            progress("arrangement", 20, "Keeping submitted placement");
+        } else if (project.declares_plate) {
             progress("arrangement", 20, "Keeping project placement");
         } else {
             progress("arrangement", 20, "Arranging objects");
@@ -507,13 +739,20 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         for (ModelObject *object : model.objects) {
             // A plate may deliberately sink an object below the bed, so only
             // fully buried objects are lifted, matching the desktop importer.
-            object->ensure_on_bed(project.declares_plate);
+            object->ensure_on_bed(project.declares_plate || explicit_placement);
             print.auto_assign_extruders(object);
         }
+        if (explicit_placement)
+            if (const SinglePlateSliceResult placed = check_placement(model, config); !placed.success)
+                return placed;
         print.apply(model, config);
         const StringObjectException validation_error = print.validate();
-        if (!validation_error.string.empty())
-            return failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
+        if (!validation_error.string.empty()) {
+            SinglePlateSliceResult refused =
+                failure("slice_validation_failed", validation_error.string, WorkerErrorCategory::Validation);
+            refused.setting = validation_error.opt_key;
+            return refused;
+        }
 
         unsigned last_public_percent = 25;
         bool exporting = false;
@@ -534,7 +773,9 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         throw_if_canceled();
         exporting = true;
         progress("export", 90, "Exporting G-code");
-        print.export_gcode(artifact->temporary_path().string(), nullptr, nullptr);
+        const bool wants_preview = !request.output_preview.empty();
+        GCodeProcessorResult processed;
+        print.export_gcode(artifact->temporary_path().string(), wants_preview ? &processed : nullptr, nullptr);
         if (!std::filesystem::is_regular_file(artifact->temporary_path()))
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
         const std::uintmax_t output_size = std::filesystem::file_size(artifact->temporary_path());
@@ -543,17 +784,107 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         if (output_size == 0)
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
 
+        std::optional<ArtifactTransaction> preview;
+        std::optional<ArtifactTransaction> preview_index;
+        if (wants_preview) {
+            throw_if_canceled();
+            progress("export", 98, "Writing layer preview");
+            preview = ArtifactTransaction::begin(job_root, request.output_preview, request.envelope.job_id, path_error);
+            if (!preview)
+                return failure(path_error.code, path_error.message, path_error.category);
+            preview_index =
+                ArtifactTransaction::begin(job_root, request.output_preview_index, request.envelope.job_id, path_error);
+            if (!preview_index)
+                return failure(path_error.code, path_error.message, path_error.category);
+            std::string preview_error;
+            if (!write_gcode_preview(processed, preview->temporary_path(), preview_index->temporary_path(), preview_error))
+                return failure("preview_export_failed", preview_error);
+        }
+
         throw_if_canceled();
         progress("finalize", 99, "Validating artifact");
+        SinglePlateSliceResult succeeded {true, {}, {}, WorkerErrorCategory::Slicing};
         if (!artifact->commit(path_error))
             return failure(path_error.code, path_error.message, path_error.category);
-        return {true, {}, {}, WorkerErrorCategory::Slicing};
+        succeeded.artifacts.emplace_back("gcode", request.output_gcode);
+        if (wants_preview) {
+            // The G-code is already published, so a preview that fails to
+            // publish withdraws it rather than leaving a half-reported job.
+            if (!preview->commit(path_error) || !preview_index->commit(path_error)) {
+                std::error_code ignored;
+                for (const std::string *published : {&request.output_gcode, &request.output_preview})
+                    std::filesystem::remove(job_root / *published, ignored);
+                return failure(path_error.code, path_error.message, path_error.category);
+            }
+            succeeded.artifacts.emplace_back("preview", request.output_preview);
+            succeeded.artifacts.emplace_back("preview_index", request.output_preview_index);
+        }
+        return succeeded;
     } catch (const CanceledException &) {
         if (const ResourceLimitExceeded limit = limit_exceeded.load(); limit != ResourceLimitExceeded::None)
             return resource_limit_failure(limit);
         return failure("job_canceled", "The slicing job was canceled.", WorkerErrorCategory::Cancellation);
     } catch (const std::exception &error) {
         return failure("slice_failed", error.what());
+    }
+}
+
+SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                     const SinglePlateSliceCallbacks &callbacks)
+{
+    try {
+        if (callbacks.progress)
+            callbacks.progress({"input", 5, "Loading model"});
+        Model model;
+        ProjectPlate project;
+        if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+            !loaded.success)
+            return loaded;
+        if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
+            return limited;
+        if (callbacks.cancellation_requested && callbacks.cancellation_requested())
+            return failure("job_canceled", "The inspection was canceled.", WorkerErrorCategory::Cancellation);
+        // A loose mesh declares no placement; the identity it is given here is
+        // what the browser replaces when it centers the object on the bed.
+        model.add_default_instances();
+
+        if (callbacks.progress)
+            callbacks.progress({"export", 60, "Exporting display mesh"});
+        WorkerManifestError path_error;
+        std::optional<ArtifactTransaction> mesh =
+            ArtifactTransaction::begin(job_root, request.output_mesh, request.envelope.job_id, path_error);
+        if (!mesh)
+            return failure(path_error.code, path_error.message, path_error.category);
+        std::optional<ArtifactTransaction> inspection =
+            ArtifactTransaction::begin(job_root, request.output_inspection, request.envelope.job_id, path_error);
+        if (!inspection)
+            return failure(path_error.code, path_error.message, path_error.category);
+        std::string export_error;
+        const std::string model_format = lowercase_extension(request.input_model).substr(1);
+        if (!write_model_inspection(model, project.declares_plate, model_format, mesh->temporary_path(),
+                                    inspection->temporary_path(), export_error))
+            return failure("mesh_export_failed", export_error, WorkerErrorCategory::Internal);
+        if (request.max_output_bytes) {
+            std::error_code ignored;
+            if (std::filesystem::file_size(mesh->temporary_path(), ignored) > *request.max_output_bytes)
+                return resource_limit_failure(ResourceLimitExceeded::Output);
+        }
+
+        if (callbacks.progress)
+            callbacks.progress({"finalize", 99, "Validating artifact"});
+        if (!mesh->commit(path_error))
+            return failure(path_error.code, path_error.message, path_error.category);
+        if (!inspection->commit(path_error)) {
+            std::error_code ignored;
+            std::filesystem::remove(job_root / request.output_mesh, ignored);
+            return failure(path_error.code, path_error.message, path_error.category);
+        }
+        SinglePlateSliceResult succeeded {true, {}, {}, WorkerErrorCategory::Input};
+        succeeded.artifacts.emplace_back("mesh", request.output_mesh);
+        succeeded.artifacts.emplace_back("inspection", request.output_inspection);
+        return succeeded;
+    } catch (const std::exception &error) {
+        return failure("inspection_failed", error.what(), WorkerErrorCategory::Input);
     }
 }
 

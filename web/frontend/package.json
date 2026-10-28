@@ -8,19 +8,24 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "test": "vitest run"
   },
   "dependencies": {
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "three": "0.169.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
     "@playwright/test": "1.49.1",
     "@types/node": "22.10.5",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
+    "@types/three": "0.169.0",
     "@vitejs/plugin-react": "4.3.4",
     "typescript": "5.7.2",
-    "vite": "6.0.7"
+    "vite": "6.0.7",
+    "vitest": "2.1.8"
   }
 }

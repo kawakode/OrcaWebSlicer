@@ -7,11 +7,14 @@ namespace {
 
 nlohmann::json error_json(const WorkerManifestError &error)
 {
-    return {
+    nlohmann::json serialized {
         {"category", worker_error_category_name(error.category)},
         {"code", error.code},
         {"message", error.message}
     };
+    if (!error.setting.empty())
+        serialized["setting"] = error.setting;
+    return serialized;
 }
 
 nlohmann::json warning_json(const WorkerWarning &warning)

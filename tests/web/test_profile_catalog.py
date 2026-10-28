@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (  # noqa: E402
+    CONDITIONAL_PROCESS_ID,
     FILAMENT_ID,
     MACHINE_ID,
     OTHER_MACHINE_ID,
@@ -35,7 +36,7 @@ class ProfileCatalogTests(unittest.TestCase):
     def test_lists_only_user_selectable_profiles(self):
         machines = [entry.name for entry in self.catalog.list("machine")]
         self.assertEqual(machines, ["Other Printer 0.4 nozzle", "Test Printer 0.4 nozzle"])
-        self.assertEqual(len(self.catalog), 5)
+        self.assertEqual(len(self.catalog), 6)
 
     def test_ignores_a_vendor_entry_that_escapes_its_directory(self):
         self.assertTrue(all("passwd" not in entry.profile_id for entry in self.catalog.list("machine")))
@@ -48,11 +49,47 @@ class ProfileCatalogTests(unittest.TestCase):
 
     def test_filters_process_and_filament_by_the_selected_printer(self):
         printer = self.catalog.get(MACHINE_ID, "machine")
-        self.assertEqual([entry.profile_id for entry in self.catalog.list("process", printer)], [PROCESS_ID])
+        # Without an evaluator a conditional profile is offered everywhere,
+        # which is the desktop's answer for a condition it cannot read.
+        self.assertEqual(
+            [entry.profile_id for entry in self.catalog.list("process", printer)],
+            [PROCESS_ID, CONDITIONAL_PROCESS_ID],
+        )
         # A filament that declares no compatible printers suits every printer.
         self.assertEqual([entry.profile_id for entry in self.catalog.list("filament", printer)], [FILAMENT_ID])
         other = self.catalog.get(OTHER_MACHINE_ID, "machine")
-        self.assertEqual([entry.profile_id for entry in self.catalog.list("process", other)], [OTHER_PROCESS_ID])
+        self.assertEqual(
+            [entry.profile_id for entry in self.catalog.list("process", other)],
+            [OTHER_PROCESS_ID, CONDITIONAL_PROCESS_ID],
+        )
+
+    def test_narrows_a_conditional_profile_through_the_evaluator(self):
+        seen = {}
+
+        def evaluator(request_path):
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            seen.update(request)
+            # Every printer is flattened beside the request, never read from
+            # the bundled tree.
+            for printer in request["printers"]:
+                staged = json.loads((request_path.parent / printer["profile"]).read_text(encoding="utf-8"))
+                self.assertNotIn("inherits", staged)
+            return {"compatibility": {CONDITIONAL_PROCESS_ID: [OTHER_MACHINE_ID]}}
+
+        catalog = load_catalog(self.root, [VENDOR], evaluator)
+        self.assertEqual([candidate["id"] for candidate in seen["candidates"]], [CONDITIONAL_PROCESS_ID])
+        printer = catalog.get(MACHINE_ID, "machine")
+        self.assertEqual([entry.profile_id for entry in catalog.list("process", printer)], [PROCESS_ID])
+        other = catalog.get(OTHER_MACHINE_ID, "machine")
+        self.assertIn(CONDITIONAL_PROCESS_ID, [entry.profile_id for entry in catalog.list("process", other)])
+        with self.assertRaises(ProfileCatalogError) as raised:
+            catalog.materialize(MACHINE_ID, CONDITIONAL_PROCESS_ID, FILAMENT_ID, self.root / "job")
+        self.assertEqual(raised.exception.code, "incompatible_profile")
+
+    def test_records_the_inheritance_chain(self):
+        entry = self.catalog.get(FILAMENT_ID, "filament")
+        self.assertEqual(entry.inherits_chain, ("fdm_filament_pla", "Test Generic PLA"))
+        self.assertEqual(entry.describe()["inherits_chain"], ["fdm_filament_pla", "Test Generic PLA"])
 
     def test_rejects_an_unknown_profile_and_a_mismatched_kind(self):
         with self.assertRaises(ProfileCatalogError) as raised:

@@ -101,6 +101,11 @@ TEST_CASE("Worker protocol serializes typed progress warning error and artifact 
     error.warning.reset();
     error.error = WorkerManifestError{"slice_failed", "Slicing failed.", WorkerErrorCategory::Slicing};
     REQUIRE(serialized(error).at("error").at("category") == "slicing");
+    // A configuration error names its setting only when the engine reported one.
+    REQUIRE_FALSE(serialized(error).at("error").contains("setting"));
+    error.error->setting = "layer_height";
+    REQUIRE(serialized(error).at("error").at("setting") == "layer_height");
+    error.error->setting.clear();
 
     WorkerEvent artifact = error;
     artifact.sequence = 5;

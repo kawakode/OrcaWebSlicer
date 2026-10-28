@@ -6,15 +6,17 @@ from typing import Dict
 
 from web_job_directory import JobDirectoryError
 from web_profile_catalog import ProfileCatalogError
+from web_settings_catalog import SettingsCatalogError
 
 
 class ApiError(RuntimeError):
     """A failure the API can return verbatim: a stable code and a safe message."""
 
-    def __init__(self, code: str, message: str, status: int = 400) -> None:
+    def __init__(self, code: str, message: str, status: int = 400, setting: str = "") -> None:
         super().__init__(message)
         self.code = code
         self.status = status
+        self.setting = setting
 
 
 # Lower layers already produce stable codes. Only the codes whose HTTP meaning
@@ -37,6 +39,19 @@ _CATALOG_STATUS: Dict[str, int] = {
     "unreadable_profile": 500,
     "duplicate_profile_id": 500,
 }
+
+
+_SETTINGS_STATUS: Dict[str, int] = {
+    "unknown_setting": 422,
+    "unavailable_setting": 422,
+    "invalid_setting_value": 422,
+}
+
+
+def from_settings_error(error: SettingsCatalogError) -> ApiError:
+    # Anything other than a refused override means the worker could not
+    # describe itself, which is a deployment fault rather than a client one.
+    return ApiError(error.code, str(error), _SETTINGS_STATUS.get(error.code, 500), error.setting)
 
 
 def from_job_directory_error(error: JobDirectoryError) -> ApiError:

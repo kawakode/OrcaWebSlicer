@@ -1,6 +1,6 @@
 # OrcaWebSlicer implementation plan
 
-Last updated: 2026-09-07
+Last updated: 2026-10-28
 
 ## Objective
 
@@ -25,8 +25,12 @@ The foundation is complete:
 - [x] G4: the minimum API and the first browser screen turn a browser upload
   into downloadable, baseline-equivalent G-code through a disposable worker.
 
-The active gate is G5, the browser MVP: the single-plate plater, settings
-generated from engine metadata, and the browser layer preview.
+- [x] G5: the browser MVP adds the single-plate plater, settings generated from
+  engine metadata, and the paged browser layer preview.
+
+The next phase goes beyond the single-plate MVP toward desktop feature parity
+(multiple plates, multi-material, and further tools). Production deployment
+(G6) follows that work; its hosting target is a VPS running Docker.
 
 ## Phase 1: Finish the worker foundation (G3, priority P0)
 
@@ -161,50 +165,50 @@ generated from engine metadata, and the browser layer preview.
 
 ### 10. Implement the single-plate plater
 
-- [ ] Render supported model geometry and configured bed bounds.
-- [ ] Add selection, deletion, move, rotate, uniform scale, duplicate, and
+- [x] Render supported model geometry and configured bed bounds.
+- [x] Add selection, deletion, move, rotate, uniform scale, duplicate, and
   arrange operations.
-- [ ] Use millimetres consistently and submit explicit transforms to the worker.
-- [ ] Verify displayed and sliced placement against fixtures within a documented
+- [x] Use millimetres consistently and submit explicit transforms to the worker.
+- [x] Verify displayed and sliced placement against fixtures within a documented
   tolerance.
-- [ ] Support adding multiple objects to one plate while retaining the one-plate
+- [x] Support adding multiple objects to one plate while retaining the one-plate
   limit.
 
 ### 11. Generate settings and profile UI from engine metadata
 
-- [ ] Export a versioned catalog of bundled profiles and relevant setting
+- [x] Export a versioned catalog of bundled profiles and relevant setting
   metadata from the engine.
-- [ ] Implement printer, process, and filament compatibility filtering.
-- [ ] Add the curated common settings required by the MVP.
-- [ ] Preserve types, units, ranges, enum values, defaults, dependencies, and
+- [x] Implement printer, process, and filament compatibility filtering.
+- [x] Add the curated common settings required by the MVP.
+- [x] Preserve types, units, ranges, enum values, defaults, dependencies, and
   validation messages without duplicating definitions manually in TypeScript.
-- [ ] Show the effective profile chain and user overrides in the job report.
+- [x] Show the effective profile chain and user overrides in the job report.
 
 ### 12. Add browser layer preview
 
-- [ ] Choose and document a compact preview artifact format.
-- [ ] Generate preview data without `GCodeViewer`, desktop OpenGL, or framebuffer
+- [x] Choose and document a compact preview artifact format.
+- [x] Generate preview data without `GCodeViewer`, desktop OpenGL, or framebuffer
   thumbnails.
-- [ ] Render layers, toolpaths, tools, and extrusion roles in the browser.
-- [ ] Stream or page large previews so the API does not load complete G-code into
+- [x] Render layers, toolpaths, tools, and extrusion roles in the browser.
+- [x] Stream or page large previews so the API does not load complete G-code into
   memory.
-- [ ] Verify preview layer count, Z range, tools, and roles against produced
+- [x] Verify preview layer count, Z range, tools, and roles against produced
   G-code.
 
 ### 13. Finish MVP behavior and compatibility
 
-- [ ] Surface slicing warnings and actionable configuration errors.
-- [ ] Add retry using the same immutable inputs and a new job ID.
-- [ ] Expand the baseline with support, multipart, multi-filament, invalid
+- [x] Surface slicing warnings and actionable configuration errors.
+- [x] Add retry using the same immutable inputs and a new job ID.
+- [x] Expand the baseline with support, multipart, multi-filament, invalid
   configuration, Unicode 3MF, cancellation, and output-limit fixtures.
-- [ ] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
-- [ ] Add accessibility and keyboard-navigation checks for the supported flow.
+- [x] Test current desktop Chrome, Edge, and Firefox; test Safari as non-blocking.
+- [x] Add accessibility and keyboard-navigation checks for the supported flow.
 
 ### G5 exit criteria
 
-- [ ] Every functional acceptance criterion in `docs/web/mvp.md` is automated.
-- [ ] The complete supported workflow works without installing the desktop app.
-- [ ] Desktop behavior and native baseline tests remain unchanged.
+- [x] Every functional acceptance criterion in `docs/web/mvp.md` is automated.
+- [x] The complete supported workflow works without installing the desktop app.
+- [x] Desktop behavior and native baseline tests remain unchanged.
 
 ## Phase 4: Production readiness (G6, priority P3)
 

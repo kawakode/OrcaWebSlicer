@@ -1,6 +1,6 @@
 # Native slicing compatibility baseline
 
-Status: Initial native matrix complete; expansion cases remain tracked below
+Status: Native matrix and worker behaviour matrix complete
 
 ## Purpose
 
@@ -91,6 +91,34 @@ bounds, and motion distance. Run it against the latest native record with:
 ```powershell
 docker compose -f docker/web/compose.yml run --rm worker-baseline
 ```
+
+## Worker behaviour matrix
+
+Some fixture-matrix cases have no desktop CLI equivalent: they exercise worker
+setting overrides, stable error codes, and limits. They live in
+[`worker-matrix-cases.json`](worker-matrix-cases.json) and run with:
+
+```powershell
+docker compose -f docker/web/compose.yml run --rm worker-matrix
+```
+
+Each case runs twice. The runner checks the terminal outcome, the error code and
+offending setting for rejected jobs, the extrusion roles and tools for accepted
+ones, that no partial or published artifact survives a failure, and that both
+runs produce the same semantic G-code summary.
+
+| Case | Defining behaviour |
+| --- | --- |
+| `overhang-support` / `overhang-no-support` | The `enable_support` override adds and removes support extrusion |
+| `multipart` | Disconnected regions of one mesh slice with a single tool |
+| `unicode-3mf` | A 3MF project under a non-ASCII path slices its selected plate |
+| `invalid-config` | A malformed value fails with `invalid_setting_value` naming `layer_height` |
+| `output-limit` | An exceeded output budget fails with `output_size_limit_exceeded` and publishes nothing |
+
+Cancellation is covered by `scripts/test_web_worker_cancellation.py` and the
+remaining limits by `scripts/test_web_worker_limits.py`, both run by
+`worker-smoke`. Multi-filament tool ordering is deferred with multi-material
+support: the MVP worker accepts one filament profile per job.
 
 ## Reproducibility rules
 
