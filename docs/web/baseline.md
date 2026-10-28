@@ -166,20 +166,21 @@ cache is capped at 1.5 GB (`CCACHE_MAXSIZE`).
 
 ### Durations
 
-Expected wall-clock times on a standard 4-core `ubuntu-24.04` runner, before
-the first measured run replaces them:
+Wall-clock times on a standard 4-core `ubuntu-24.04` runner. Dependencies,
+native baseline, and frontend were measured on the first `main` run
+(2026-10-28); the other rows are estimates until a complete run replaces them:
 
 | Job | Cold caches | Warm caches |
 | --- | ---: | ---: |
-| Dependencies | about 90 min | under 1 min |
+| Dependencies | 31 min | under 1 min |
 | Worker build, smoke and matrix | about 60 min | about 15 min |
-| Native baseline | about 75 min | under 1 min (cache hit) |
-| Frontend build | about 2 min | about 1 min |
+| Native baseline | 51 min (50 min desktop build, 2 s baseline) | under 1 min (cache hit) |
+| Frontend build | 1 min | 1 min |
 | Executor and baseline parity | about 5 min | about 5 min |
 | Browser end-to-end | about 10 min | about 6 min |
 
 A pull request with warm caches finishes in about 25 minutes; the first run on
-a new dependency hash takes about three hours.
+a new dependency hash takes about 1 h 45 min.
 
 ## Reproducibility rules
 
