@@ -306,20 +306,25 @@ jobs:
       - name: Browser errors from the failed tests
         if: failure()
         working-directory: web/frontend/test-results
+        shell: python3 {0}
         run: |
-          for trace in */trace.zip; do
-            echo "::group::${trace%/trace.zip}"
-            unzip -p "$trace" '*.trace' | python3 -c '
-          import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              if event.get("type") == "console" and event.get("messageType") in ("error", "warning"):
-                  print(event["messageType"], event.get("text"))
-              elif event.get("method") == "pageError":
-                  print("pageError", json.dumps(event.get("params")))
-          '
-            echo "::endgroup::"
-          done
+          import json, pathlib, zipfile
+          for trace in sorted(pathlib.Path().glob("*/trace.zip")):
+              print("::group::" + trace.parent.name)
+              with zipfile.ZipFile(trace) as archive:
+                  for name in archive.namelist():
+                      if not name.endswith(".trace"):
+                          continue
+                      for line in archive.read(name).decode("utf-8", "replace").splitlines():
+                          try:
+                              event = json.loads(line)
+                          except ValueError:
+                              continue
+                          if event.get("type") == "console" and event.get("messageType") in ("error", "warning"):
+                              print(event["messageType"], event.get("text"))
+                          elif event.get("method") == "pageError" or event.get("type") == "error":
+                              print("error", json.dumps(event.get("params", event))[:2000])
+              print("::endgroup::")
 
       - uses: actions/upload-artifact@v7
         if: failure()
