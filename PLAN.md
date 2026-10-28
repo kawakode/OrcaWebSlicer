@@ -210,6 +210,20 @@ The next phase goes beyond the single-plate MVP toward desktop feature parity
 - [x] The complete supported workflow works without installing the desktop app.
 - [x] Desktop behavior and native baseline tests remain unchanged.
 
+## Phase 3b: Beyond the MVP
+
+### Expert and per-object settings (lot 3)
+
+- [x] Export the whole process and filament catalog from `PrintConfigDef`
+  (settings catalog version 2), grouped by the engine's categories, with each
+  option's desktop mode and whether an object or a height range may override it.
+- [x] Search the catalog and switch between simple, advanced, and expert modes
+  in the browser, still without any setting definition in TypeScript.
+- [x] Override settings per plate object and per non-overlapping height range,
+  limited to the engine's object and region options as on the desktop.
+- [x] Verify that a per-object override changes only that object's G-code
+  (Catch2), and the search, mode, and per-object editing flow end to end.
+
 ## Phase 4: Production readiness (G6, priority P3)
 
 ### 14. Harden isolation and deployment

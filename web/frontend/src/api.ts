@@ -75,11 +75,21 @@ export function uploadModel(file: File): Promise<Upload> {
   return request<Upload>("/uploads", { method: "POST", body });
 }
 
+export interface LayerRangeSubmission {
+  /** Heights above the object's bottom, in millimetres. */
+  min_z: number;
+  max_z: number;
+  settings: Record<string, string>;
+}
+
 export interface PlacedObjectSubmission {
   upload_id: string;
   object: number;
   /** Row-major 4x4 matrices in millimetres. */
   instances: { transform: number[] }[];
+  /** Overrides of the plate's settings for this object only. */
+  settings?: Record<string, string>;
+  layer_ranges?: LayerRangeSubmission[];
 }
 
 export interface SliceSubmission {

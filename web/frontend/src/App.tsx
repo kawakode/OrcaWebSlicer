@@ -24,10 +24,12 @@ import {
   placementFromMatrix,
   plateObjects,
   type Bed,
+  type LayerRange,
   type PlateItem,
 } from "./plater/plate";
 import { PlaterView } from "./plater/PlaterView";
 import { PreviewView } from "./preview/PreviewView";
+import { declared, MODES } from "./settings/catalog";
 import { SettingsForm } from "./settings/SettingsForm";
 import {
   ApiError,
@@ -36,6 +38,7 @@ import {
   type ProfileCatalog,
   type ProfileEntry,
   type ProfileValue,
+  type SettingMode,
   type SettingsCatalog,
 } from "./types";
 
@@ -43,6 +46,7 @@ const POLL_INTERVAL_MS = 400;
 const NUDGE_MM = 1;
 const NUDGE_LARGE_MM = 10;
 const DUPLICATE_OFFSET_MM = 10;
+const DEFAULT_RANGE_MM = 5;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 const DEFAULT_BED: Bed = parseBed(["0x0", "200x0", "200x200", "0x200"], "200");
@@ -104,6 +108,7 @@ export default function App() {
   const [filament, setFilament] = useState("");
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
+  const [mode, setMode] = useState<SettingMode>("simple");
   const [profileValues, setProfileValues] = useState<Record<string, ProfileValue>>({});
   const [bed, setBed] = useState<Bed>(DEFAULT_BED);
   const [items, setItems] = useState<PlateItem[]>([]);
@@ -220,6 +225,9 @@ export default function App() {
   }, []);
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
+  // What an object inherits: the profile chain with the plate's overrides on top.
+  const plateValues = useMemo(() => ({ ...profileValues, ...declared(settings) }), [profileValues, settings]);
+  const invalidKey = failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined);
 
   const onPlateKey = useCallback(
     (event: React.KeyboardEvent) => {
@@ -256,14 +264,13 @@ export default function App() {
     setBusy(true);
     setFailure(null);
     try {
-      const declared = Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim() !== ""));
       setJob(
         await submitJob({
           objects: plateObjects(items),
           machine_profile: machine,
           process_profile: process,
           filament_profile: filament,
-          settings: declared,
+          settings: declared(settings),
         }),
       );
     } catch (error) {
@@ -378,6 +385,10 @@ export default function App() {
             {selected && (
               <ObjectPanel
                 item={selected}
+                catalog={settingsCatalog}
+                inherited={plateValues}
+                mode={mode}
+                invalidKey={invalidKey}
                 onChange={(change) => update(selected.id, change)}
                 onDuplicate={() => duplicate(selected.id)}
                 onDelete={() => remove(selected.id)}
@@ -402,12 +413,23 @@ export default function App() {
               <summary>
                 <h2>Settings</h2>
               </summary>
+              <div className="field wide">
+                <label htmlFor="settings-mode">Mode</label>
+                <select id="settings-mode" data-testid="settings-mode" value={mode} onChange={(event) => setMode(event.target.value as SettingMode)}>
+                  {MODES.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {settingsCatalog && (
                 <SettingsForm
                   catalog={settingsCatalog}
                   profileValues={profileValues}
                   overrides={settings}
-                  invalidKey={failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined)}
+                  mode={mode}
+                  invalidKey={invalidKey}
                   onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
                 />
               )}
@@ -495,11 +517,23 @@ function NumberField(props: {
 
 function ObjectPanel(props: {
   item: PlateItem;
+  catalog: SettingsCatalog | null;
+  inherited: Record<string, ProfileValue>;
+  mode: SettingMode;
+  invalidKey?: string;
   onChange: (change: Partial<PlateItem>) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
-  const { item, onChange } = props;
+  const { item, catalog, inherited, mode, invalidKey, onChange } = props;
+  const ranges = item.layerRanges ?? [];
+  const changed = Object.keys(declared(item.settings)).length;
+  const setRange = (index: number, range: LayerRange | null) =>
+    onChange({ layerRanges: range ? ranges.map((current, at) => (at === index ? range : current)) : ranges.filter((_, at) => at !== index) });
+  const addRange = () => {
+    const top = ranges.reduce((highest, range) => Math.max(highest, range.maxZ), 0);
+    onChange({ layerRanges: [...ranges, { minZ: top, maxZ: top + DEFAULT_RANGE_MM, settings: {} }] });
+  };
   const rotate = (axis: 0 | 1 | 2, degrees: number) => {
     const rotation = [...item.rotation] as [number, number, number];
     rotation[axis] = degrees;
@@ -530,6 +564,62 @@ function ObjectPanel(props: {
         </button>
       </div>
       <p className="hint">Drag the selected object on the plate, or use the arrow keys. R rotates by 90°.</p>
+      {catalog && (
+        <details className="object-settings" data-testid="object-settings">
+          <summary>Object settings{changed > 0 ? ` (${changed} changed)` : ""}</summary>
+          <p className="hint">These override the plate's settings for this object only.</p>
+          <SettingsForm
+            catalog={catalog}
+            profileValues={inherited}
+            overrides={item.settings ?? {}}
+            mode={mode}
+            level="object"
+            idPrefix="object-"
+            invalidKey={invalidKey}
+            onChange={(key, value) => onChange({ settings: { ...item.settings, [key]: value } })}
+          />
+          <h3>Height ranges</h3>
+          {ranges.map((range, index) => (
+            <fieldset key={index} className="layer-range" data-testid={`layer-range-${index}`}>
+              <legend>
+                {range.minZ} – {range.maxZ} mm
+              </legend>
+              <NumberField
+                label="From"
+                testId={`layer-range-${index}-min`}
+                value={range.minZ}
+                unit="mm"
+                step={0.5}
+                onCommit={(minZ) => minZ >= 0 && minZ < range.maxZ && setRange(index, { ...range, minZ })}
+              />
+              <NumberField
+                label="To"
+                testId={`layer-range-${index}-max`}
+                value={range.maxZ}
+                unit="mm"
+                step={0.5}
+                onCommit={(maxZ) => maxZ > range.minZ && setRange(index, { ...range, maxZ })}
+              />
+              <SettingsForm
+                catalog={catalog}
+                profileValues={{ ...inherited, ...declared(item.settings) }}
+                overrides={range.settings}
+                mode={mode}
+                level="range"
+                idPrefix={`layer-range-${index}-`}
+                invalidKey={invalidKey}
+                onChange={(key, value) => setRange(index, { ...range, settings: { ...range.settings, [key]: value } })}
+              />
+              <button type="button" className="secondary" data-testid={`layer-range-${index}-delete`} onClick={() => setRange(index, null)}>
+                Remove range
+              </button>
+            </fieldset>
+          ))}
+          <button type="button" data-testid="add-layer-range" onClick={addRange}>
+            Add height range
+          </button>
+        </details>
+      )}
     </fieldset>
   );
 }

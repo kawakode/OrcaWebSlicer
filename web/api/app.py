@@ -27,10 +27,12 @@ from .errors import ApiError, from_catalog_error, from_settings_error
 from .jobs import (
     ARTIFACT_NAMES,
     MAX_OBJECT_INSTANCES,
+    MAX_LAYER_RANGES,
     MAX_PLATE_OBJECTS,
     MAX_SETTINGS,
     PREVIEW_CHUNK_BYTES,
     JobService,
+    LayerRange,
     PlacedObject,
     SliceRequest,
 )
@@ -51,14 +53,26 @@ class InstanceSubmission(BaseModel):
     transform: List[float] = Field(min_length=16, max_length=16)
 
 
+class LayerRangeSubmission(BaseModel):
+    """Settings for part of an object's height, measured from its bottom."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_z: float = Field(ge=0, allow_inf_nan=False)
+    max_z: float = Field(gt=0, allow_inf_nan=False)
+    settings: Dict[str, str] = Field(min_length=1, max_length=MAX_SETTINGS)
+
+
 class ObjectSubmission(BaseModel):
-    """One object of an upload, placed by the plater."""
+    """One object of an upload, placed by the plater, with its own overrides."""
 
     model_config = ConfigDict(extra="forbid")
 
     upload_id: str = Field(min_length=1, max_length=64)
     object: int = Field(default=0, ge=0, lt=MAX_PLATE_OBJECTS)
     instances: List[InstanceSubmission] = Field(min_length=1, max_length=MAX_OBJECT_INSTANCES)
+    settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+    layer_ranges: List[LayerRangeSubmission] = Field(default_factory=list, max_length=MAX_LAYER_RANGES)
 
 
 class SliceSubmission(BaseModel):
@@ -97,6 +111,11 @@ class SliceSubmission(BaseModel):
                     upload_id=placed.upload_id,
                     object_index=placed.object,
                     instances=tuple(tuple(instance.transform) for instance in placed.instances),
+                    settings=dict(placed.settings),
+                    layer_ranges=tuple(
+                        LayerRange(layer_range.min_z, layer_range.max_z, dict(layer_range.settings))
+                        for layer_range in placed.layer_ranges
+                    ),
                 )
                 for placed in self.objects or ()
             ),
