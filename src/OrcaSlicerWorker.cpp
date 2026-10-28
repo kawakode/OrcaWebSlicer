@@ -25,6 +25,7 @@
 #include <string_view>
 #include <vector>
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/log/utility/setup/console.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -474,6 +475,35 @@ void finish_timing(Slic3r::Web::WorkerResult &result,
     result.resource_usage.peak_memory_bytes = peak_memory_bytes();
 }
 
+// The engine stages project archives under Slic3r::temporary_dir(), which the
+// desktop sets at startup and which otherwise names the filesystem root. A job
+// gets a private directory there instead, removed when the job ends.
+class JobTemporaryDir
+{
+public:
+    JobTemporaryDir()
+    {
+        std::error_code error;
+        const std::filesystem::path path = std::filesystem::temp_directory_path(error) /
+            ("orca-slicer-worker-" + boost::filesystem::unique_path().string());
+        if (error || !std::filesystem::create_directories(path, error)) {
+            std::cerr << "No private temporary directory is available: " << error.message() << '\n';
+            return;
+        }
+        m_path = path;
+        Slic3r::set_temporary_dir(m_path.string());
+    }
+    ~JobTemporaryDir()
+    {
+        std::error_code ignored;
+        if (!m_path.empty())
+            std::filesystem::remove_all(m_path, ignored);
+    }
+
+private:
+    std::filesystem::path m_path;
+};
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -647,6 +677,7 @@ int main(int argc, char **argv)
         }
 
         emitter.state(Slic3r::Web::WorkerJobState::Running);
+        const JobTemporaryDir temporary_dir;
         std::vector<Slic3r::Web::WorkerWarning> warnings;
         Slic3r::Web::SinglePlateSliceCallbacks callbacks;
         callbacks.progress = [&emitter](const Slic3r::Web::SinglePlateSliceProgress &progress) {

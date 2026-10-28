@@ -6,6 +6,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/SinglePlateSlice.hpp"
+#include "test_utils.hpp"
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
@@ -292,6 +293,9 @@ TEST_CASE("Explicit placement outside the printable area is refused", "[PlateArt
 TEST_CASE("A multi-plate project is inspected plate by plate", "[PlateArtifacts]")
 {
     JobRoot root;
+    // The importer stages project settings in the temporary directory the
+    // worker sets, as an unprivileged worker cannot write to the root.
+    ScopedSlic3rTemporaryDir scratch;
     write_two_plate_project(root.path / "input" / "project.3mf");
     const SinglePlateSliceRequest request = valid_request(
         R"({"protocol_version":1,"job_id":"inspect-1","operation":{"name":"inspect","version":1,"payload":{
@@ -325,6 +329,7 @@ TEST_CASE("A multi-plate project is inspected plate by plate", "[PlateArtifacts]
 TEST_CASE("Each plate of a project slices on its own bed", "[PlateArtifacts]")
 {
     JobRoot root;
+    ScopedSlic3rTemporaryDir scratch;
     write_two_plate_project(root.path / "input" / "project.3mf");
     const auto manifest = [](unsigned plate) {
         return slice_manifest(R"({"input_model": "input/project.3mf", "plate_index": )" + std::to_string(plate) + R"(,
@@ -350,6 +355,7 @@ TEST_CASE("Each plate of a project slices on its own bed", "[PlateArtifacts]")
 TEST_CASE("Objects of a later project plate are placed by index", "[PlateArtifacts]")
 {
     JobRoot root;
+    ScopedSlic3rTemporaryDir scratch;
     write_two_plate_project(root.path / "input" / "project.3mf");
     // Object 1 is cube B: indices span every plate, as the inspection lists them.
     const SinglePlateSliceRequest request = valid_request(slice_manifest(R"({

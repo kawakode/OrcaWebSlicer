@@ -239,6 +239,12 @@ responsible for deleting the complete job directory after a forced termination
 or process crash. `result.json` uses the same write-then-rename publication
 rule.
 
+The engine stages a project archive's settings on disk while importing it. A
+slice or inspection job therefore gets a private directory under the system
+temporary directory (`TMPDIR`, else `/tmp`), which the worker removes when the
+job ends. The temporary directory must be writable, which a read-only root
+with a `/tmp` tmpfs satisfies.
+
 ## Terminal result
 
 `result.json` contains `protocol_version`, `job_id`, terminal `outcome`, all
