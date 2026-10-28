@@ -78,11 +78,12 @@ jobs:
     name: Build Windows ${{ matrix.arch }}
     strategy:
       fail-fast: false
-      # SELF_HOSTED skips arm64 (the self-hosted Windows server is x64-only).
+      # OrcaWebSlicer builds x64 only: windows-11-arm now ships Visual Studio
+      # 2026, which the CMake 3.31 pinned for that runner cannot generate for.
       matrix:
         include: ${{ fromJSON(vars.SELF_HOSTED
           && '[{"arch":"x64","os":"orca-win-server"}]'
-          || '[{"arch":"x64","os":"windows-latest"},{"arch":"arm64","os":"windows-11-arm"}]') }}
+          || '[{"arch":"x64","os":"windows-latest"}]') }}
     # Don't run scheduled builds on forks:
     if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer') }}
     uses: ./.github/workflows/build_check_cache.yml
@@ -143,15 +144,6 @@ jobs:
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-win-server' || 'windows-latest' }}
       artifact: ${{ github.sha }}-tests-windows-x64
-  unit_tests_windows_arm64:
-    name: Windows arm64
-    needs: build_windows
-    if: ${{ !cancelled() && success() && !vars.SELF_HOSTED }}
-    uses: ./.github/workflows/unit_tests.yml
-    with:
-      os: windows-11-arm
-      artifact: ${{ github.sha }}-tests-windows-arm64
-      test-dir: build-arm64/tests
   unit_tests_macos_arm64:
     name: macOS arm64
     needs: build_macos_arch
@@ -187,7 +179,7 @@ jobs:
           ./validator-bin/OrcaSlicer_profile_validator -p "${{ github.workspace }}/resources/profiles" -s -l 2
   publish_test_results:
     name: Publish Test Results
-    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_windows_arm64, unit_tests_macos_arm64]
+    needs: [unit_tests_linux_x86_64, unit_tests_linux_aarch64, unit_tests_windows_x64, unit_tests_macos_arm64]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
