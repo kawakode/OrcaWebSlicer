@@ -146,6 +146,12 @@ The native baseline is a CI artifact (`web-native-baseline`, kept 30 days)
 together with its raw G-code; it is never committed. The worker binary is passed
 between jobs as the `orca-slicer-worker` artifact.
 
+The browser job differs from the Compose service in two ways. Firefox runs
+headed under Xvfb with Mesa's software GL (`ORCA_WEB_E2E_HEADED`), because
+headless Firefox finds no WebGL driver without a GPU. `ORCA_WEB_MAX_PROCESSES`
+is raised, because `RLIMIT_NPROC` counts every thread of the runner's user while
+the Compose service runs as root, where it is not enforced.
+
 ### Caches
 
 | Cache | Key | Saved by |
@@ -166,21 +172,23 @@ cache is capped at 1.5 GB (`CCACHE_MAXSIZE`).
 
 ### Durations
 
-Wall-clock times on a standard 4-core `ubuntu-24.04` runner. Dependencies,
-native baseline, and frontend were measured on the first `main` run
-(2026-10-28); the other rows are estimates until a complete run replaces them:
+Wall-clock times measured on standard 4-core `ubuntu-24.04` runners on
+2026-10-28. "Cold" is a first run without that cache; "warm" restores it.
 
 | Job | Cold caches | Warm caches |
 | --- | ---: | ---: |
 | Dependencies | 31 min | under 1 min |
-| Worker build, smoke and matrix | about 60 min | about 15 min |
+| Worker build, smoke and matrix | 24 min (23 min compile) | not yet measured |
 | Native baseline | 51 min (50 min desktop build, 2 s baseline) | under 1 min (cache hit) |
 | Frontend build | 1 min | 1 min |
-| Executor and baseline parity | about 5 min | about 5 min |
-| Browser end-to-end | about 10 min | about 6 min |
+| Executor and baseline parity | 1 min | 1 min |
+| Browser end-to-end | 2 min (Chromium, Firefox, WebKit) | 2 min |
 
-A pull request with warm caches finishes in about 25 minutes; the first run on
-a new dependency hash takes about 1 h 45 min.
+With the dependency build and native baseline cached, a pull request took
+31 minutes, almost all of it compiling the worker; a warm worker ccache should
+shorten that. A new dependency hash adds the 31-minute dependency build and,
+when the desktop sources change, the 51-minute baseline in parallel with the
+worker.
 
 ## Reproducibility rules
 
