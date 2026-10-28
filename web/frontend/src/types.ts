@@ -54,6 +54,7 @@ export type ProfileValue = string | string[];
 export interface EffectiveProfile {
   profiles: Record<"machine" | "process" | "filament", ProfileEntry>;
   values: Record<string, ProfileValue>;
+  bed: { printable_area: string[] | string; printable_height: string };
 }
 
 export interface Upload {
@@ -62,6 +63,8 @@ export interface Upload {
   format: string;
   size_bytes: number;
   sha256: string;
+  /** The worker job exporting this upload's display geometry. */
+  inspection: Job;
 }
 
 export interface JobProgress {
@@ -82,7 +85,7 @@ export interface JobError {
 }
 
 export interface JobArtifact {
-  name: "gcode" | "result";
+  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection";
   media_type: string;
   size_bytes?: number;
   sha256?: string;
@@ -90,6 +93,7 @@ export interface JobArtifact {
 
 export interface Job {
   job_id: string;
+  operation: "slice" | "inspect";
   correlation_id: string;
   state: JobState;
   progress: JobProgress;

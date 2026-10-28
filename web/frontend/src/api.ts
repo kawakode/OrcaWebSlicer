@@ -1,7 +1,10 @@
+import type { Inspection } from "./plater/mesh";
+import type { PreviewIndex } from "./preview/preview";
 import {
   ApiError,
   type EffectiveProfile,
   type Job,
+  type JobArtifact,
   type ProfileCatalog,
   type SettingsCatalog,
   type Upload,
@@ -10,6 +13,14 @@ import {
 const PREFIX = "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return (await send(path, init)).json() as Promise<T>;
+}
+
+async function binary(path: string): Promise<ArrayBuffer> {
+  return (await send(path)).arrayBuffer();
+}
+
+async function send(path: string, init?: RequestInit): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(`${PREFIX}${path}`, init);
@@ -29,7 +40,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       correlationId,
     );
   }
-  return (await response.json()) as T;
+  return response;
 }
 
 function describeSchemaFailure(body: unknown): string | undefined {
@@ -63,8 +74,16 @@ export function uploadModel(file: File): Promise<Upload> {
   return request<Upload>("/uploads", { method: "POST", body });
 }
 
-export interface SliceSubmission {
+export interface PlacedObjectSubmission {
   upload_id: string;
+  object: number;
+  /** Row-major 4x4 matrices in millimetres. */
+  instances: { transform: number[] }[];
+}
+
+export interface SliceSubmission {
+  upload_id?: string;
+  objects?: PlacedObjectSubmission[];
   machine_profile: string;
   process_profile: string;
   filament_profile: string;
@@ -87,5 +106,16 @@ export const cancelJob = (jobId: string): Promise<Job> =>
 export const retryJob = (jobId: string): Promise<Job> =>
   request<Job>(`/jobs/${jobId}/retry`, { method: "POST" });
 
-export const artifactUrl = (jobId: string, name: "gcode" | "result"): string =>
+export const artifactUrl = (jobId: string, name: JobArtifact["name"]): string =>
   `${PREFIX}/jobs/${jobId}/artifacts/${name}`;
+
+export const readInspection = (jobId: string): Promise<Inspection> =>
+  request<Inspection>(`/jobs/${jobId}/artifacts/inspection`);
+
+export const readMesh = (jobId: string): Promise<ArrayBuffer> => binary(`/jobs/${jobId}/artifacts/mesh`);
+
+export const readPreviewIndex = (jobId: string): Promise<PreviewIndex> =>
+  request<PreviewIndex>(`/jobs/${jobId}/artifacts/preview_index`);
+
+export const readPreviewPage = (jobId: string, start: number, end: number): Promise<ArrayBuffer> =>
+  binary(`/jobs/${jobId}/preview/layers?start=${start}&end=${end}`);
