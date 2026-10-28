@@ -287,10 +287,39 @@ jobs:
           path: /cache/playwright
           key: web-playwright-${{ hashFiles('web/frontend/package-lock.json') }}
 
+      # Firefox ships no software GL of its own (Chromium has SwiftShader), so
+      # the plater's WebGL viewport needs Mesa's llvmpipe on the GPU-less runner.
+      - name: Install a software OpenGL driver
+        run: sudo apt-get install -y --no-install-recommends libgl1-mesa-dri libegl1 libgl1
+
       # Chromium and Firefox block; the service reports WebKit failures
       # without failing, as docs/web/mvp.md requires.
       - name: frontend-e2e
+        env:
+          # RLIMIT_NPROC counts every thread of the runner's user, browsers and
+          # runner agent included, so the default 64 starves the worker's
+          # threads. The Compose service runs as root, where it is not enforced.
+          ORCA_WEB_MAX_PROCESSES: 4096
         run: python3 scripts/run_web_service.py frontend-e2e
+
+      # Print the browser's errors so a failure is readable without the traces.
+      - name: Browser errors from the failed tests
+        if: failure()
+        working-directory: web/frontend/test-results
+        run: |
+          for trace in */trace.zip; do
+            echo "::group::${trace%/trace.zip}"
+            unzip -p "$trace" '*.trace' | python3 -c '
+          import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              if event.get("type") == "console" and event.get("messageType") in ("error", "warning"):
+                  print(event["messageType"], event.get("text"))
+              elif event.get("method") == "pageError":
+                  print("pageError", json.dumps(event.get("params")))
+          '
+            echo "::endgroup::"
+          done
 
       - uses: actions/upload-artifact@v7
         if: failure()
