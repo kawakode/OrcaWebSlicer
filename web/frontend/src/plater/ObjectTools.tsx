@@ -7,6 +7,7 @@ import { itemBounds, type PlateItem } from "./plate";
 import {
   cutsItem,
   cutSubmission,
+  inheritOverrides,
   layOnFace,
   measure,
   repairSubmission,
@@ -87,7 +88,8 @@ export function useObjectTools(options: {
       if (job.state !== "succeeded") {
         throw new ApiError(job.error?.code ?? "edit_failed", job.error?.message ?? "The object could not be edited.", 0);
       }
-      const parts = (await Promise.all((job.derived_uploads ?? []).map(load))).flat();
+      const loaded = (await Promise.all((job.derived_uploads ?? []).map(load))).flat();
+      const parts = inheritOverrides(item, submission.tool, loaded);
       replace(item.id, spreadParts(parts));
       setCutHeight(null);
       setNotice(await describeEdit(job, parts.length));

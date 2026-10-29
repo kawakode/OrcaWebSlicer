@@ -85,3 +85,15 @@ export function spreadParts(parts: PlateItem[]): PlateItem[] {
   }
   return placed;
 }
+
+/**
+ * Give edited parts the overrides of the object they came from. Height ranges
+ * are measured from the object's bottom, so only a repair keeps them.
+ */
+export function inheritOverrides(item: PlateItem, tool: EditSubmission["tool"], parts: PlateItem[]): PlateItem[] {
+  return parts.map((part) => ({
+    ...part,
+    settings: item.settings,
+    layerRanges: tool === "repair" ? item.layerRanges : undefined,
+  }));
+}

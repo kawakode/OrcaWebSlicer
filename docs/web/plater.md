@@ -118,10 +118,14 @@ rotation, unit scale, and its own centre as the pivot. A cut's parts are then
 laid side by side, 6 mm apart, because the upper part would otherwise drop into
 the lower one's footprint. Other instances of the same upload are untouched.
 
+Every part keeps the object's setting overrides. Height ranges are measured
+from the object's bottom, so a repaired part keeps them and a cut part does
+not.
+
 ## Tests
 
 `src/plater/tools.test.ts` covers laying on a face, measurement, cut and
-repair requests, and the spacing of cut parts. `src/plater/plate.test.ts` covers the transform order, row-major
+repair requests, the spacing of cut parts, and the overrides parts inherit. `src/plater/plate.test.ts` covers the transform order, row-major
 serialization, resting on the bed, round-tripping a declared placement, the
 printable-volume check, non-overlapping arrangement, and request grouping.
 `tests/libslic3r/test_plate_artifacts.cpp` covers inspection output, request

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Euler, Quaternion, Vector3 } from "three";
 
 import { itemBounds, type PlateItem } from "./plate";
-import { cutsItem, cutSubmission, layOnFace, measure, repairSubmission, spreadParts } from "./tools";
+import { cutsItem, cutSubmission, inheritOverrides, layOnFace, measure, repairSubmission, spreadParts } from "./tools";
 
 // A 20 mm cube from 0 to 20 on every axis, as tests/data/20mm_cube.obj is.
 const CUBE = {
@@ -77,5 +77,14 @@ describe("object tools", () => {
     const [first, second] = spreadParts([cube("upper"), cube("lower")]);
     expect(first.x).toBe(100);
     expect(itemBounds(second).minX).toBeCloseTo(itemBounds(first).maxX + 6);
+  });
+
+  it("passes an object's overrides on to its parts", () => {
+    const layerRanges = [{ minZ: 5, maxZ: 10, settings: { sparse_infill_density: "50%" } }];
+    const item = cube("a", { settings: { wall_loops: "5" }, layerRanges });
+    const [cut] = inheritOverrides(item, "cut", [cube("upper")]);
+    expect(cut.settings).toEqual({ wall_loops: "5" });
+    expect(cut.layerRanges).toBeUndefined();
+    expect(inheritOverrides(item, "repair", [cube("whole")])[0].layerRanges).toEqual(layerRanges);
   });
 });
