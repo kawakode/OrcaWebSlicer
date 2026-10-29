@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -159,6 +160,7 @@ public:
 
     void state(Slic3r::Web::WorkerJobState state)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -169,6 +171,7 @@ public:
 
     void progress(const Slic3r::Web::SinglePlateSliceProgress &progress)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         const unsigned monotonic_percent = std::max(m_last_percent, std::min(progress.percent, 100u));
         if (monotonic_percent == m_last_percent && progress.stage == m_last_stage)
             return;
@@ -184,6 +187,7 @@ public:
 
     void warning(const Slic3r::Web::WorkerWarning &warning)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -194,6 +198,7 @@ public:
 
     void error(const Slic3r::Web::WorkerManifestError &error)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -204,6 +209,7 @@ public:
 
     void artifact(const Slic3r::Web::WorkerArtifact &artifact)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -218,6 +224,9 @@ private:
         std::cout << Slic3r::Web::serialize_worker_event(event) << '\n' << std::flush;
     }
 
+    // Print reports status and warnings from TBB worker threads, so events are
+    // numbered and written one at a time.
+    std::mutex    m_mutex;
     std::string   m_job_id;
     std::uint64_t m_sequence {0};
     unsigned      m_last_percent {0};
@@ -653,9 +662,13 @@ int main(int argc, char **argv)
         callbacks.progress = [&emitter](const Slic3r::Web::SinglePlateSliceProgress &progress) {
             emitter.progress(progress);
         };
-        callbacks.warning = [&emitter, &warnings](const std::string &message) {
+        std::mutex warnings_mutex;
+        callbacks.warning = [&emitter, &warnings, &warnings_mutex](const std::string &message) {
             Slic3r::Web::WorkerWarning warning {"slicing_warning", message};
-            warnings.push_back(warning);
+            {
+                std::lock_guard<std::mutex> lock(warnings_mutex);
+                warnings.push_back(warning);
+            }
             emitter.warning(warning);
         };
         callbacks.cancellation_requested = []() { return cancellation_requested(); };

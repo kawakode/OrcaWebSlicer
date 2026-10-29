@@ -969,7 +969,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
 
         unsigned last_public_percent = 25;
         bool exporting = false;
-        print.set_status_callback([&callbacks, &last_public_percent, &exporting](const PrintBase::SlicingStatus &status) {
+        // Print may report from several TBB threads; keep the reports in order.
+        std::mutex status_mutex;
+        print.set_status_callback([&callbacks, &last_public_percent, &exporting, &status_mutex](const PrintBase::SlicingStatus &status) {
+            std::lock_guard<std::mutex> lock(status_mutex);
             if (status.warning_step >= 0 && !status.text.empty() && callbacks.warning)
                 callbacks.warning(status.text);
             if (status.percent < 0 || !callbacks.progress)
