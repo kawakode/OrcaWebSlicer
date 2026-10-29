@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -220,4 +221,122 @@ TEST_CASE("Explicit placement outside the printable area is refused", "[PlateArt
     REQUIRE_FALSE(result.success);
     CHECK(result.code == "object_outside_plate");
     CHECK_FALSE(std::filesystem::exists(root.path / "output" / "plate.gcode"));
+}
+
+TEST_CASE("Plate request reads per-object settings and height ranges", "[PlateArtifacts]")
+{
+    const SinglePlateSliceRequest request = valid_request(slice_manifest(R"({
+        "objects": [{"model": "input/cube.obj", "instances": [{"transform": )" + IDENTITY_AT_CENTER + R"(}],
+            "settings": {"wall_loops": "4", "layer_height": "0.12"},
+            "layer_ranges": [
+                {"min_z": 10, "max_z": 15, "settings": {"sparse_infill_density": "40%"}},
+                {"min_z": 2, "max_z": 5, "settings": {"layer_height": "0.1"}}
+            ]}],
+        "output_gcode": "output/plate.gcode"
+    })"));
+
+    REQUIRE(request.objects.size() == 1);
+    CHECK(request.objects[0].settings.size() == 2);
+    REQUIRE(request.objects[0].layer_ranges.size() == 2);
+    // Ranges are kept in height order whatever order they were sent in.
+    CHECK(request.objects[0].layer_ranges[0].min_z == 2.);
+    CHECK(request.objects[0].layer_ranges[1].settings[0].first == "sparse_infill_density");
+}
+
+TEST_CASE("Plate request refuses settings an object or a range cannot override", "[PlateArtifacts]")
+{
+    const auto refused = [](const std::string &object_fields, const std::string &code, const std::string &setting) {
+        const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(slice_manifest(
+            R"({"objects": [{"model": "input/cube.obj", "instances": [{"transform": )" + IDENTITY_AT_CENTER + "}], " +
+            object_fields + R"(}], "output_gcode": "output/plate.gcode"})"));
+        INFO(object_fields);
+        REQUIRE_FALSE(validation.is_valid());
+        CHECK(validation.errors.front().code == code);
+        CHECK(validation.errors.front().setting == setting);
+    };
+    // A skirt surrounds the whole plate, and supports are generated per object.
+    refused(R"("settings": {"skirt_loops": "2"})", "setting_not_per_object", "skirt_loops");
+    refused(R"("layer_ranges": [{"min_z": 0, "max_z": 5, "settings": {"enable_support": "1"}}])", "setting_not_per_object",
+            "enable_support");
+    refused(R"("settings": {"wall_loops": 4})", "invalid_setting_value", "");
+    refused(R"("layer_ranges": [{"min_z": 5, "max_z": 5, "settings": {"wall_loops": "2"}}])", "invalid_layer_ranges", "");
+    refused(R"("layer_ranges": [{"min_z": 0, "max_z": 5, "settings": {}}])", "invalid_layer_ranges", "");
+    refused(R"("layer_ranges": [{"min_z": 0, "max_z": 6, "settings": {"wall_loops": "2"}},
+                                {"min_z": 5, "max_z": 9, "settings": {"wall_loops": "3"}}])",
+            "invalid_layer_ranges", "");
+}
+
+namespace {
+
+// Distinct heights of the outer walls printed on either side of X = 100, from
+// a sliced plate's layer preview.
+std::pair<std::set<int>, std::set<int>> outer_wall_heights(const JobRoot &root)
+{
+    const nlohmann::json index = nlohmann::json::parse(root.read("output/preview.json"));
+    int outer_wall = -1;
+    for (const nlohmann::json &role : index["roles"])
+        if (role["name"] == "Outer wall")
+            outer_wall = role["id"].get<int>();
+    REQUIRE(outer_wall >= 0);
+    const std::string segments = root.read("output/preview.bin");
+    std::set<int> left, right;
+    for (std::size_t at = 0; at + 36 <= segments.size(); at += 36) {
+        if (static_cast<unsigned char>(segments[at + 32]) != outer_wall)
+            continue;
+        float values[6];
+        std::memcpy(values, segments.data() + at, sizeof(values));
+        (values[3] < 100.f ? left : right).insert(int(std::lround(values[5] * 1000.f)));
+    }
+    return {left, right};
+}
+
+std::string two_cubes(const std::string &second_cube_fields)
+{
+    return slice_manifest(R"({
+        "objects": [
+            {"model": "input/cube.obj", "instances": [{"transform": [1,0,0,50, 0,1,0,100, 0,0,1,10, 0,0,0,1]}]},
+            {"model": "input/cube.obj", "instances": [{"transform": [1,0,0,140, 0,1,0,100, 0,0,1,10, 0,0,0,1]}], )" +
+                          second_cube_fields + R"(}
+        ],
+        "output_gcode": "output/plate.gcode",
+        "output_preview": "output/preview.bin",
+        "output_preview_index": "output/preview.json",
+        "settings": {"layer_height": "0.2", "initial_layer_print_height": "0.2", "layer_change_gcode": "G92 E0\n"}
+    })");
+}
+
+} // namespace
+
+TEST_CASE("A per-object override changes the G-code of that object only", "[PlateArtifacts]")
+{
+    JobRoot root;
+    const SinglePlateSliceResult result = slice_single_plate(valid_request(two_cubes(R"("settings": {"layer_height": "0.1"})")),
+                                                             root.path);
+    INFO(result.code << ": " << result.message);
+    REQUIRE(result.success);
+
+    const auto [plain, overridden] = outer_wall_heights(root);
+    // The plate keeps 0.2 mm layers over the 20 mm cube; the overridden copy
+    // is printed in 0.1 mm layers after the shared first layer.
+    CHECK(plain.size() == 100);
+    CHECK(overridden.size() == 199);
+    CHECK(overridden.count(100) == 0);
+    CHECK(overridden.count(300) == 1);
+    CHECK(plain.count(300) == 0);
+}
+
+TEST_CASE("A height range override changes only that part of its object", "[PlateArtifacts]")
+{
+    JobRoot root;
+    const SinglePlateSliceResult result = slice_single_plate(
+        valid_request(two_cubes(R"("layer_ranges": [{"min_z": 10, "max_z": 20, "settings": {"layer_height": "0.1"}}])")),
+        root.path);
+    INFO(result.code << ": " << result.message);
+    REQUIRE(result.success);
+
+    const auto [plain, ranged] = outer_wall_heights(root);
+    CHECK(plain.size() == 100);
+    const auto below = std::count_if(ranged.begin(), ranged.end(), [](int z) { return z <= 10000; });
+    CHECK(below == 50);
+    CHECK(ranged.size() - below == 100);
 }

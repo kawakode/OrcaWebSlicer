@@ -175,14 +175,69 @@ test("the settings form is generated from the engine catalog", async ({ page }) 
   await page.goto("/");
   await waitForProfiles(page);
 
-  // Every curated group the engine exported is rendered, with the selected
-  // profile's own value as what a blank override keeps.
+  // The first group the engine exported is open, with the selected profile's
+  // own value as what a blank override keeps.
   await expect(page.getByTestId("settings-group-quality")).toBeVisible();
   await expect(page.getByTestId("setting-layer_height")).toHaveAttribute("placeholder", /^0\.\d+$/);
+  // Searching opens every group with a match and hides the rest.
+  await page.getByTestId("settings-search").fill("support");
+  await expect(page.getByTestId("settings-group-support")).toBeVisible();
+  await expect(page.getByTestId("setting-layer_height")).toHaveCount(0);
   // A dependent setting is disabled until the setting that enables it is on.
   await expect(page.getByTestId("setting-support_type")).toBeDisabled();
   await page.getByTestId("setting-enable_support").selectOption("1");
   await expect(page.getByTestId("setting-support_type")).toBeEnabled();
+});
+
+test("the settings mode shows more of the engine catalog", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+
+  // The outer wall speed is an advanced setting on the desktop, and so here.
+  await page.getByTestId("settings-search").fill("outer_wall_speed");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toHaveCount(0);
+  await expect(page.getByTestId("settings-empty")).toBeVisible();
+  await page.getByTestId("settings-mode").selectOption("advanced");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toBeVisible();
+  await page.getByTestId("setting-outer_wall_speed").fill("120");
+
+  // An overridden setting stays visible when the mode would hide it.
+  await page.getByTestId("settings-mode").selectOption("simple");
+  await expect(page.getByTestId("setting-outer_wall_speed")).toHaveValue("120");
+});
+
+test("an object and a height range of it carry their own settings", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+  await addCube(page);
+  await addCube(page);
+
+  await page.getByTestId("plate-item").nth(1).click();
+  await page.getByTestId("object-settings").locator("summary").first().click();
+  // Only what the engine applies per object is offered: a skirt surrounds the
+  // whole plate, so it is not.
+  await page.getByTestId("object-settings-search").fill("skirt");
+  await expect(page.getByTestId("object-settings-empty")).toBeVisible();
+  await page.getByTestId("object-settings-search").fill("layer height");
+  await page.getByTestId("object-setting-layer_height").fill("0.12");
+  await page.getByTestId("add-layer-range").click();
+  await page.getByTestId("layer-range-0-max").fill("10");
+  await page.getByTestId("layer-range-0-max").press("Enter");
+  await page.getByTestId("layer-range-0-settings-search").fill("layer height");
+  await page.getByTestId("layer-range-0-setting-layer_height").fill("0.08");
+
+  const jobId = await sliceAndWait(page);
+  const job = await (await page.request.get(`/api/v1/jobs/${jobId}`)).json();
+  // The untouched cube and the overridden one are separate objects.
+  expect(job.request.objects).toHaveLength(2);
+  expect(job.request.objects[0]).not.toHaveProperty("settings");
+  expect(job.request.objects[1].settings).toEqual({ layer_height: "0.12" });
+  expect(job.request.objects[1].layer_ranges).toEqual([{ min_z: 0, max_z: 10, settings: { layer_height: "0.08" } }]);
+
+  // The overridden cube is printed in more, thinner layers than the other.
+  const gcode = await (await page.request.get(`/api/v1/jobs/${jobId}/artifacts/gcode`)).text();
+  const heights = new Set([...gcode.matchAll(/^;Z:([\d.]+)/gm)].map((match) => match[1]));
+  expect(heights.size).toBeGreaterThan(20 / 0.12);
 });
 
 test("a rejected setting is reported without leaving a job behind", async ({ page }) => {

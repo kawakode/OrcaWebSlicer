@@ -92,4 +92,21 @@ describe("plate placement", () => {
     expect(objects[0].instances).toHaveLength(2);
     expect(objects[1].object).toBe(1);
   });
+
+  it("keeps items with their own overrides apart and drops blank ones", () => {
+    const ranged: Partial<PlateItem> = { layerRanges: [{ minZ: 5, maxZ: 10, settings: { sparse_infill_density: "40%" } }, { minZ: 12, maxZ: 15, settings: { wall_loops: "" } }] };
+    const objects = plateObjects([
+      cube("plain"),
+      cube("blank", { settings: { wall_loops: " " } }),
+      cube("walls", { settings: { wall_loops: "5" } }),
+      cube("walls-copy", { settings: { wall_loops: "5" } }),
+      cube("ranged", ranged),
+    ]);
+    expect(objects).toHaveLength(3);
+    expect(objects[0]).not.toHaveProperty("settings");
+    expect(objects[0].instances).toHaveLength(2);
+    expect(objects[1].settings).toEqual({ wall_loops: "5" });
+    expect(objects[1].instances).toHaveLength(2);
+    expect(objects[2].layer_ranges).toEqual([{ min_z: 5, max_z: 10, settings: { sparse_infill_density: "40%" } }]);
+  });
 });

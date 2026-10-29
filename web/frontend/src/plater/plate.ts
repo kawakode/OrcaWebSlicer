@@ -5,7 +5,16 @@
 
 import { Euler, Matrix4, Quaternion, Vector3 } from "three";
 
+import type { PlacedObjectSubmission } from "../api";
+import { declared } from "../settings/catalog";
 import type { ObjectMesh } from "./mesh";
+
+/** Settings for part of an object, between two heights above its bottom. */
+export interface LayerRange {
+  minZ: number;
+  maxZ: number;
+  settings: Record<string, string>;
+}
 
 export interface Bed {
   /** Printable area outline, counter-clockwise, in millimetres. */
@@ -28,6 +37,9 @@ export interface PlateItem {
   rotation: [number, number, number];
   /** Uniform scale factor. */
   scale: number;
+  /** Overrides of the plate's settings for this object only. */
+  settings?: Record<string, string>;
+  layerRanges?: LayerRange[];
 }
 
 /** Spacing the arrangement keeps between items, in millimetres. */
@@ -191,13 +203,27 @@ export function arrange(items: PlateItem[], bed: Bed): PlateItem[] {
 }
 
 /** Group items into the request's objects: one entry per upload object. */
-export function plateObjects(items: PlateItem[]) {
-  const grouped = new Map<string, { upload_id: string; object: number; instances: { transform: number[] }[] }>();
+/**
+ * The plate as the API takes it. Items of one upload object with the same
+ * overrides are instances of one object; different overrides make them
+ * separate objects, since the engine configures a whole object at once.
+ */
+export function plateObjects(items: PlateItem[]): PlacedObjectSubmission[] {
+  const grouped = new Map<string, PlacedObjectSubmission>();
   for (const item of items) {
-    const key = `${item.uploadId}:${item.objectIndex}`;
-    const entry = grouped.get(key) ?? { upload_id: item.uploadId, object: item.objectIndex, instances: [] };
+    const settings = declared(item.settings);
+    const layerRanges = (item.layerRanges ?? [])
+      .map((range) => ({ min_z: range.minZ, max_z: range.maxZ, settings: declared(range.settings) }))
+      .filter((range) => Object.keys(range.settings).length > 0);
+    const key = JSON.stringify([item.uploadId, item.objectIndex, settings, layerRanges]);
+    let entry = grouped.get(key);
+    if (!entry) {
+      entry = { upload_id: item.uploadId, object: item.objectIndex, instances: [] };
+      if (Object.keys(settings).length > 0) entry.settings = settings;
+      if (layerRanges.length > 0) entry.layer_ranges = layerRanges;
+      grouped.set(key, entry);
+    }
     entry.instances.push({ transform: rowMajor(itemMatrix(item)) });
-    grouped.set(key, entry);
   }
   return [...grouped.values()];
 }
