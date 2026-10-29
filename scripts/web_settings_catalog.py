@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read the engine's curated setting metadata and validate overrides against it.
+"""Read the engine's setting metadata and validate overrides against it.
 
 The catalog is produced by `orca-slicer-worker --export-settings-catalog`, which
 serializes `PrintConfigDef` itself. Nothing here restates a type, a range, an
@@ -16,7 +16,7 @@ import subprocess
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 
-SETTINGS_CATALOG_VERSION = 1
+SETTINGS_CATALOG_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 60.0
 # The export is a fixed-size document; anything larger means a broken worker.
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
@@ -41,12 +41,17 @@ class SettingsCatalogError(RuntimeError):
 
 @dataclasses.dataclass(frozen=True)
 class SettingsCatalog:
-    """The curated setting definitions one API instance offers."""
+    """The setting definitions one API instance offers."""
 
     catalog_version: int
     engine_version: str
     groups: Tuple[Dict[str, Any], ...]
     settings: Tuple[Dict[str, Any], ...]
+    # The full catalog holds hundreds of settings, so lookups use an index.
+    _by_key: Dict[str, Dict[str, Any]] = dataclasses.field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_by_key", {setting["key"]: setting for setting in self.settings})
 
     def __len__(self) -> int:
         return len(self.settings)
@@ -68,14 +73,13 @@ class SettingsCatalog:
         }
 
     def definition(self, key: str) -> Optional[Dict[str, Any]]:
-        for setting in self.settings:
-            if setting["key"] == key:
-                return setting
-        return None
+        return self._by_key.get(key)
 
-    def validate_overrides(self, overrides: Mapping[str, str]) -> None:
+    def validate_overrides(self, overrides: Mapping[str, str], level: str = "plate") -> None:
         """Refuse an override the engine's own definition cannot accept.
 
+        `level` is "plate", "object", or "range": an object or a height range
+        may only override the settings the engine applies at that level.
         The worker still validates everything it is given; this check only turns
         the common mistakes into an immediate, categorized answer.
         """
@@ -88,6 +92,11 @@ class SettingsCatalog:
             if definition.get("missing"):
                 raise SettingsCatalogError(
                     "unavailable_setting", f"{key} is not available in this engine build.", key
+                )
+            if level != "plate" and not definition.get("per_object" if level == "object" else "per_range"):
+                where = "one object" if level == "object" else "a height range"
+                raise SettingsCatalogError(
+                    "setting_not_per_object", f"{key} cannot be changed for {where}.", key
                 )
             _validate_value(definition, value)
 
@@ -202,7 +211,7 @@ def parse_settings_catalog(serialized: str) -> SettingsCatalog:
 def load_settings_catalog(
     worker_command: Sequence[str], timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 ) -> SettingsCatalog:
-    """Ask the worker for the engine's curated setting metadata.
+    """Ask the worker for the engine's setting metadata.
 
     This runs once per API process against a trusted executable with no job
     input, so it needs none of the isolation a slicing job does.

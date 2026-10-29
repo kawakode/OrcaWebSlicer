@@ -109,6 +109,27 @@ whose footprint leaves the printer's `printable_area` or whose top exceeds
 the plate draws on a project archive, the first archive listed contributes its
 embedded configuration.
 
+An object may also carry its own `settings`, and `layer_ranges` that apply
+settings between two heights measured from the object's bottom, exactly as the
+desktop's per-object settings and height range modifiers do:
+
+```json
+{"model": "input/model-0.stl", "instances": [...],
+ "settings": {"wall_loops": "5"},
+ "layer_ranges": [{"min_z": 5, "max_z": 10, "settings": {"layer_height": "0.1"}}]}
+```
+
+Values use the same serialized string form as the request's `settings`, at most
+256 per object or range. An object accepts the engine's object and region
+options (`PrintObjectConfig` and `PrintRegionConfig`), a range the region options
+and `layer_height`, the same sets the desktop's object list offers; any other
+key is the `validation` error `setting_not_per_object`, naming the setting. An
+object holds at most 32 ranges, each with `0 <= min_z < max_z` and at least one
+setting, and its ranges may not overlap (`invalid_layer_ranges`). A range that
+does not set `layer_height` keeps the object's. The overrides are applied on top
+of any configuration the object brought from its file, and affect that object
+only.
+
 `output_preview` and `output_preview_index` optionally ask for a layer preview
 of the produced G-code, always together. The format is documented in
 [the preview contract](preview.md). The preview is published only alongside its
@@ -259,7 +280,8 @@ mesh instead.
 
 The configuration chain is the engine defaults, then the archive's embedded
 project and plate configuration including its filament mapping, then any
-profiles resolved by the request, then the request's curated setting overrides.
+profiles resolved by the request, then the request's setting overrides. A plate
+object's own settings and height ranges then apply to that object only.
 
 ## Artifact publication
 

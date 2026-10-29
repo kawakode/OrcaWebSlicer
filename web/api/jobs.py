@@ -35,6 +35,7 @@ from .uploads import UploadStore
 
 MAX_SETTINGS = 256
 MAX_SETTING_VALUE_CHARS = 4096
+MAX_LAYER_RANGES = 32
 MAX_PLATE_INDEX = 64
 # Mirrors the worker's own plate bounds so an oversized plate is refused here.
 MAX_PLATE_OBJECTS = 256
@@ -73,23 +74,45 @@ _EXECUTOR_FAILURES = {
 
 
 @dataclasses.dataclass(frozen=True)
+class LayerRange:
+    """Settings for one object between two heights above its bottom, in mm."""
+
+    min_z: float
+    max_z: float
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def describe(self) -> Dict[str, Any]:
+        return {"min_z": self.min_z, "max_z": self.max_z, "settings": dict(self.settings)}
+
+
+@dataclasses.dataclass(frozen=True)
 class PlacedObject:
     """One object of an upload, with the instance transforms the plater chose.
 
     Each transform is a row-major 4x4 matrix in millimetres that replaces the
-    placement the file declared.
+    placement the file declared. `settings` and `layer_ranges` override the
+    plate's settings for this object only.
     """
 
     upload_id: str
     object_index: int = 0
     instances: Tuple[Tuple[float, ...], ...] = ()
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+    layer_ranges: Tuple[LayerRange, ...] = ()
 
     def describe(self) -> Dict[str, Any]:
-        return {
+        described: Dict[str, Any] = {
             "upload_id": self.upload_id,
             "object": self.object_index,
             "instances": [{"transform": list(transform)} for transform in self.instances],
         }
+        # Only stated when used, so a plate without overrides is described
+        # and staged exactly as before.
+        if self.settings:
+            described["settings"] = dict(self.settings)
+        if self.layer_ranges:
+            described["layer_ranges"] = [layer_range.describe() for layer_range in self.layer_ranges]
+        return described
 
 
 @dataclasses.dataclass(frozen=True)
@@ -612,13 +635,18 @@ class JobService:
                 raise ApiError("invalid_plate", f"Every object needs 1 to {MAX_OBJECT_INSTANCES} instances.")
             if any(len(transform) != 16 for transform in placed.instances):
                 raise ApiError("invalid_instance_transform", "Every transform is a row-major 4x4 matrix.")
+            self._validate_settings(placed.settings, "object")
+            self._validate_layer_ranges(placed.layer_ranges)
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
-        if len(request.settings) > MAX_SETTINGS:
+        self._validate_settings(request.settings, "plate")
+
+    def _validate_settings(self, settings: Dict[str, str], level: str) -> None:
+        if len(settings) > MAX_SETTINGS:
             raise ApiError(
                 "invalid_settings", f"A request may override at most {MAX_SETTINGS} settings."
             )
-        for key, value in request.settings.items():
+        for key, value in settings.items():
             if not SETTING_KEY_PATTERN.match(key):
                 raise ApiError("invalid_settings", f"{key!r} is not a setting name.")
             if not isinstance(value, str) or len(value) > MAX_SETTING_VALUE_CHARS:
@@ -628,9 +656,22 @@ class JobService:
                 )
         if self._settings is not None:
             try:
-                self._settings.validate_overrides(request.settings)
+                self._settings.validate_overrides(settings, level)
             except SettingsCatalogError as error:
                 raise from_settings_error(error) from error
+
+    def _validate_layer_ranges(self, layer_ranges: Tuple[LayerRange, ...]) -> None:
+        if len(layer_ranges) > MAX_LAYER_RANGES:
+            raise ApiError("invalid_layer_ranges", f"An object holds at most {MAX_LAYER_RANGES} layer ranges.")
+        ordered = sorted(layer_ranges, key=lambda layer_range: layer_range.min_z)
+        for position, layer_range in enumerate(ordered):
+            if not 0 <= layer_range.min_z < layer_range.max_z or not layer_range.settings:
+                raise ApiError(
+                    "invalid_layer_ranges", "A layer range needs 0 <= min_z < max_z and at least one setting."
+                )
+            if position and layer_range.min_z < ordered[position - 1].max_z:
+                raise ApiError("invalid_layer_ranges", "Layer ranges of one object may not overlap.")
+            self._validate_settings(layer_range.settings, "range")
 
     def _manifest(self, job_id: str, models: Dict[str, str], request: SliceRequest) -> Dict[str, Any]:
         if request.operation == "inspect":
@@ -655,14 +696,11 @@ class JobService:
                 "plate_index": request.plate_index,
             }
             if request.objects:
-                payload["objects"] = [
-                    {
-                        "model": models[placed.upload_id],
-                        "object": placed.object_index,
-                        "instances": [{"transform": list(transform)} for transform in placed.instances],
-                    }
-                    for placed in request.objects
-                ]
+                payload["objects"] = []
+                for placed in request.objects:
+                    described = placed.describe()
+                    del described["upload_id"]
+                    payload["objects"].append({"model": models[placed.upload_id], **described})
             else:
                 payload["input_model"] = models[request.upload_id or ""]
         return {

@@ -89,11 +89,21 @@ export function editUpload(uploadId: string, submission: EditSubmission): Promis
 export const readEditReport = (jobId: string): Promise<EditReport> =>
   request<EditReport>(`/jobs/${jobId}/artifacts/edit_report`);
 
+export interface LayerRangeSubmission {
+  /** Heights above the object's bottom, in millimetres. */
+  min_z: number;
+  max_z: number;
+  settings: Record<string, string>;
+}
+
 export interface PlacedObjectSubmission {
   upload_id: string;
   object: number;
   /** Row-major 4x4 matrices in millimetres. */
   instances: { transform: number[] }[];
+  /** Overrides of the plate's settings for this object only. */
+  settings?: Record<string, string>;
+  layer_ranges?: LayerRangeSubmission[];
 }
 
 export interface SliceSubmission {

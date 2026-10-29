@@ -17,10 +17,18 @@ Status: Active contract for G5; phase 3b adds the object tools
 - Choose a bundled printer, then a process and filament narrowed to that
   printer by the [API](api.md), including `compatible_printers_condition`
   answers from the engine.
-- Edit the curated overrides in a form generated from the engine's settings
-  catalog: each control's type, unit, choices, and dependency come from
-  `PrintConfig.cpp`, and its placeholder is the selected profile's own value.
-  Blank fields are not sent, so the profile's value stands.
+- Edit any process or filament setting in a form generated from the engine's
+  settings catalog: each control's group, type, unit, choices, mode, and
+  dependency come from `PrintConfig.cpp`, and its placeholder is the selected
+  profile's own value. Blank fields are not sent, so the profile's value stands.
+  A search box filters by label, key, or group, and the Simple, Advanced, and
+  Expert modes show the same settings the desktop shows in each; a setting that
+  has an override stays visible in every mode.
+- Override settings for the selected object alone, and for height ranges of it,
+  in the object panel. Only settings the engine applies per object (or per
+  range) are offered, and placeholders show what the plate gives the object.
+  Copies with identical overrides are sent as instances of one object; different
+  overrides make separate objects.
 - Slice, Cancel, and Retry, each disabled when the job state makes it
   meaningless.
 - Watch the worker's stage and percentage while the job runs, and read its
@@ -47,7 +55,8 @@ so the screen can be edited with hot reload against a separately running API.
 
 ## Tests
 
-`npm test` runs the Vitest unit tests for the placement and preview logic.
+`npm test` runs the Vitest unit tests for the placement, preview, and settings
+visibility logic.
 
 `web/frontend/e2e/` holds the Playwright suite, which drives real Chromium
 against the API serving the real built bundle and the real native worker:
@@ -59,7 +68,9 @@ against the API serving the real built bundle and the real native worker:
 - The plate can be edited from the keyboard.
 - An object outside the printable volume blocks slicing.
 - The settings form is generated from the engine catalog, including dependent
-  controls.
+  controls, and searching and the mode switch show and hide its settings.
+- An object and a height range of it carry their own overrides, which reach the
+  worker as separate objects and change the produced layers.
 - A rejected setting is refused with a stable code before any job exists, and
   its control is marked invalid. A configuration error the engine raises while
   slicing names its setting the same way.

@@ -45,6 +45,7 @@ _SETTINGS_STATUS: Dict[str, int] = {
     "unknown_setting": 422,
     "unavailable_setting": 422,
     "invalid_setting_value": 422,
+    "setting_not_per_object": 422,
 }
 
 

@@ -22,6 +22,12 @@ export interface ProfileCatalog {
   filament: ProfileEntry[];
 }
 
+/** The desktop's visibility levels, from the fewest settings to all of them. */
+export type SettingMode = "simple" | "advanced" | "expert";
+
+/** Where an override applies: the whole plate, one object, or a height range of one. */
+export type SettingLevel = "plate" | "object" | "range";
+
 /** One setting as `orca-slicer-worker --export-settings-catalog` describes it. */
 export interface SettingDefinition {
   key: string;
@@ -29,7 +35,13 @@ export interface SettingDefinition {
   scope: "machine" | "process" | "filament" | "other";
   type: string;
   vector: boolean;
+  mode: SettingMode;
   label: string;
+  category?: string;
+  /** Whether one object, or a height range of one, may override it. */
+  per_object: boolean;
+  per_range: boolean;
+  multiline?: boolean;
   tooltip?: string;
   unit?: string;
   min?: number;

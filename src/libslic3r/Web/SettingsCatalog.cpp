@@ -5,62 +5,92 @@
 #include "libslic3r_version.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
+#include <cstring>
+#include <set>
 
 #include <nlohmann/json.hpp>
 
 namespace Slic3r::Web {
 namespace {
 
-// The curated MVP settings. Only the key, its group, and the setting that
-// enables it are stated here; everything the browser renders comes from
-// PrintConfig.cpp so the two can never disagree.
-struct CuratedSetting
+// Settings the engine only honors while another one is on. The browser uses
+// this to disable the control rather than to hide it. The desktop states these
+// rules in GUI code, so the few the web form relies on are restated here.
+struct SettingDependency
 {
     const char *key;
-    const char *group;
-    // Non-empty when the engine only honors this setting while another one is
-    // on, which the browser uses to disable the control rather than to hide it.
-    const char *enabled_by {""};
+    const char *enabled_by;
 };
 
-constexpr CuratedSetting CURATED_SETTINGS[] = {
-    {"layer_height", "quality"},
-    {"initial_layer_print_height", "quality"},
-    {"wall_loops", "quality"},
-    {"top_shell_layers", "quality"},
-    {"bottom_shell_layers", "quality"},
-    {"seam_position", "quality"},
-    {"sparse_infill_density", "infill"},
-    {"sparse_infill_pattern", "infill"},
-    {"enable_support", "support"},
-    {"support_type", "support", "enable_support"},
-    {"support_threshold_angle", "support", "enable_support"},
-    {"brim_type", "adhesion"},
-    {"brim_width", "adhesion"},
-    {"skirt_loops", "adhesion"},
-    {"outer_wall_speed", "speed"},
-    {"inner_wall_speed", "speed"},
-    {"sparse_infill_speed", "speed"},
-    {"nozzle_temperature", "filament"},
-    {"nozzle_temperature_initial_layer", "filament"},
-    {"hot_plate_temp", "filament"},
-    {"filament_flow_ratio", "filament"},
-    {"spiral_mode", "advanced"},
-    {"print_sequence", "advanced"},
+constexpr SettingDependency SETTING_DEPENDENCIES[] = {
+    {"support_type", "enable_support"},
+    {"support_threshold_angle", "enable_support"},
+    {"support_style", "enable_support"},
+    {"support_on_build_plate_only", "enable_support"},
 };
 
-struct CuratedGroup
+// Profile bookkeeping and host-side hooks that are options in PrintConfigDef
+// but not slicing settings: an override could only break profile resolution
+// or name a program the worker never runs.
+constexpr const char *EXCLUDED_SETTINGS[] = {
+    "inherits",           "compatible_printers", "compatible_printers_condition", "compatible_prints",
+    "compatible_prints_condition", "print_settings_id", "filament_settings_id", "filament_vendor",
+    "filament_ids",       "post_process",        "filename_format",               "notes",
+    "filament_notes",
+};
+
+// Value shapes the browser cannot edit as one serialized string.
+bool is_editable_type(ConfigOptionType type)
 {
-    const char *id;
-    const char *label;
-};
+    return type != coPoint && type != coPoints && type != coPoint3 && type != coPointsGroups && type != coIntsGroups &&
+           type != coNone;
+}
 
-constexpr CuratedGroup CURATED_GROUPS[] = {
-    {"quality", "Quality"},   {"infill", "Infill"},     {"support", "Support"},
-    {"adhesion", "Adhesion"}, {"speed", "Speed"},       {"filament", "Filament"},
-    {"advanced", "Advanced"},
-};
+// The desktop's object list offers the object and region options of the
+// engine for an object, and the region options plus the layer height for a
+// height range; the same sets are used here.
+const std::set<std::string> &object_keys()
+{
+    static const std::set<std::string> keys = [] {
+        std::set<std::string> collected;
+        for (const std::string &key : PrintObjectConfig().keys())
+            collected.insert(key);
+        for (const std::string &key : PrintRegionConfig().keys())
+            collected.insert(key);
+        return collected;
+    }();
+    return keys;
+}
+
+const std::set<std::string> &range_keys()
+{
+    static const std::set<std::string> keys = [] {
+        std::set<std::string> collected {"layer_height"};
+        for (const std::string &key : PrintRegionConfig().keys())
+            collected.insert(key);
+        return collected;
+    }();
+    return keys;
+}
+
+// A category is the engine's own grouping; an uncategorized option falls back
+// to the profile kind that carries it.
+std::string group_label(const ConfigOptionDef &definition, const char *scope)
+{
+    if (!definition.category.empty() && definition.category != "Other")
+        return definition.category;
+    return std::strcmp(scope, "filament") == 0 ? "Filament" : "Others";
+}
+
+std::string group_id(const std::string &label)
+{
+    std::string id;
+    for (const char character : label)
+        id += std::isalnum(static_cast<unsigned char>(character)) ? char(std::tolower(static_cast<unsigned char>(character))) : '_';
+    return id;
+}
 
 const char *option_type_name(ConfigOptionType type)
 {
@@ -98,37 +128,28 @@ const char *option_mode_name(ConfigOptionMode mode)
     }
 }
 
-// A setting belongs to the profile whose preset carries it, which is what the
-// API needs to tell a user which selected profile an override displaces.
-const char *option_scope(const std::string &key)
-{
-    const auto contains = [&key](const std::vector<std::string> &options) {
-        return std::find(options.begin(), options.end(), key) != options.end();
-    };
-    if (contains(Preset::print_options()))
-        return "process";
-    if (contains(Preset::filament_options()))
-        return "filament";
-    if (contains(Preset::printer_options()))
-        return "machine";
-    return "other";
-}
-
-nlohmann::json describe_setting(const CuratedSetting &curated, const ConfigOptionDef &definition)
+nlohmann::json describe_setting(const std::string &key, const char *group, const char *scope,
+                                const ConfigOptionDef &definition)
 {
     nlohmann::json described {
-        {"key", curated.key},
-        {"group", curated.group},
-        {"scope", option_scope(curated.key)},
+        {"key", key},
+        {"group", group},
+        {"scope", scope},
         {"type", option_type_name(definition.type)},
         {"vector", !definition.is_scalar()},
         {"nullable", definition.nullable},
         {"mode", option_mode_name(definition.mode)},
-        {"label", definition.label},
+        // A full label names the setting on its own, which is how search
+        // results and per-object lists show it.
+        {"label", definition.full_label.empty() ? definition.label : definition.full_label},
         {"category", definition.category},
         {"tooltip", definition.tooltip},
         {"unit", definition.sidetext},
+        {"per_object", is_object_setting(key)},
+        {"per_range", is_layer_range_setting(key)},
     };
+    if (definition.multiline)
+        described["multiline"] = true;
     // FLT_MAX is the engine's "unbounded" sentinel; forwarding it would make
     // the browser render a meaningless range.
     if (definition.min > -FLT_MAX)
@@ -137,8 +158,9 @@ nlohmann::json describe_setting(const CuratedSetting &curated, const ConfigOptio
         described["max"] = definition.max;
     if (!definition.ratio_over.empty())
         described["ratio_over"] = definition.ratio_over;
-    if (*curated.enabled_by != '\0')
-        described["enabled_by"] = curated.enabled_by;
+    for (const SettingDependency &dependency : SETTING_DEPENDENCIES)
+        if (key == dependency.key)
+            described["enabled_by"] = dependency.enabled_by;
     if (!definition.enum_values.empty()) {
         described["enum"] = nlohmann::json::array();
         for (std::size_t index = 0; index < definition.enum_values.size(); ++index)
@@ -157,6 +179,10 @@ nlohmann::json describe_setting(const CuratedSetting &curated, const ConfigOptio
 
 } // namespace
 
+bool is_object_setting(const std::string &key) { return object_keys().count(key) > 0; }
+
+bool is_layer_range_setting(const std::string &key) { return range_keys().count(key) > 0; }
+
 std::string serialize_settings_catalog()
 {
     nlohmann::json catalog {
@@ -165,17 +191,30 @@ std::string serialize_settings_catalog()
         {"groups", nlohmann::json::array()},
         {"settings", nlohmann::json::array()},
     };
-    for (const CuratedGroup &group : CURATED_GROUPS)
-        catalog["groups"].push_back({{"id", group.id}, {"label", group.label}});
-    for (const CuratedSetting &curated : CURATED_SETTINGS) {
-        const ConfigOptionDef *definition = print_config_def.get(curated.key);
-        // A curated key that the engine dropped is reported as a missing
-        // definition rather than silently disappearing from the browser form.
-        if (definition == nullptr)
-            catalog["settings"].push_back({{"key", curated.key}, {"group", curated.group}, {"missing", true}});
-        else
-            catalog["settings"].push_back(describe_setting(curated, *definition));
-    }
+    // Every process and filament option a profile can carry, in the order the
+    // engine lists them. Machine options describe the printer the plater
+    // draws and are changed by choosing another printer profile instead.
+    std::set<std::string> seen;
+    std::vector<std::string> groups;
+    const auto add_options = [&](const std::vector<std::string> &keys, const char *scope) {
+        for (const std::string &key : keys) {
+            const ConfigOptionDef *definition = print_config_def.get(key);
+            if (definition == nullptr || definition->mode == comDevelop || definition->readonly ||
+                !is_editable_type(definition->type) || !seen.insert(key).second ||
+                std::any_of(std::begin(EXCLUDED_SETTINGS), std::end(EXCLUDED_SETTINGS),
+                            [&key](const char *excluded) { return key == excluded; }))
+                continue;
+            const std::string label = group_label(*definition, scope);
+            const std::string id    = group_id(label);
+            if (std::find(groups.begin(), groups.end(), label) == groups.end()) {
+                groups.push_back(label);
+                catalog["groups"].push_back({{"id", id}, {"label", label}});
+            }
+            catalog["settings"].push_back(describe_setting(key, id.c_str(), scope, *definition));
+        }
+    };
+    add_options(Preset::print_options(), "process");
+    add_options(Preset::filament_options(), "filament");
     return catalog.dump();
 }
 

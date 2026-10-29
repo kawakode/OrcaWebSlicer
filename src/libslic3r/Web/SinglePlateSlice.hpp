@@ -28,14 +28,28 @@ enum class WorkerOperation {
     Edit
 };
 
+using SerializedSettings = std::vector<std::pair<std::string, std::string>>;
+
+// Settings that apply to one object between two heights above its bottom, as
+// the desktop's height range modifiers do.
+struct PlateLayerRange
+{
+    double             min_z {0.};
+    double             max_z {0.};
+    SerializedSettings settings;
+};
+
 // One object of an uploaded model file, placed on the plate by the browser.
 // Each instance is a row-major 4x4 matrix in millimetres that replaces the
 // placement the file declared; the worker neither arranges nor centers it.
+// Its settings override the plate's for this object only.
 struct PlateObject
 {
     std::string                         model;
     unsigned                            object_index {0};
     std::vector<std::array<double, 16>> instances;
+    SerializedSettings                  settings;
+    std::vector<PlateLayerRange>        layer_ranges;
 };
 
 // The tool an edit applies to one object of its input model. The object is
@@ -82,7 +96,7 @@ struct SinglePlateSliceRequest
     std::string machine_profile;
     std::string process_profile;
     std::string filament_profile;
-    std::vector<std::pair<std::string, std::string>> settings;
+    SerializedSettings settings;
     // 1-based plate selection inside a project archive. Mesh inputs describe a
     // single implicit plate and ignore it.
     unsigned plate_index {1};

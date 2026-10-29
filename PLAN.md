@@ -226,6 +226,18 @@ checks below green in CI.
 - [x] Document the jobs, caches, and expected durations in
   [`docs/web/baseline.md`](docs/web/baseline.md#continuous-integration).
 
+### Expert and per-object settings (lot 3)
+
+- [x] Export the whole process and filament catalog from `PrintConfigDef`
+  (settings catalog version 2), grouped by the engine's categories, with each
+  option's desktop mode and whether an object or a height range may override it.
+- [x] Search the catalog and switch between simple, advanced, and expert modes
+  in the browser, still without any setting definition in TypeScript.
+- [x] Override settings per plate object and per non-overlapping height range,
+  limited to the engine's object and region options as on the desktop.
+- [x] Verify that a per-object override changes only that object's G-code
+  (Catch2), and the search, mode, and per-object editing flow end to end.
+
 ### Object tools
 
 - [x] Cut an object with a plane through the engine's own `Cut`, keeping
@@ -239,6 +251,8 @@ checks below green in CI.
 - [x] Cover edit requests, cut bounds, and repair in Catch2, the edit route in
   the API suite, and every tool in the browser suite.
 - [ ] Offer a tilted cut plane, connectors, and dowels in the cut panel.
+- [x] Keep an object's setting overrides on its edited parts, and its height
+  ranges after a repair.
 - [ ] Carry modifiers and per-volume settings through an edit.
 
 ## Phase 4: Production readiness (G6, priority P3)

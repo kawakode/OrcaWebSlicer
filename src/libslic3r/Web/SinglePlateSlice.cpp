@@ -3,6 +3,7 @@
 #include "ArtifactTransaction.hpp"
 #include "PlateArtifacts.hpp"
 #include "ProjectArchive.hpp"
+#include "SettingsCatalog.hpp"
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -330,6 +331,8 @@ constexpr std::size_t MAX_OBJECT_INSTANCES = 64;
 constexpr std::size_t MAX_PLATE_MODELS     = 16;
 // A plate is at most a few metres across; anything beyond this is a mistake.
 constexpr double      MAX_TRANSLATION_MM   = 100000.;
+constexpr std::size_t MAX_SETTINGS         = 256;
+constexpr std::size_t MAX_LAYER_RANGES     = 32;
 
 // A placement is an affine, invertible transform in millimetres. Scale and
 // rotation are otherwise unconstrained, exactly as the desktop allows.
@@ -347,6 +350,73 @@ bool is_valid_transform(const std::array<double, 16> &values)
                                values[1] * (values[4] * values[10] - values[6] * values[8]) +
                                values[2] * (values[4] * values[9] - values[5] * values[8]);
     return std::abs(determinant) > 1e-9 && std::abs(determinant) < 1e9;
+}
+
+// Reads a {key: serialized value} object. `allowed`, when given, refuses a key
+// the engine does not apply at that level, naming it for the client.
+bool read_settings(const nlohmann::json &described, SerializedSettings &settings, SinglePlateSliceRequestValidation &result,
+                   bool (*allowed)(const std::string &) = nullptr, const char *refusal = "")
+{
+    if (!described.is_object() || described.size() > MAX_SETTINGS) {
+        add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
+        return false;
+    }
+    for (auto item = described.begin(); item != described.end(); ++item) {
+        if (!item.value().is_string()) {
+            add_error(result, "invalid_setting_value", "Every setting value must use OrcaSlicer's serialized string form.");
+            return false;
+        }
+        if (allowed != nullptr && !allowed(item.key())) {
+            result.errors.push_back({"setting_not_per_object", item.key() + refusal, WorkerErrorCategory::Validation, item.key()});
+            return false;
+        }
+        settings.emplace_back(item.key(), item.value().get<std::string>());
+    }
+    return true;
+}
+
+// Height ranges are measured from the object's bottom, may not overlap, and
+// carry at least one setting, as the desktop's range editor requires.
+bool read_layer_ranges(const nlohmann::json &described, PlateObject &object, SinglePlateSliceRequestValidation &result)
+{
+    if (!described.is_array() || described.size() > MAX_LAYER_RANGES) {
+        add_error(result, "invalid_layer_ranges", "layer_ranges must be an array of at most 32 ranges.", WorkerErrorCategory::Input);
+        return false;
+    }
+    for (const nlohmann::json &range : described) {
+        PlateLayerRange read;
+        const auto min_z = range.is_object() ? range.find("min_z") : range.end();
+        const auto max_z = range.is_object() ? range.find("max_z") : range.end();
+        const auto settings = range.is_object() ? range.find("settings") : range.end();
+        if (min_z == range.end() || max_z == range.end() || settings == range.end() || !min_z->is_number() ||
+            !max_z->is_number() || !std::isfinite(min_z->get<double>()) || !std::isfinite(max_z->get<double>()) ||
+            min_z->get<double>() < 0. || max_z->get<double>() > MAX_TRANSLATION_MM ||
+            min_z->get<double>() >= max_z->get<double>()) {
+            add_error(result, "invalid_layer_ranges",
+                      "Every layer range needs 0 <= min_z < max_z in millimetres and a settings object.",
+                      WorkerErrorCategory::Input);
+            return false;
+        }
+        read.min_z = min_z->get<double>();
+        read.max_z = max_z->get<double>();
+        if (!read_settings(*settings, read.settings, result, &is_layer_range_setting,
+                           " cannot be changed for a height range."))
+            return false;
+        if (read.settings.empty()) {
+            add_error(result, "invalid_layer_ranges", "A layer range must change at least one setting.",
+                      WorkerErrorCategory::Input);
+            return false;
+        }
+        object.layer_ranges.push_back(std::move(read));
+    }
+    std::sort(object.layer_ranges.begin(), object.layer_ranges.end(),
+              [](const PlateLayerRange &a, const PlateLayerRange &b) { return a.min_z < b.min_z; });
+    for (std::size_t index = 1; index < object.layer_ranges.size(); ++index)
+        if (object.layer_ranges[index].min_z < object.layer_ranges[index - 1].max_z) {
+            add_error(result, "invalid_layer_ranges", "Layer ranges of one object may not overlap.", WorkerErrorCategory::Input);
+            return false;
+        }
+    return true;
 }
 
 void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &request,
@@ -405,6 +475,13 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
             }
             object.instances.push_back(values);
         }
+        const auto settings = described.find("settings");
+        if (settings != described.end() &&
+            !read_settings(*settings, object.settings, result, &is_object_setting, " cannot be changed for one object."))
+            return;
+        const auto layer_ranges = described.find("layer_ranges");
+        if (layer_ranges != described.end() && !read_layer_ranges(*layer_ranges, object, result))
+            return;
         request.objects.push_back(std::move(object));
     }
     if (models.size() > MAX_PLATE_MODELS)
@@ -558,8 +635,25 @@ SinglePlateSliceResult check_triangle_limit(const SinglePlateSliceRequest &reque
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
 
+// Deserializes overrides with the engine's strict parser, naming the setting
+// a malformed value belongs to.
+SinglePlateSliceResult apply_settings(const SerializedSettings &settings, DynamicPrintConfig &config)
+{
+    for (const auto &[key, value] : settings) {
+        try {
+            config.set_deserialize_strict(key, value);
+        } catch (const std::exception &error) {
+            SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
+            refused.setting = key;
+            return refused;
+        }
+    }
+    return {true, {}, {}, WorkerErrorCategory::Validation};
+}
+
 // Builds the plate the browser composed: each listed object is copied out of
-// its model file and given exactly the submitted instance transforms.
+// its model file and given exactly the submitted instance transforms, and its
+// own overrides on top of whatever configuration the file gave it.
 SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                       Model &model, ProjectPlate &project,
                                       const std::function<void()> &throw_if_canceled)
@@ -593,6 +687,17 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
             object->add_instance()->set_transformation(Geometry::Transformation(transform));
         }
         object->invalidate_bounding_box();
+        DynamicPrintConfig overrides;
+        if (const SinglePlateSliceResult applied = apply_settings(placed.settings, overrides); !applied.success)
+            return applied;
+        if (!overrides.empty())
+            object->config.apply(overrides);
+        for (const PlateLayerRange &range : placed.layer_ranges) {
+            DynamicPrintConfig range_overrides;
+            if (const SinglePlateSliceResult applied = apply_settings(range.settings, range_overrides); !applied.success)
+                return applied;
+            object->layer_config_ranges[{range.min_z, range.max_z}].assign_config(std::move(range_overrides));
+        }
     }
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
@@ -702,19 +807,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     }
 
     const auto settings = payload.find("settings");
-    if (settings != payload.end()) {
-        if (!settings->is_object() || settings->size() > 256) {
-            add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
-        } else {
-            for (auto item = settings->begin(); item != settings->end(); ++item) {
-                if (!item.value().is_string()) {
-                    add_error(result, "invalid_setting_value", "Every setting value must use OrcaSlicer's serialized string form.");
-                    break;
-                }
-                request.settings.emplace_back(item.key(), item.value().get<std::string>());
-            }
-        }
-    }
+    if (settings != payload.end())
+        read_settings(*settings, request.settings, result);
 
     const auto limits = payload.find("limits");
     if (limits != payload.end()) {
@@ -823,15 +917,15 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             config.apply(profile);
             throw_if_canceled();
         }
-        for (const auto &[key, value] : request.settings) {
-            try {
-                config.set_deserialize_strict(key, value);
-            } catch (const std::exception &error) {
-                SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
-                refused.setting = key;
-                return refused;
-            }
-        }
+        if (const SinglePlateSliceResult applied = apply_settings(request.settings, config); !applied.success)
+            return applied;
+        // The engine reads a height range's layer height unconditionally, so a
+        // range that leaves it alone keeps the object's own.
+        for (ModelObject *object : model.objects)
+            for (auto &[range, range_config] : object->layer_config_ranges)
+                if (!range_config.has("layer_height"))
+                    range_config.set("layer_height", object->config.has("layer_height") ? object->config.opt_float("layer_height")
+                                                                                        : config.opt_float("layer_height"));
 
         // A plate carries the placement its author chose, so only loose meshes
         // and plate-less archives are arranged.
