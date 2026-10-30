@@ -272,6 +272,20 @@ checks below green in CI.
 - [x] Catch2 round trip through `load_bbs_3mf`, API tests, and end-to-end tests.
 - [ ] Export every plate once projects hold several plates.
 
+### Multiple plates
+
+- [x] Record an ADR choosing one job per plate over a multi-plate worker
+  operation ([ADR 0003](docs/web/adr/0003-multiple-plates.md)).
+- [x] Import every plate of a desktop project archive and place each instance
+  on its own plate's bed; withdraw `multi_plate_project_unsupported`.
+- [x] Inspect a project's plates, names, and per-instance plates.
+- [x] Slice a project's plates as one batch of per-plate jobs, with artifacts
+  named after their plate.
+- [x] Show plates as tabs, move objects between plates, and arrange, slice, and
+  preview each plate.
+- [x] Cover the plate layout and per-plate slicing in Catch2, batches in the API
+  tests, and plates in the browser suite.
+
 ## Phase 4: Production readiness (G6, priority P3)
 
 ### 14. Harden isolation and deployment
@@ -341,6 +355,6 @@ begins:
 - Production hosting and sandbox technology.
 - Authentication provider and billing model.
 
-SLA slicing, multiple plates, painting tools, full desktop gizmo parity, direct
+SLA slicing, painting tools, full desktop gizmo parity, direct
 printer control, plugins, arbitrary post-processing, offline WebAssembly
 slicing, and mobile-first editing remain outside the MVP.

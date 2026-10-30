@@ -1,7 +1,7 @@
 # Worker protocol version 1
 
 Status: Active contract; G5 added plate composition, inspection, and preview;
-phase 3b added object edits
+phase 3b added object edits and multi-plate project archives
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
@@ -45,8 +45,12 @@ The manifest file is limited to 1 MiB, and a slice payload may contain at most
 256 serialized setting overrides. The worker rejects model formats other than
 STL, OBJ, and 3MF before invoking an importer.
 
-`plate_index` is the optional 1-based plate to slice from a project archive. It
-defaults to 1 and is ignored for meshes, which always describe one plate.
+`plate_index` is the optional 1-based plate of a project archive. It defaults
+to 1 and is ignored for meshes, which always describe one plate. With
+`input_model` it selects the plate to slice; with `objects` it names the plate
+whose own settings apply, taken from the first archive listed, and is ignored
+when that archive has no such plate. A slice is always one plate: several
+plates are several jobs ([ADR 0003](adr/0003-multiple-plates.md)).
 
 The optional `operation.payload.limits` object accepts positive unsigned
 integers for `max_input_bytes`, `max_triangles`, `max_wall_time_ms`,
@@ -107,7 +111,8 @@ it only lifts objects that are entirely below the bed, and refuses any instance
 whose footprint leaves the printer's `printable_area` or whose top exceeds
 `printable_height` with the `validation` error `object_outside_plate`. When
 the plate draws on a project archive, the first archive listed contributes its
-embedded configuration.
+embedded configuration. An archive's objects are numbered across all of its
+plates, exactly as its inspection lists them.
 
 An object may also carry its own `settings`, and `layer_ranges` that apply
 settings between two heights measured from the object's bottom, exactly as the
@@ -143,7 +148,8 @@ settings are not read. The model is loaded with the same importer, size,
 triangle, and archive limits as a slice, and its display geometry is published
 as artifacts of kind `mesh` and `inspection`, described in
 [the plater contract](plater.md). An inspection is how the browser sees a model
-without the API ever parsing one.
+without the API ever parsing one. A project archive is inspected whole: every
+plate, and every instance with its plate.
 
 ## Edit operation
 
@@ -280,12 +286,21 @@ bounded by `archive_entry_count_limit_exceeded`,
 `archive_compression_ratio_limit_exceeded`, and
 `archive_extracted_size_limit_exceeded`, all in the `resource_limit` category.
 
-Only the first plate is in scope. A project holding more than one plate is
-rejected with `multi_plate_project_unsupported`, and a `plate_index` beyond the
-project's plates is rejected with `plate_index_out_of_range`, because slicing a
-later plate requires the desktop plate-list layout that offsets every plate on
-one shared coordinate system. A plate with no printable object is rejected with
-`empty_plate_selection`. All four are `input` failures.
+Every plate of a project is imported. The desktop stores all plates on one
+shared coordinate system, laid out by its plate list in a grid of
+`ceil(sqrt(plate count))` columns whose plates sit one bed width and depth, in
+whole millimetres, plus a fifth apart, rows extending towards negative Y. The
+worker reproduces that layout from the archive's own `printable_area`: an
+instance belongs to the plate on whose bed its bounding-box centre is nearest
+the middle, and is moved by that plate's offset onto a bed of its own. An
+instance beyond every plate belongs to none and is never sliced. A project with
+one plate keeps every instance where it is, as the single-plate worker did.
+
+A `plate_index` beyond the project's plates is rejected with
+`plate_index_out_of_range`, and a selected plate with no printable object with
+`empty_plate_selection`. Both are `input` failures. Up to version G5 a project
+holding more than one plate was refused with `multi_plate_project_unsupported`;
+that code is withdrawn, and the same request now slices the selected plate.
 
 When the archive declares a plate, the importer keeps its stored object
 transforms: the objects are never re-arranged, and only objects entirely below
@@ -294,9 +309,10 @@ container whose coordinates carry no placement, so it is arranged like a loose
 mesh instead.
 
 The configuration chain is the engine defaults, then the archive's embedded
-project and plate configuration including its filament mapping, then any
-profiles resolved by the request, then the request's setting overrides. A plate
-object's own settings and height ranges then apply to that object only.
+project configuration and the selected plate's own configuration including its
+filament mapping, then any profiles resolved by the request, then the request's
+setting overrides. A plate object's own settings and height ranges then apply to
+that object only.
 
 ## Artifact publication
 

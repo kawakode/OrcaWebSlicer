@@ -1,14 +1,17 @@
 # Browser application
 
-Status: Active contract for G5; phase 3b adds the object tools
+Status: Active contract for G5; phase 3b adds the object tools and multiple plates
 
 `web/frontend/` is the React, TypeScript, and Vite application chosen in
 [ADR 0002](adr/0002-web-stack.md), with three.js for the plate and the preview.
 
 ## What the application does
 
-- Add STL, OBJ, and 3MF models to one plate. Each is inspected by a worker and
-  drawn from the geometry it exported; see [the plater](plater.md).
+- Add STL, OBJ, and 3MF models to the plates of a project, shown as tabs. Each
+  file is inspected by a worker and drawn from the geometry it exported; a
+  project archive keeps its plates and their placements. See
+  [the plater](plater.md).
+- Add and remove plates, and move an object from one plate to another.
 - Select, move, rotate, scale, duplicate, delete, and arrange objects with the
   pointer, the object panel, or the keyboard. An object outside the printer's
   printable volume is flagged and blocks slicing.
@@ -29,13 +32,14 @@ Status: Active contract for G5; phase 3b adds the object tools
   range) are offered, and placeholders show what the plate gives the object.
   Copies with identical overrides are sent as instances of one object; different
   overrides make separate objects.
-- Slice, Cancel, and Retry, each disabled when the job state makes it
-  meaningless.
+- Slice the plate shown, or slice all plates at once as one batch; Cancel,
+  Cancel all, and Retry, each disabled when the job state makes it meaningless.
+  A plate list reports every plate's latest slice and links its G-code.
 - Watch the worker's stage and percentage while the job runs, and read its
   warnings, its categorized error, the effective profile chain, and the
   overrides it applied.
-- Inspect the result in the Preview tab, which opens on its own when a slice
-  succeeds; see [the layer preview](preview.md).
+- Inspect the shown plate's result in the Preview tab, which opens on its own
+  when that plate's slice succeeds; see [the layer preview](preview.md).
 - Download the G-code, with an embedded thumbnail unless that box is
   cleared, and the machine-readable job report.
 - Save the plate as a 3MF project the desktop opens, and reopen it later with
@@ -68,6 +72,10 @@ against the API serving the real built bundle and the real native worker:
   the documented tolerance, and its preview agrees with the G-code on layer
   count and Z range.
 - Duplicated and arranged objects are all present in the sliced result.
+- Objects move between plates, a batch slices every plate, each plate's
+  preview holds only its own objects, and its G-code is named after its plate.
+- A two-plate project keeps its plates, their names, and their placements, and
+  its second plate slices where it is shown.
 - The plate can be edited from the keyboard.
 - An object outside the printable volume blocks slicing.
 - The settings form is generated from the engine catalog, including dependent

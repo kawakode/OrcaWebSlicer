@@ -101,7 +101,8 @@ core-color, and flush-volume
 contract tests; exercises stable input, triangle, wall-time, memory, and output
 limit failures; slices a 20 mm cube both from explicit settings and from resolved
 Anycubic machine/process/filament profiles; slices a Unicode-path 3MF project and
-rejects multi-plate, over-extracting, and root-escaping archives; exercises the version and
+the second plate of a two-plate project, and rejects over-extracting and
+root-escaping archives; exercises the version and
 manifest-envelope commands; verifies terminal NDJSON events, `result.json`
 artifact metadata, and the invalid-manifest exit code; and rejects GUI,
 OpenGL, device-access, embedded Python, WebKit, and media libraries in the

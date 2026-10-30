@@ -3,6 +3,7 @@ import type { EditSubmission } from "./plater/tools";
 import type { PreviewIndex } from "./preview/preview";
 import {
   ApiError,
+  type Batch,
   type EditReport,
   type EffectiveProfile,
   type Job,
@@ -113,6 +114,11 @@ export interface PlateSubmission {
   process_profile: string;
   filament_profile: string;
   settings: Record<string, string>;
+  /** The archive plate whose own settings apply. */
+  plate_index?: number;
+  /** The project's plate this slices, which names its artifacts. */
+  plate?: number;
+  plate_name?: string;
 }
 
 export interface SliceSubmission extends PlateSubmission {
@@ -129,6 +135,26 @@ function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const submitJob = (submission: SliceSubmission): Promise<Job> => post<Job>("/jobs", submission);
+
+export interface BatchSubmission {
+  plates: {
+    objects: PlacedObjectSubmission[];
+    plate: number;
+    plate_index?: number;
+    name?: string;
+  }[];
+  machine_profile: string;
+  process_profile: string;
+  filament_profile: string;
+  settings: Record<string, string>;
+  thumbnails?: boolean;
+}
+
+/** Slice every plate of the project at once, one job per plate. */
+export const submitBatch = (submission: BatchSubmission): Promise<Batch> => post<Batch>("/batches", submission);
+
+export const cancelBatch = (batchId: string): Promise<Batch> =>
+  request<Batch>(`/batches/${batchId}/cancel`, { method: "POST" });
 
 /** Save a plate as a 3MF project; the job publishes a `project` artifact. */
 export const exportProject = (submission: PlateSubmission): Promise<Job> => post<Job>("/projects", submission);

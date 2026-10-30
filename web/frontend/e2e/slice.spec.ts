@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   PLACEMENT_TOLERANCE_MM,
+  TWO_PLATES,
   addCube,
   plateBounds,
   sliceAndWait,
@@ -57,7 +58,8 @@ test("an uploaded model shows its bounds and slices where it was placed", async 
     page.waitForEvent("download"),
     page.getByTestId("download-gcode").click(),
   ]).then(([event]) => event);
-  expect(download.suggestedFilename()).toMatch(/^job-[0-9a-f]{32}\.gcode$/);
+  // A plate's G-code is named after its job and its plate.
+  expect(download.suggestedFilename()).toMatch(/^job-[0-9a-f]{32}-plate-1\.gcode$/);
 
   // The job names the whole effective chain and the override it applied.
   await expect(page.getByTestId("job-chain-process")).toContainText("fdm_process_common");
@@ -90,6 +92,105 @@ test("duplicated and arranged objects are all sliced", async ({ page }) => {
     );
     expect(inside.length).toBeGreaterThan(100);
   }
+});
+
+/** Count the outer-wall points of a sliced job that fall inside a displayed footprint. */
+function wallsInside(
+  points: [number, number, number][],
+  box: { minX: number; maxX: number; minY: number; maxY: number },
+) {
+  return points.filter(
+    ([x, y]) =>
+      x >= box.minX - PLACEMENT_TOLERANCE_MM &&
+      x <= box.maxX + PLACEMENT_TOLERANCE_MM &&
+      y >= box.minY - PLACEMENT_TOLERANCE_MM &&
+      y <= box.maxY + PLACEMENT_TOLERANCE_MM,
+  ).length;
+}
+
+test("objects move between plates and every plate slices on its own", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+  await addCube(page);
+  await page.getByTestId("add-plate").click();
+  await expect(page.getByTestId("plate-tab")).toHaveCount(2);
+  await expect(page.getByTestId("plate-tab").nth(1)).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("plate-item")).toHaveCount(0);
+  await addCube(page);
+  await addCube(page);
+
+  // An object moves to another plate at the same place on that plate's bed.
+  await page.getByTestId("plate-item").first().click();
+  const [moving] = await plateBounds(page);
+  await page.getByTestId("object-plate").selectOption({ label: "Plate 1" });
+  await expect(page.getByTestId("plate-item")).toHaveCount(1);
+  await page.getByTestId("plate-tab").first().click();
+  await expect(page.getByTestId("plate-item")).toHaveCount(2);
+  expect((await plateBounds(page))[1]).toEqual(moving);
+  await page.getByTestId("arrange").click();
+  const first = await plateBounds(page);
+
+  await page.getByTestId("plate-tab").nth(1).click();
+  const second = await plateBounds(page);
+  expect(second).toHaveLength(1);
+
+  // One batch slices both plates, one job each.
+  await page.getByTestId("slice-all").click();
+  await expect(page.getByTestId("plate-status").nth(0)).toHaveAttribute("data-state", "succeeded");
+  await expect(page.getByTestId("plate-status").nth(1)).toHaveAttribute("data-state", "succeeded");
+  await expect(page.getByTestId("job-plate")).toHaveText("Plate 2:");
+
+  // Each plate's preview holds that plate's objects and nothing else.
+  const secondJob = await page.getByTestId("job-id").innerText();
+  await expect(page.getByTestId("preview-view")).toBeVisible();
+  const secondWalls = (await slicedOuterWalls(page, secondJob)).points;
+  expect(wallsInside(secondWalls, second[0])).toBe(secondWalls.length);
+
+  await page.getByTestId("plate-tab").first().click();
+  await page.getByTestId("tab-preview").click();
+  await expect(page.getByTestId("preview-view")).toBeVisible();
+  const firstJob = await page.getByTestId("job-id").innerText();
+  expect(firstJob).not.toBe(secondJob);
+  const firstWalls = (await slicedOuterWalls(page, firstJob)).points;
+  for (const box of first) expect(wallsInside(firstWalls, box)).toBeGreaterThan(100);
+
+  const download = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByTestId("plate-download").nth(1).click(),
+  ]).then(([event]) => event);
+  expect(download.suggestedFilename()).toBe(`${secondJob}-plate-2.gcode`);
+
+  // A plate is also sliced on its own.
+  await page.getByTestId("tab-prepare").click();
+  await page.getByTestId("slice").click();
+  await expect(page.getByTestId("job-id")).not.toHaveText(firstJob);
+  await expect(page.getByTestId("job-state")).toHaveText("succeeded");
+});
+
+test("a project keeps its plates and their placements", async ({ page }) => {
+  await page.goto("/");
+  await waitForProfiles(page);
+  await page.getByTestId("file-input").setInputFiles(TWO_PLATES);
+
+  await expect(page.getByTestId("plate-tab")).toHaveCount(2);
+  await expect(page.getByTestId("plate-tab").first()).toContainText("First");
+  await expect(page.getByTestId("plate-tab").nth(1)).toContainText("Second");
+  await expect(page.getByTestId("plate-item")).toHaveCount(1);
+  const [first] = await plateBounds(page);
+  expect(first.minX).toBeCloseTo(90, 3);
+
+  // The second plate's cube sits where it does on that plate's own bed.
+  await page.getByTestId("plate-tab").nth(1).click();
+  await expect(page.getByTestId("plate-item")).toHaveCount(1);
+  const [second] = await plateBounds(page);
+  expect(second.minX).toBeCloseTo(50, 3);
+  expect(second.minY).toBeCloseTo(70, 3);
+
+  await page.getByTestId("slice").click();
+  await expect(page.getByTestId("job-state")).toHaveText("succeeded");
+  const jobId = await page.getByTestId("job-id").innerText();
+  const { points } = await slicedOuterWalls(page, jobId);
+  expect(wallsInside(points, second)).toBe(points.length);
 });
 
 test("the plate can be edited from the keyboard", async ({ page }) => {

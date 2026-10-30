@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace Slic3r {
 class DynamicPrintConfig;
@@ -15,6 +16,15 @@ namespace Slic3r::Web {
 inline constexpr int MESH_FORMAT_VERSION = 1;
 inline constexpr int PREVIEW_FORMAT_VERSION = 1;
 
+// The plates a project archive declares, for the inspection index: each
+// plate's name and, per object and instance, the 1-based plate holding that
+// instance, or 0 when it lies on no plate. Both are empty for a mesh.
+struct InspectedPlates
+{
+    std::vector<std::string>           names;
+    std::vector<std::vector<unsigned>> instance_plates;
+};
+
 // Display geometry for the browser plater. `mesh` receives every object's
 // printable parts in object coordinates, little-endian:
 //
@@ -25,10 +35,12 @@ inline constexpr int PREVIEW_FORMAT_VERSION = 1;
 // `inspection` receives the JSON index that names each object, its byte offset,
 // its object-space bounds, and the instance transforms the file declared, as
 // row-major 4x4 matrices in millimetres. A slice request that submits those
-// matrices unchanged reproduces the file's own placement. A project archive's
-// configuration, when given, adds the preset selection and overrides it
-// records under `project`.
-bool write_model_inspection(const Model &model, bool declares_plate, const std::string &model_format,
+// matrices unchanged reproduces the file's own placement. A project's
+// placements are relative to the plate each instance is on, which `plates`
+// names alongside every instance. A project archive's configuration, when
+// given, adds the preset selection and overrides it records under `project`.
+bool write_model_inspection(const Model &model, bool declares_plate, const InspectedPlates &plates,
+                            const std::string &model_format,
                             const std::filesystem::path &mesh, const std::filesystem::path &inspection,
                             std::string &error, const DynamicPrintConfig *project_config = nullptr);
 
