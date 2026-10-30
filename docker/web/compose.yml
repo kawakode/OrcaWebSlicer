@@ -124,6 +124,8 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectArchive]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[SettingsCatalog]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[PlateArtifacts]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectExport]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[ModelEdit]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;

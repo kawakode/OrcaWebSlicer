@@ -490,10 +490,16 @@ set(lisbslic3r_sources
     Web/ArtifactTransaction.hpp
     Web/ProfileCompatibility.cpp
     Web/ProfileCompatibility.hpp
+    Web/ModelEdit.cpp
+    Web/ModelEdit.hpp
     Web/ProjectArchive.cpp
     Web/ProjectArchive.hpp
     Web/PlateArtifacts.cpp
     Web/PlateArtifacts.hpp
+    Web/PlateThumbnail.cpp
+    Web/PlateThumbnail.hpp
+    Web/ProjectExport.cpp
+    Web/ProjectExport.hpp
     Web/SettingsCatalog.cpp
     Web/SettingsCatalog.hpp
     Web/WorkerManifest.cpp

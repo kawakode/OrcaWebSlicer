@@ -1,5 +1,6 @@
 #include "ProjectArchive.hpp"
 
+#include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace Slic3r::Web {
 namespace {
@@ -173,6 +175,24 @@ bool inspect_project_archive(const std::filesystem::path &archive_path, const Pr
         return false;
     }
     return true;
+}
+
+ModelScratchDirectory::ModelScratchDirectory(Model &model, std::filesystem::path path)
+    : m_model(model), m_path(std::move(path))
+{
+    std::error_code error;
+    std::filesystem::remove_all(m_path, error);
+    m_ready = std::filesystem::create_directories(m_path, error);
+    if (m_ready)
+        m_model.set_backup_path(m_path.string());
+}
+
+ModelScratchDirectory::~ModelScratchDirectory()
+{
+    if (m_ready)
+        m_model.set_backup_path("detach");
+    std::error_code ignored;
+    std::filesystem::remove_all(m_path, ignored);
 }
 
 } // namespace Slic3r::Web

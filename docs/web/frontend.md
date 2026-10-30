@@ -1,6 +1,6 @@
 # Browser application
 
-Status: Active contract for G5; Phase 3b added multiple plates
+Status: Active contract for G5; phase 3b adds the object tools and multiple plates
 
 `web/frontend/` is the React, TypeScript, and Vite application chosen in
 [ADR 0002](adr/0002-web-stack.md), with three.js for the plate and the preview.
@@ -15,13 +15,23 @@ Status: Active contract for G5; Phase 3b added multiple plates
 - Select, move, rotate, scale, duplicate, delete, and arrange objects with the
   pointer, the object panel, or the keyboard. An object outside the printer's
   printable volume is flagged and blocks slicing.
+- Cut, repair, lay on a face, and measure an object from its Tools panel; see
+  [the plater](plater.md#object-tools).
 - Choose a bundled printer, then a process and filament narrowed to that
   printer by the [API](api.md), including `compatible_printers_condition`
   answers from the engine.
-- Edit the curated overrides in a form generated from the engine's settings
-  catalog: each control's type, unit, choices, and dependency come from
-  `PrintConfig.cpp`, and its placeholder is the selected profile's own value.
-  Blank fields are not sent, so the profile's value stands.
+- Edit any process or filament setting in a form generated from the engine's
+  settings catalog: each control's group, type, unit, choices, mode, and
+  dependency come from `PrintConfig.cpp`, and its placeholder is the selected
+  profile's own value. Blank fields are not sent, so the profile's value stands.
+  A search box filters by label, key, or group, and the Simple, Advanced, and
+  Expert modes show the same settings the desktop shows in each; a setting that
+  has an override stays visible in every mode.
+- Override settings for the selected object alone, and for height ranges of it,
+  in the object panel. Only settings the engine applies per object (or per
+  range) are offered, and placeholders show what the plate gives the object.
+  Copies with identical overrides are sent as instances of one object; different
+  overrides make separate objects.
 - Slice the plate shown, or slice all plates at once as one batch; Cancel,
   Cancel all, and Retry, each disabled when the job state makes it meaningless.
   A plate list reports every plate's latest slice and links its G-code.
@@ -30,7 +40,10 @@ Status: Active contract for G5; Phase 3b added multiple plates
   overrides it applied.
 - Inspect the shown plate's result in the Preview tab, which opens on its own
   when that plate's slice succeeds; see [the layer preview](preview.md).
-- Download the G-code and the machine-readable job report.
+- Download the G-code, with an embedded thumbnail unless that box is
+  cleared, and the machine-readable job report.
+- Save the plate as a 3MF project the desktop opens, and reopen it later with
+  its placement, profiles, and overrides; see [projects](projects.md).
 
 Every failure the user sees is the API's stable code plus its message.
 Framework schema rejections are reduced to the same shape, so the screen has one
@@ -49,7 +62,8 @@ so the screen can be edited with hot reload against a separately running API.
 
 ## Tests
 
-`npm test` runs the Vitest unit tests for the placement and preview logic.
+`npm test` runs the Vitest unit tests for the placement, preview, and settings
+visibility logic.
 
 `web/frontend/e2e/` holds the Playwright suite, which drives real Chromium
 against the API serving the real built bundle and the real native worker:
@@ -65,13 +79,21 @@ against the API serving the real built bundle and the real native worker:
 - The plate can be edited from the keyboard.
 - An object outside the printable volume blocks slicing.
 - The settings form is generated from the engine catalog, including dependent
-  controls.
+  controls, and searching and the mode switch show and hide its settings.
+- An object and a height range of it carry their own overrides, which reach the
+  worker as separate objects and change the produced layers.
 - A rejected setting is refused with a stable code before any job exists, and
   its control is marked invalid. A configuration error the engine raises while
   slicing names its setting the same way.
 - An unsupported or unreadable model never reaches the plate.
 - The prepared plate has no serious or critical axe-core WCAG 2 A/AA
   violations.
+- A saved project reopens in a fresh session with its placement, process, and
+  overrides, and slices where it was saved with a G-code thumbnail; a project
+  added to an existing plate keeps the current settings.
+- Cutting a cube at half height gives two 10 mm objects that slice below
+  10 mm, repair leaves a closed cube unchanged, laying the cube on its front
+  face turns it a quarter about X, and measuring reports a distance.
 
 Chromium always runs. `ORCA_WEB_E2E_BROWSERS` adds `firefox`, `webkit`, or
 `msedge` when that browser is installed. The `frontend-e2e` service runs

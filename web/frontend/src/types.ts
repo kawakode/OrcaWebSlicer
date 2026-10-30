@@ -22,6 +22,12 @@ export interface ProfileCatalog {
   filament: ProfileEntry[];
 }
 
+/** The desktop's visibility levels, from the fewest settings to all of them. */
+export type SettingMode = "simple" | "advanced" | "expert";
+
+/** Where an override applies: the whole plate, one object, or a height range of one. */
+export type SettingLevel = "plate" | "object" | "range";
+
 /** One setting as `orca-slicer-worker --export-settings-catalog` describes it. */
 export interface SettingDefinition {
   key: string;
@@ -29,7 +35,13 @@ export interface SettingDefinition {
   scope: "machine" | "process" | "filament" | "other";
   type: string;
   vector: boolean;
+  mode: SettingMode;
   label: string;
+  category?: string;
+  /** Whether one object, or a height range of one, may override it. */
+  per_object: boolean;
+  per_range: boolean;
+  multiline?: boolean;
   tooltip?: string;
   unit?: string;
   min?: number;
@@ -87,7 +99,7 @@ export interface JobError {
 }
 
 export interface JobArtifact {
-  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection";
+  name: "gcode" | "result" | "preview" | "preview_index" | "mesh" | "inspection" | "project" | "edit_report";
   media_type: string;
   size_bytes?: number;
   sha256?: string;
@@ -95,7 +107,7 @@ export interface JobArtifact {
 
 export interface Job {
   job_id: string;
-  operation: "slice" | "inspect";
+  operation: "slice" | "inspect" | "export_project" | "edit";
   correlation_id: string;
   state: JobState;
   progress: JobProgress;
@@ -112,6 +124,17 @@ export interface Job {
   batch_id?: string | null;
   profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>>;
   timing: { duration_ms: number; cpu_time_ms: number } | null;
+  /** An edit's resulting models, each a new upload with its own inspection. */
+  derived_uploads?: Upload[];
+}
+
+/** The report of an edit, documented in `docs/web/plater.md`. */
+export interface EditReport {
+  format: "orca-web-edit";
+  version: number;
+  tool: "cut" | "repair";
+  parts: { side: "upper" | "lower" | "whole"; name: string; triangle_count: number }[];
+  repair?: { open_edges_before: number; open_edges_after: number; facets_added: number; facets_removed: number; facets_reversed: number };
 }
 
 /** One job per plate of a project, submitted together. */

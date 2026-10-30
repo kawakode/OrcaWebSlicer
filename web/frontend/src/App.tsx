@@ -5,6 +5,7 @@ import {
   artifactUrl,
   cancelBatch,
   cancelJob,
+  exportProject,
   listProfiles,
   readEffectiveProfile,
   readInspection,
@@ -16,7 +17,8 @@ import {
   submitJob,
   uploadModel,
 } from "./api";
-import { decodeObjectMesh } from "./plater/mesh";
+import { decodeObjectMesh, type ProjectSelection } from "./plater/mesh";
+import { ObjectTools, useObjectTools } from "./plater/ObjectTools";
 import {
   addToPlates,
   arrange,
@@ -28,12 +30,14 @@ import {
   plateLabel,
   plateObjects,
   type Bed,
+  type LayerRange,
   type LoadedItem,
   type Plate,
   type PlateItem,
 } from "./plater/plate";
 import { PlaterView } from "./plater/PlaterView";
 import { PreviewView } from "./preview/PreviewView";
+import { declared, MODES } from "./settings/catalog";
 import { SettingsForm } from "./settings/SettingsForm";
 import {
   ApiError,
@@ -42,13 +46,16 @@ import {
   type ProfileCatalog,
   type ProfileEntry,
   type ProfileValue,
+  type SettingMode,
   type SettingsCatalog,
+  type Upload,
 } from "./types";
 
 const POLL_INTERVAL_MS = 400;
 const NUDGE_MM = 1;
 const NUDGE_LARGE_MM = 10;
 const DUPLICATE_OFFSET_MM = 10;
+const DEFAULT_RANGE_MM = 5;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
 const DEFAULT_BED: Bed = parseBed(["0x0", "200x0", "200x200", "0x200"], "200");
@@ -89,13 +96,16 @@ const newPlate = (): Plate => ({
 
 /**
  * Load an upload's display geometry and turn each object instance into a plate
- * item, on the plate of the file that holds it.
+ * item, on the plate of the file that holds it. An edited part is already in
+ * plate coordinates, so `inPlace` keeps it exactly where its geometry lies
+ * instead of centring it.
  */
 async function loadItems(
   uploadId: string,
   inspectionJob: Job,
   bed: Bed,
-): Promise<{ items: LoadedItem[]; names: string[]; loose: boolean }> {
+  inPlace = false,
+): Promise<{ items: LoadedItem[]; names: string[]; loose: boolean; project?: ProjectSelection }> {
   const job = await waitForJob(inspectionJob.job_id);
   if (job.state !== "succeeded") {
     throw new ApiError(job.error?.code ?? "inspection_failed", job.error?.message ?? "The model could not be read.", 0);
@@ -120,7 +130,9 @@ async function loadItems(
       rotation: [0, 0, 0] as [number, number, number],
       scale: 1,
     };
-    if (inspection.declares_plate) {
+    if (inPlace) {
+      items.push({ item: { ...base, id: newItemId(), x: center.x, y: center.y, rotation: [0, 0, 0], scale: 1 }, plate: 1 });
+    } else if (inspection.declares_plate) {
       // A project keeps the placement its author chose, plate by plate. An
       // instance the project left off every plate joins the first one.
       for (const instance of object.instances) {
@@ -135,7 +147,17 @@ async function loadItems(
     }
   }
   const names = (inspection.plates ?? []).map((plate) => plate.name);
-  return { items, names, loose: !inspection.declares_plate };
+  return { items, names, loose: !inspection.declares_plate, project: inspection.project };
+}
+
+/** Start a browser download of a finished job's artifact. */
+function download(jobId: string, name: "project") {
+  const anchor = document.createElement("a");
+  anchor.href = artifactUrl(jobId, name);
+  anchor.download = "";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 export default function App() {
@@ -146,6 +168,7 @@ export default function App() {
   const [filament, setFilament] = useState("");
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
+  const [mode, setMode] = useState<SettingMode>("simple");
   const [profileValues, setProfileValues] = useState<Record<string, ProfileValue>>({});
   const [bed, setBed] = useState<Bed>(DEFAULT_BED);
   const [plates, setPlates] = useState<Plate[]>(() => [newPlate()]);
@@ -155,8 +178,23 @@ export default function App() {
   const [view, setView] = useState<"prepare" | "preview">("prepare");
   const [failure, setFailure] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
+  const [thumbnails, setThumbnails] = useState(true);
+  const [saved, setSaved] = useState<Job | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const bedRef = useRef(bed);
   bedRef.current = bed;
+  const printersRef = useRef(printers);
+  printersRef.current = printers;
+  const machineRef = useRef(machine);
+  machineRef.current = machine;
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
+  const settingsCatalogRef = useRef(settingsCatalog);
+  settingsCatalogRef.current = settingsCatalog;
+  // Process and filament names an opened project asks for, applied once its
+  // printer's narrowed lists arrive.
+  const restoreRef = useRef<{ process: string; filament?: string } | null>(null);
 
   // A removed plate falls back to the first one.
   const currentIndex = Math.max(
@@ -168,6 +206,8 @@ export default function App() {
   const job = plate.job;
   const plateRef = useRef(plate.id);
   plateRef.current = plate.id;
+  const platesRef = useRef(plates);
+  platesRef.current = plates;
   const jobRef = useRef(job?.job_id);
   jobRef.current = job?.job_id;
 
@@ -212,8 +252,10 @@ export default function App() {
         if (stale) return;
         setCatalog(narrowed);
         const printer = narrowed.machine.find((entry) => entry.profile_id === machine);
-        setProcess(firstId(narrowed.process, printer?.default_process));
-        setFilament(firstId(narrowed.filament));
+        const restoring = restoreRef.current;
+        restoreRef.current = null;
+        setProcess(firstId(narrowed.process, restoring?.process ?? printer?.default_process));
+        setFilament(firstId(narrowed.filament, restoring?.filament));
       })
       .catch((error) => !stale && setFailure(describe(error)));
     return () => {
@@ -245,13 +287,46 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [activeJobs]);
 
+  /**
+   * Select the presets and overrides a project recorded, as the desktop does
+   * when it opens one. A preset this deployment does not bundle keeps the
+   * current choice, and only overrides of catalog settings are kept.
+   */
+  const restoreProject = useCallback((project: ProjectSelection) => {
+    const printer = printersRef.current.find((entry) => entry.name === project.printer);
+    const known = new Set(settingsCatalogRef.current?.settings.map((setting) => setting.key) ?? []);
+    setSettings(Object.fromEntries(Object.entries(project.settings).filter(([key]) => known.has(key))));
+    if (!printer) {
+      setNotice(`The project's printer "${project.printer}" is not available; the current profiles are kept.`);
+      return;
+    }
+    const wanted = { process: project.process, filament: project.filaments[0] };
+    if (printer.profile_id === machineRef.current) {
+      setProcess(firstId(catalogRef.current.process, wanted.process));
+      setFilament(firstId(catalogRef.current.filament, wanted.filament));
+    } else {
+      restoreRef.current = wanted;
+      setMachine(printer.profile_id);
+    }
+    setNotice(`Restored the project's profiles: ${[project.printer, project.process, ...project.filaments].join(", ")}.`);
+  }, []);
+
   const addFiles = useCallback(async (files: File[]) => {
     setFailure(null);
+    setNotice(null);
     for (const file of files) {
       setLoading((current) => [...current, file.name]);
+      // Opening a project into an empty project also opens its settings;
+      // adding one to existing plates only adds its objects.
+      const opening = platesRef.current.every((entry) => entry.items.length === 0);
       try {
         const stored = await uploadModel(file);
-        const { items: added, names, loose } = await loadItems(stored.upload_id, stored.inspection, bedRef.current);
+        const { items: added, names, loose, project } = await loadItems(
+          stored.upload_id,
+          stored.inspection,
+          bedRef.current,
+        );
+        if (project && opening) restoreProject(project);
         // A file lands on the plate shown now, and a project's later plates on
         // the plates after it.
         setPlates((current) => {
@@ -273,7 +348,7 @@ export default function App() {
         setLoading((current) => current.filter((name) => name !== file.name));
       }
     }
-  }, []);
+  }, [restoreProject]);
 
   /** Change the items of the plate shown now. */
   const editItems = useCallback((change: (current: PlateItem[]) => PlateItem[]) => {
@@ -348,6 +423,20 @@ export default function App() {
   }, [plates, plate, currentIndex, showPlate]);
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
+  // What an object inherits: the profile chain with the plate's overrides on top.
+  const plateValues = useMemo(() => ({ ...profileValues, ...declared(settings) }), [profileValues, settings]);
+  const invalidKey = failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined);
+
+  const replace = useCallback((id: string, parts: PlateItem[]) => {
+    editItems((current) => current.flatMap((item) => (item.id === id ? parts : [item])));
+    setSelectedId(parts[0]?.id ?? null);
+  }, [editItems]);
+  const loadPart = useCallback(async (upload: Upload) => {
+    const { items: parts } = await loadItems(upload.upload_id, upload.inspection, bedRef.current, true);
+    return parts.map(({ item }) => ({ ...item, name: upload.filename.replace(/\.stl$/i, "") }));
+  }, []);
+  const reportFailure = useCallback((error: unknown) => setFailure(describe(error)), []);
+  const tools = useObjectTools({ selected, update, replace, load: loadPart, wait: waitForJob, onFailure: reportFailure });
 
   const onPlateKey = useCallback(
     (event: React.KeyboardEvent) => {
@@ -388,8 +477,28 @@ export default function App() {
     machine_profile: machine,
     process_profile: process,
     filament_profile: filament,
-    settings: Object.fromEntries(Object.entries(settings).filter(([, value]) => value.trim() !== "")),
+    settings: declared(settings),
   });
+
+  // A project is saved by a worker like any other job, then downloaded. It
+  // holds the plate shown.
+  const saveProject = async () => {
+    setSaving(true);
+    setFailure(null);
+    setSaved(null);
+    try {
+      const finished = await waitForJob(
+        (await exportProject({ ...submission(), objects: plateObjects(items), plate_index: plate.sourcePlate })).job_id,
+      );
+      setSaved(finished);
+      if (finished.state === "succeeded") download(finished.job_id, "project");
+      else setFailure({ code: finished.error?.code ?? "project_export_failed", message: finished.error?.message ?? "" });
+    } catch (error) {
+      setFailure(describe(error));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const run = useCallback(async (action: () => Promise<void>) => {
     setBusy(true);
@@ -410,6 +519,7 @@ export default function App() {
         target.id,
         await submitJob({
           ...submission(),
+          thumbnails,
           objects: plateObjects(target.items),
           plate: currentIndex + 1,
           plate_name: target.name || undefined,
@@ -426,6 +536,7 @@ export default function App() {
         .filter(({ entry }) => entry.items.length > 0);
       const batch = await submitBatch({
         ...submission(),
+        thumbnails,
         plates: numbered.map(({ entry, number }) => ({
           objects: plateObjects(entry.items),
           plate: number,
@@ -455,6 +566,8 @@ export default function App() {
   const profilesReady = Boolean(machine && process && filament) && loading.length === 0 && !busy;
   const ready = items.length > 0 && outside.length === 0 && profilesReady && !active;
   const readyAll = plates.some((entry) => entry.items.length > 0) && !outsideAnywhere && profilesReady && !anyActive;
+  // A project may be saved with objects outside the bed, as on the desktop.
+  const savable = items.length > 0 && loading.length === 0 && Boolean(machine && process && filament) && !saving;
   const previewable = hasPreview(job);
 
   return (
@@ -519,6 +632,9 @@ export default function App() {
               selectedId={selectedId}
               onSelect={setSelectedId}
               onMove={(id, x, y) => update(id, { x, y })}
+              picking={tools.pickMode !== null}
+              onPick={tools.onPick}
+              overlay={tools.overlay}
             />
           ) : (
             <PreviewView key={job!.job_id} jobId={job!.job_id} />
@@ -588,12 +704,17 @@ export default function App() {
                 item={selected}
                 plates={plates}
                 plateId={plate.id}
+                catalog={settingsCatalog}
+                inherited={plateValues}
+                mode={mode}
+                invalidKey={invalidKey}
                 onChange={(change) => update(selected.id, change)}
                 onMove={(targetId) => moveToPlate(selected.id, targetId)}
                 onDuplicate={() => duplicate(selected.id)}
                 onDelete={() => remove(selected.id)}
               />
             )}
+            {selected && <ObjectTools item={selected} tools={tools} disabled={loading.length > 0 || active} />}
             {outside.length > 0 && (
               <p className="failure" data-testid="outside-warning" role="status">
                 {outside.length === 1 ? "One object is" : `${outside.length} objects are`} outside the printable volume.
@@ -613,12 +734,23 @@ export default function App() {
               <summary>
                 <h2>Settings</h2>
               </summary>
+              <div className="field wide">
+                <label htmlFor="settings-mode">Mode</label>
+                <select id="settings-mode" data-testid="settings-mode" value={mode} onChange={(event) => setMode(event.target.value as SettingMode)}>
+                  {MODES.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {settingsCatalog && (
                 <SettingsForm
                   catalog={settingsCatalog}
                   profileValues={profileValues}
                   overrides={settings}
-                  invalidKey={failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined)}
+                  mode={mode}
+                  invalidKey={invalidKey}
                   onChange={(key, value) => setSettings((current) => ({ ...current, [key]: value }))}
                 />
               )}
@@ -626,6 +758,15 @@ export default function App() {
           </section>
 
           <section className="actions">
+            <label className="check">
+              <input
+                type="checkbox"
+                data-testid="gcode-thumbnails"
+                checked={thumbnails}
+                onChange={(event) => setThumbnails(event.target.checked)}
+              />
+              Embed a thumbnail in the G-code
+            </label>
             <button type="button" data-testid="slice" disabled={!ready} onClick={slice}>
               Slice plate
             </button>
@@ -634,6 +775,9 @@ export default function App() {
                 Slice all plates
               </button>
             )}
+            <button type="button" className="secondary" data-testid="save-project" disabled={!savable} onClick={saveProject}>
+              {saving ? "Saving project…" : "Save project (3MF)"}
+            </button>
             <button
               type="button"
               data-testid="cancel"
@@ -666,12 +810,23 @@ export default function App() {
                 Download G-code
               </a>
             )}
+            {saved?.state === "succeeded" && (
+              <a data-testid="download-project" href={artifactUrl(saved.job_id, "project")} download>
+                Download project
+              </a>
+            )}
             {job?.artifacts.some((artifact) => artifact.name === "result") && (
               <a data-testid="download-result" href={artifactUrl(job.job_id, "result")} download>
                 Download report
               </a>
             )}
           </section>
+
+          {notice && (
+            <p className="notice" data-testid="notice" role="status">
+              {notice}
+            </p>
+          )}
 
           {failure && (
             <p className="failure" data-testid="failure" role="alert">
@@ -753,12 +908,24 @@ function ObjectPanel(props: {
   item: PlateItem;
   plates: Plate[];
   plateId: string;
+  catalog: SettingsCatalog | null;
+  inherited: Record<string, ProfileValue>;
+  mode: SettingMode;
+  invalidKey?: string;
   onChange: (change: Partial<PlateItem>) => void;
   onMove: (plateId: string) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
-  const { item, onChange } = props;
+  const { item, catalog, inherited, mode, invalidKey, onChange } = props;
+  const ranges = item.layerRanges ?? [];
+  const changed = Object.keys(declared(item.settings)).length;
+  const setRange = (index: number, range: LayerRange | null) =>
+    onChange({ layerRanges: range ? ranges.map((current, at) => (at === index ? range : current)) : ranges.filter((_, at) => at !== index) });
+  const addRange = () => {
+    const top = ranges.reduce((highest, range) => Math.max(highest, range.maxZ), 0);
+    onChange({ layerRanges: [...ranges, { minZ: top, maxZ: top + DEFAULT_RANGE_MM, settings: {} }] });
+  };
   const rotate = (axis: 0 | 1 | 2, degrees: number) => {
     const rotation = [...item.rotation] as [number, number, number];
     rotation[axis] = degrees;
@@ -806,6 +973,62 @@ function ObjectPanel(props: {
         </button>
       </div>
       <p className="hint">Drag the selected object on the plate, or use the arrow keys. R rotates by 90°.</p>
+      {catalog && (
+        <details className="object-settings" data-testid="object-settings">
+          <summary>Object settings{changed > 0 ? ` (${changed} changed)` : ""}</summary>
+          <p className="hint">These override the plate's settings for this object only.</p>
+          <SettingsForm
+            catalog={catalog}
+            profileValues={inherited}
+            overrides={item.settings ?? {}}
+            mode={mode}
+            level="object"
+            idPrefix="object-"
+            invalidKey={invalidKey}
+            onChange={(key, value) => onChange({ settings: { ...item.settings, [key]: value } })}
+          />
+          <h3>Height ranges</h3>
+          {ranges.map((range, index) => (
+            <fieldset key={index} className="layer-range" data-testid={`layer-range-${index}`}>
+              <legend>
+                {range.minZ} – {range.maxZ} mm
+              </legend>
+              <NumberField
+                label="From"
+                testId={`layer-range-${index}-min`}
+                value={range.minZ}
+                unit="mm"
+                step={0.5}
+                onCommit={(minZ) => minZ >= 0 && minZ < range.maxZ && setRange(index, { ...range, minZ })}
+              />
+              <NumberField
+                label="To"
+                testId={`layer-range-${index}-max`}
+                value={range.maxZ}
+                unit="mm"
+                step={0.5}
+                onCommit={(maxZ) => maxZ > range.minZ && setRange(index, { ...range, maxZ })}
+              />
+              <SettingsForm
+                catalog={catalog}
+                profileValues={{ ...inherited, ...declared(item.settings) }}
+                overrides={range.settings}
+                mode={mode}
+                level="range"
+                idPrefix={`layer-range-${index}-`}
+                invalidKey={invalidKey}
+                onChange={(key, value) => setRange(index, { ...range, settings: { ...range.settings, [key]: value } })}
+              />
+              <button type="button" className="secondary" data-testid={`layer-range-${index}-delete`} onClick={() => setRange(index, null)}>
+                Remove range
+              </button>
+            </fieldset>
+          ))}
+          <button type="button" data-testid="add-layer-range" onClick={addRange}>
+            Add height range
+          </button>
+        </details>
+      )}
     </fieldset>
   );
 }

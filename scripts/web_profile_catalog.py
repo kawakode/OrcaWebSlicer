@@ -93,8 +93,9 @@ class _InheritanceIndex:
 class ProfileCatalog:
     """The bundled profiles one API instance offers, indexed for lookup."""
 
-    # Read by `effective_values`, which never needs more than the curated form.
-    MAX_EFFECTIVE_KEYS = 256
+    # Read by `effective_values`. The full settings catalog holds several
+    # hundred keys; the bound only guards against a runaway catalog.
+    MAX_EFFECTIVE_KEYS = 4096
 
     def __init__(
         self,

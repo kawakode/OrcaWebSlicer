@@ -1,8 +1,10 @@
 import type { Inspection } from "./plater/mesh";
+import type { EditSubmission } from "./plater/tools";
 import type { PreviewIndex } from "./preview/preview";
 import {
   ApiError,
   type Batch,
+  type EditReport,
   type EffectiveProfile,
   type Job,
   type JobArtifact,
@@ -76,14 +78,36 @@ export function uploadModel(file: File): Promise<Upload> {
   return request<Upload>("/uploads", { method: "POST", body });
 }
 
+/** Cut or repair one object of an upload; the parts become new uploads. */
+export function editUpload(uploadId: string, submission: EditSubmission): Promise<Job> {
+  return request<Job>(`/uploads/${uploadId}/edits`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(submission),
+  });
+}
+
+export const readEditReport = (jobId: string): Promise<EditReport> =>
+  request<EditReport>(`/jobs/${jobId}/artifacts/edit_report`);
+
+export interface LayerRangeSubmission {
+  /** Heights above the object's bottom, in millimetres. */
+  min_z: number;
+  max_z: number;
+  settings: Record<string, string>;
+}
+
 export interface PlacedObjectSubmission {
   upload_id: string;
   object: number;
   /** Row-major 4x4 matrices in millimetres. */
   instances: { transform: number[] }[];
+  /** Overrides of the plate's settings for this object only. */
+  settings?: Record<string, string>;
+  layer_ranges?: LayerRangeSubmission[];
 }
 
-export interface SliceSubmission {
+export interface PlateSubmission {
   upload_id?: string;
   objects?: PlacedObjectSubmission[];
   machine_profile: string;
@@ -97,6 +121,21 @@ export interface SliceSubmission {
   plate_name?: string;
 }
 
+export interface SliceSubmission extends PlateSubmission {
+  /** Embed rendered thumbnails in the G-code. */
+  thumbnails?: boolean;
+}
+
+function post<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export const submitJob = (submission: SliceSubmission): Promise<Job> => post<Job>("/jobs", submission);
+
 export interface BatchSubmission {
   plates: {
     objects: PlacedObjectSubmission[];
@@ -108,27 +147,17 @@ export interface BatchSubmission {
   process_profile: string;
   filament_profile: string;
   settings: Record<string, string>;
+  thumbnails?: boolean;
 }
 
 /** Slice every plate of the project at once, one job per plate. */
-export function submitBatch(submission: BatchSubmission): Promise<Batch> {
-  return request<Batch>("/batches", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(submission),
-  });
-}
+export const submitBatch = (submission: BatchSubmission): Promise<Batch> => post<Batch>("/batches", submission);
 
 export const cancelBatch = (batchId: string): Promise<Batch> =>
   request<Batch>(`/batches/${batchId}/cancel`, { method: "POST" });
 
-export function submitJob(submission: SliceSubmission): Promise<Job> {
-  return request<Job>("/jobs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(submission),
-  });
-}
+/** Save a plate as a 3MF project; the job publishes a `project` artifact. */
+export const exportProject = (submission: PlateSubmission): Promise<Job> => post<Job>("/projects", submission);
 
 export const readJob = (jobId: string): Promise<Job> => request<Job>(`/jobs/${jobId}`);
 

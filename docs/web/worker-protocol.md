@@ -1,7 +1,7 @@
 # Worker protocol version 1
 
 Status: Active contract; G5 added plate composition, inspection, and preview;
-Phase 3b added multi-plate project archives
+phase 3b added object edits and multi-plate project archives
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
@@ -114,6 +114,27 @@ the plate draws on a project archive, the first archive listed contributes its
 embedded configuration. An archive's objects are numbered across all of its
 plates, exactly as its inspection lists them.
 
+An object may also carry its own `settings`, and `layer_ranges` that apply
+settings between two heights measured from the object's bottom, exactly as the
+desktop's per-object settings and height range modifiers do:
+
+```json
+{"model": "input/model-0.stl", "instances": [...],
+ "settings": {"wall_loops": "5"},
+ "layer_ranges": [{"min_z": 5, "max_z": 10, "settings": {"layer_height": "0.1"}}]}
+```
+
+Values use the same serialized string form as the request's `settings`, at most
+256 per object or range. An object accepts the engine's object and region
+options (`PrintObjectConfig` and `PrintRegionConfig`), a range the region options
+and `layer_height`, the same sets the desktop's object list offers; any other
+key is the `validation` error `setting_not_per_object`, naming the setting. An
+object holds at most 32 ranges, each with `0 <= min_z < max_z` and at least one
+setting, and its ranges may not overlap (`invalid_layer_ranges`). A range that
+does not set `layer_height` keeps the object's. The overrides are applied on top
+of any configuration the object brought from its file, and affect that object
+only.
+
 `output_preview` and `output_preview_index` optionally ask for a layer preview
 of the produced G-code, always together. The format is documented in
 [the preview contract](preview.md). The preview is published only alongside its
@@ -129,6 +150,76 @@ as artifacts of kind `mesh` and `inspection`, described in
 [the plater contract](plater.md). An inspection is how the browser sees a model
 without the API ever parsing one. A project archive is inspected whole: every
 plate, and every instance with its plate.
+
+## Edit operation
+
+`operation.name` may be `edit`. It applies one object tool to one object of
+one `input_model` and publishes the result as new models; profiles and
+settings are not read, and the input limits are those of an inspection.
+
+```json
+"payload": {
+  "input_model": "input/model.stl",
+  "object": 0,
+  "transform": [1,0,0,100, 0,1,0,100, 0,0,1,0, 0,0,0,1],
+  "tool": "cut",
+  "cut": {"point": [110, 110, 10], "normal": [0, 0, 1], "keep": "both",
+          "flip_upper": false, "place_on_cut": false},
+  "output_models": ["output/part-0.stl", "output/part-1.stl"],
+  "output_report": "output/edit.json"
+}
+```
+
+`transform` is the object's placement on the plate, validated like a plate
+instance (`invalid_instance_transform`). The object is edited where it stands,
+and every produced model is a binary STL of its printable parts with that
+placement baked in, so its vertices are plate coordinates: drawn with an
+identity transform, a part sits exactly where it was. Modifiers and negative
+volumes do not survive an edit.
+
+`tool` is `cut` or `repair` (`invalid_edit_tool`).
+
+- A cut is a plane given by a `point` and a `normal` in plate millimetres; the
+  normal points at the upper part (`invalid_cut_plane`). `keep` is `both`,
+  `upper`, or `lower`. `flip_upper` turns the upper part upside down, and
+  `place_on_cut` lays each part on its cut face, which only matters for a tilted
+  plane. The cut goes through the engine's `Cut`, the code behind the desktop
+  cut tool, and caps every part. A plane that does not cross the object is the
+  `validation` error `cut_plane_misses_object`.
+- A repair welds coincident vertices, drops degenerate faces, and runs admesh's
+  full repair: nearby edges are joined, unconnected facets removed, holes
+  filled, and normals made consistent. Import already applies the same repair
+  except hole filling, which the desktop leaves to the slicer.
+
+`output_models` lists one or two `.stl` paths, used in order. The models are
+published with kind `model`, then `output_report` with kind `edit_report`:
+
+```json
+{"format": "orca-web-edit", "version": 1, "tool": "cut", "parts": [
+  {"side": "upper", "name": "cube (upper)", "model": "output/part-0.stl",
+   "triangle_count": 12, "bounding_box": {"min": [100,100,10], "max": [120,120,20]}}
+]}
+```
+
+`side` is `upper` or `lower` for a cut and `whole` for a repair. A repair's
+report adds `repair`: `open_edges_before`, `open_edges_after`,
+`merged_vertices`, `degenerate_facets`, `edges_fixed`, `facets_removed`,
+`facets_added`, `facets_reversed`, and `backwards_edges`.
+
+## Project export operation
+
+`operation.name` may be `export_project`. Its payload describes a plate exactly
+as a slice does (`input_model` or `objects`, `profiles`, `settings`,
+`plate_index`, `limits`) and names one output, `output_project` (`.3mf`), in
+place of the G-code and preview outputs. The plate is built, configured, and
+validated as for a slice, then saved through the engine's 3MF exporter instead
+of being sliced, and published as an artifact of kind `project`. The archive's
+contents and how the selection is recorded are described in
+[the projects contract](projects.md).
+
+A slice payload may also set `thumbnails` to `true` to embed rendered
+thumbnails in the G-code at the sizes the printer's `thumbnails` setting names.
+It defaults to `false`; any other type is `invalid_thumbnails`.
 
 ## Event transport
 
@@ -148,7 +239,7 @@ Event types and their typed records are:
 
 Progress percentages are integers from 0 through 100 and never decrease.
 Public stages currently include `input`, `configuration`, `arrangement`,
-`slicing`, `export`, and `finalize`; they intentionally do not expose internal
+`slicing`, `edit`, `export`, and `finalize`; they intentionally do not expose internal
 class or print-step names.
 
 ## Errors and exit codes
@@ -219,8 +310,9 @@ mesh instead.
 
 The configuration chain is the engine defaults, then the archive's embedded
 project configuration and the selected plate's own configuration including its
-filament mapping, then any
-profiles resolved by the request, then the request's curated setting overrides.
+filament mapping, then any profiles resolved by the request, then the request's
+setting overrides. A plate object's own settings and height ranges then apply to
+that object only.
 
 ## Artifact publication
 
@@ -238,12 +330,6 @@ job's abandoned `.partial` files from earlier crashes. The executor remains
 responsible for deleting the complete job directory after a forced termination
 or process crash. `result.json` uses the same write-then-rename publication
 rule.
-
-The engine stages a project archive's settings on disk while importing it. A
-slice or inspection job therefore gets a private directory under the system
-temporary directory (`TMPDIR`, else `/tmp`), which the worker removes when the
-job ends. The temporary directory must be writable, which a read-only root
-with a `/tmp` tmpfs satisfies.
 
 ## Terminal result
 

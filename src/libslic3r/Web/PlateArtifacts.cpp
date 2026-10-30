@@ -1,4 +1,5 @@
 #include "PlateArtifacts.hpp"
+#include "ProjectExport.hpp"
 
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -56,7 +57,7 @@ bool finish(std::ofstream &output, const char *what, std::string &error)
 bool write_model_inspection(const Model &model, bool declares_plate, const InspectedPlates &plates,
                             const std::string &model_format,
                             const std::filesystem::path &mesh, const std::filesystem::path &inspection,
-                            std::string &error)
+                            std::string &error, const DynamicPrintConfig *project_config)
 {
     if (!is_little_endian()) {
         error = "Mesh export requires a little-endian host.";
@@ -119,14 +120,18 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
     nlohmann::json described_plates = nlohmann::json::array();
     for (std::size_t plate = 0; plate < plates.names.size(); ++plate)
         described_plates.push_back({{"index", plate + 1}, {"name", plates.names[plate]}});
-    index_output << nlohmann::json{
+    nlohmann::json described {
         {"format", "orca-web-mesh"},
         {"version", MESH_FORMAT_VERSION},
         {"model_format", model_format},
         {"declares_plate", declares_plate},
         {"plates", std::move(described_plates)},
         {"objects", std::move(objects)},
-    }.dump() << '\n';
+    };
+    if (project_config != nullptr)
+        if (nlohmann::json project = describe_project_selection(*project_config); !project.is_null())
+            described["project"] = std::move(project);
+    index_output << described.dump() << '\n';
     return finish(index_output, "inspection artifact", error);
 }
 

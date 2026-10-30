@@ -226,6 +226,52 @@ checks below green in CI.
 - [x] Document the jobs, caches, and expected durations in
   [`docs/web/baseline.md`](docs/web/baseline.md#continuous-integration).
 
+### Expert and per-object settings (lot 3)
+
+- [x] Export the whole process and filament catalog from `PrintConfigDef`
+  (settings catalog version 2), grouped by the engine's categories, with each
+  option's desktop mode and whether an object or a height range may override it.
+- [x] Search the catalog and switch between simple, advanced, and expert modes
+  in the browser, still without any setting definition in TypeScript.
+- [x] Override settings per plate object and per non-overlapping height range,
+  limited to the engine's object and region options as on the desktop.
+- [x] Verify that a per-object override changes only that object's G-code
+  (Catch2), and the search, mode, and per-object editing flow end to end.
+
+### Object tools
+
+- [x] Cut an object with a plane through the engine's own `Cut`, keeping
+  either or both parts, optionally flipped or laid on the cut face.
+- [x] Repair a mesh: weld vertices, drop degenerate and unconnected facets,
+  fill holes, and fix normals, with a report of what changed.
+- [x] Publish edited parts as new inspected uploads in plate coordinates, so
+  the plater keeps them where they were.
+- [x] Lay an object on a picked face and measure between two points in the
+  browser.
+- [x] Cover edit requests, cut bounds, and repair in Catch2, the edit route in
+  the API suite, and every tool in the browser suite.
+- [ ] Offer a tilted cut plane, connectors, and dowels in the cut panel.
+- [x] Keep an object's setting overrides on its edited parts, and its height
+  ranges after a repair.
+- [ ] Carry modifiers and per-volume settings through an edit.
+
+### Projects: save and export 3MF
+
+- [x] Save the composed plate (objects, instance transforms, selected presets,
+  and overrides) as a desktop-compatible 3MF through the worker's
+  `export_project` operation and the engine's own 3MF exporter; the API never
+  writes the archive.
+- [x] Record the selection as the desktop does (`*_settings_id` and
+  `different_settings_to_system`) so the desktop opens the same presets,
+  marked as modified, and the browser restores them from an inspection.
+- [x] Render plate thumbnails on the CPU, without OpenGL, for the project and,
+  on request, for the G-code at the sizes the printer's `thumbnails` setting
+  asks for.
+- [x] Reopen a saved project in the browser with its placement, profiles, and
+  overrides; a project added to an existing plate only adds its objects.
+- [x] Catch2 round trip through `load_bbs_3mf`, API tests, and end-to-end tests.
+- [ ] Export every plate once projects hold several plates.
+
 ### Multiple plates
 
 - [x] Record an ADR choosing one job per plate over a multi-plate worker
@@ -309,6 +355,6 @@ begins:
 - Production hosting and sandbox technology.
 - Authentication provider and billing model.
 
-SLA slicing, painting tools, desktop gizmo parity, direct
+SLA slicing, painting tools, full desktop gizmo parity, direct
 printer control, plugins, arbitrary post-processing, offline WebAssembly
 slicing, and mobile-first editing remain outside the MVP.

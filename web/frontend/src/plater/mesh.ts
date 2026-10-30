@@ -15,6 +15,15 @@ export interface InspectedObject {
   instances: { transform: number[]; plate?: number | null }[];
 }
 
+/** The preset selection and overrides a project archive records. */
+export interface ProjectSelection {
+  printer: string;
+  process: string;
+  filaments: string[];
+  /** Overridden settings in their serialized form, keyed by setting. */
+  settings: Record<string, string>;
+}
+
 export interface Inspection {
   format: "orca-web-mesh";
   version: number;
@@ -23,6 +32,8 @@ export interface Inspection {
   /** The plates a project declares, empty for a mesh. */
   plates?: { index: number; name: string }[];
   objects: InspectedObject[];
+  /** Present when the model is a project that names its presets. */
+  project?: ProjectSelection;
 }
 
 export interface ObjectMesh {

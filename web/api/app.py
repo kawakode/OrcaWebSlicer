@@ -6,11 +6,12 @@ bytes are streamed to disk and only ever read by a disposable worker process.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Path as PathParam, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,16 +24,19 @@ from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, l
 
 from . import API_VERSION, PROTOCOL_VERSION
 from .config import ApiConfig, from_environment
+from .edits import EditSpec
 from .errors import ApiError, from_catalog_error, from_settings_error
 from .jobs import (
     ARTIFACT_NAMES,
     MAX_BATCH_PLATES,
     MAX_OBJECT_INSTANCES,
+    MAX_LAYER_RANGES,
     MAX_PLATE_NAME_CHARS,
     MAX_PLATE_OBJECTS,
     MAX_SETTINGS,
     PREVIEW_CHUNK_BYTES,
     JobService,
+    LayerRange,
     PlacedObject,
     SliceRequest,
 )
@@ -54,20 +58,32 @@ class InstanceSubmission(BaseModel):
     transform: List[float] = Field(min_length=16, max_length=16)
 
 
+class LayerRangeSubmission(BaseModel):
+    """Settings for part of an object's height, measured from its bottom."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_z: float = Field(ge=0, allow_inf_nan=False)
+    max_z: float = Field(gt=0, allow_inf_nan=False)
+    settings: Dict[str, str] = Field(min_length=1, max_length=MAX_SETTINGS)
+
+
 class ObjectSubmission(BaseModel):
-    """One object of an upload, placed by the plater."""
+    """One object of an upload, placed by the plater, with its own overrides."""
 
     model_config = ConfigDict(extra="forbid")
 
     upload_id: str = Field(min_length=1, max_length=64)
     object: int = Field(default=0, ge=0, lt=MAX_PLATE_OBJECTS)
     instances: List[InstanceSubmission] = Field(min_length=1, max_length=MAX_OBJECT_INSTANCES)
+    settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+    layer_ranges: List[LayerRangeSubmission] = Field(default_factory=list, max_length=MAX_LAYER_RANGES)
 
 
-class SliceSubmission(BaseModel):
-    """One slice request. Unknown fields are refused rather than ignored.
+class PlateSubmission(BaseModel):
+    """One plate with its profiles. Unknown fields are refused rather than ignored.
 
-    `upload_id` slices one model as the worker arranges it; `objects` slices a
+    `upload_id` names one model as the worker arranges it; `objects` names a
     plate exactly as the plater placed it. Exactly one of the two is given.
     """
 
@@ -86,13 +102,14 @@ class SliceSubmission(BaseModel):
     plate_name: Optional[str] = Field(default=None, max_length=MAX_PLATE_NAME_CHARS)
 
     @model_validator(mode="after")
-    def names_one_plate(self) -> "SliceSubmission":
+    def names_one_plate(self) -> "PlateSubmission":
         if (self.upload_id is None) == (self.objects is None):
             raise ValueError("give either upload_id or objects, not both")
         return self
 
-    def to_request(self) -> SliceRequest:
+    def to_request(self, operation: str = "slice", **options: Any) -> SliceRequest:
         return SliceRequest(
+            operation=operation,
             upload_id=self.upload_id,
             machine_profile=self.machine_profile,
             process_profile=self.process_profile,
@@ -102,6 +119,63 @@ class SliceSubmission(BaseModel):
             objects=_placed_objects(self.objects or ()),
             plate=self.plate,
             plate_name=self.plate_name,
+            **options,
+        )
+
+
+class SliceSubmission(PlateSubmission):
+    """One slice request: a plate, plus whether the G-code embeds thumbnails."""
+
+    thumbnails: bool = False
+
+    def to_request(self, operation: str = "slice", **options: Any) -> SliceRequest:
+        return super().to_request(operation, thumbnails=self.thumbnails, **options)
+
+
+class ProjectSubmission(PlateSubmission):
+    """One plate to save as a desktop-compatible 3MF project instead of slicing."""
+
+
+class CutSubmission(BaseModel):
+    """A planar cut: a point on the plane and the normal pointing at the upper part, in plate millimetres."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    point: List[float] = Field(min_length=3, max_length=3)
+    normal: List[float] = Field(min_length=3, max_length=3)
+    keep: Literal["both", "upper", "lower"] = "both"
+    flip_upper: bool = False
+    place_on_cut: bool = False
+
+
+class EditSubmission(BaseModel):
+    """One object tool applied to one object of an upload, where the plater placed it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: Literal["cut", "repair"]
+    object: int = Field(default=0, ge=0, lt=MAX_PLATE_OBJECTS)
+    # Row-major 4x4 affine matrix in millimetres: the object's placement.
+    transform: List[float] = Field(min_length=16, max_length=16)
+    cut: Optional[CutSubmission] = None
+
+    @model_validator(mode="after")
+    def cut_has_a_plane(self) -> "EditSubmission":
+        if (self.tool == "cut") != (self.cut is not None):
+            raise ValueError("a cut, and only a cut, names its plane")
+        return self
+
+    def to_spec(self) -> EditSpec:
+        spec = EditSpec(tool=self.tool, transform=tuple(self.transform), object_index=self.object)
+        if self.cut is None:
+            return spec
+        return dataclasses.replace(
+            spec,
+            point=tuple(self.cut.point),
+            normal=tuple(self.cut.normal),
+            keep=self.cut.keep,
+            flip_upper=self.cut.flip_upper,
+            place_on_cut=self.cut.place_on_cut,
         )
 
 
@@ -111,12 +185,17 @@ def _placed_objects(objects: List[ObjectSubmission]) -> tuple:
             upload_id=placed.upload_id,
             object_index=placed.object,
             instances=tuple(tuple(instance.transform) for instance in placed.instances),
+            settings=dict(placed.settings),
+            layer_ranges=tuple(
+                LayerRange(layer_range.min_z, layer_range.max_z, dict(layer_range.settings))
+                for layer_range in placed.layer_ranges
+            ),
         )
         for placed in objects
     )
 
 
-class PlateSubmission(BaseModel):
+class BatchPlateSubmission(BaseModel):
     """One plate of a batch, placed by the plater."""
 
     model_config = ConfigDict(extra="forbid")
@@ -135,11 +214,12 @@ class BatchSubmission(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    plates: List[PlateSubmission] = Field(min_length=1, max_length=MAX_BATCH_PLATES)
+    plates: List[BatchPlateSubmission] = Field(min_length=1, max_length=MAX_BATCH_PLATES)
     machine_profile: str = Field(min_length=1, max_length=512)
     process_profile: str = Field(min_length=1, max_length=512)
     filament_profile: str = Field(min_length=1, max_length=512)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+    thumbnails: bool = False
 
     def to_requests(self) -> List[SliceRequest]:
         return [
@@ -152,6 +232,7 @@ class BatchSubmission(BaseModel):
                 objects=_placed_objects(plate.objects),
                 plate=plate.plate or position,
                 plate_name=plate.name,
+                thumbnails=self.thumbnails,
             )
             for position, plate in enumerate(self.plates, start=1)
         ]
@@ -308,9 +389,21 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         described["inspection"] = request.app.state.jobs.inspect(record.upload_id, correlation_id(request))
         return described
 
+    @app.post(f"{PREFIX}/uploads/{{upload_id}}/edits", status_code=202, tags=["uploads"])
+    def edit_upload(
+        request: Request, submission: EditSubmission, upload_id: str = PathParam(max_length=64)
+    ) -> Dict[str, Any]:
+        """Cut or repair one object. Each resulting model becomes a new, inspected upload."""
+        return request.app.state.jobs.edit(upload_id, submission.to_spec(), correlation_id(request))
+
     @app.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
     def submit_job(request: Request, submission: SliceSubmission) -> Dict[str, Any]:
         return request.app.state.jobs.submit(submission.to_request(), correlation_id(request))
+
+    @app.post(f"{PREFIX}/projects", status_code=202, tags=["jobs"])
+    def export_project(request: Request, submission: ProjectSubmission) -> Dict[str, Any]:
+        """Save a plate as a 3MF project through a worker; the job publishes `project`."""
+        return request.app.state.jobs.submit(submission.to_request("export_project"), correlation_id(request))
 
     @app.post(f"{PREFIX}/batches", status_code=202, tags=["jobs"])
     def submit_batch(request: Request, submission: BatchSubmission) -> Dict[str, Any]:

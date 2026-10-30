@@ -11,7 +11,8 @@
 
 namespace Slic3r {
 class DynamicPrintConfig;
-}
+class Model;
+} // namespace Slic3r
 
 namespace Slic3r::Web {
 
@@ -72,5 +73,27 @@ ProjectPlateGrid project_plate_grid(const DynamicPrintConfig &config, int plate_
 // entry. Rejects absolute paths, drive letters, backslashes, parent traversal,
 // and control characters.
 bool is_contained_archive_entry_name(const std::string &name);
+
+// The 3MF importer and exporter stage configuration files in the model's backup
+// directory, which otherwise lives under the process temporary directory, a
+// path the worker may not write. This points it at a fresh directory inside the
+// job instead, and removes the directory and detaches the model from it when it
+// goes out of scope.
+class ModelScratchDirectory
+{
+public:
+    ModelScratchDirectory(Model &model, std::filesystem::path path);
+    ~ModelScratchDirectory();
+    ModelScratchDirectory(const ModelScratchDirectory &) = delete;
+    ModelScratchDirectory &operator=(const ModelScratchDirectory &) = delete;
+
+    // False when the directory could not be created; the model is unchanged.
+    bool ready() const { return m_ready; }
+
+private:
+    Model                &m_model;
+    std::filesystem::path m_path;
+    bool                  m_ready {false};
+};
 
 } // namespace Slic3r::Web

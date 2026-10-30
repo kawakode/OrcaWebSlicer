@@ -1,4 +1,5 @@
 #include "libslic3r/Web/SinglePlateSlice.hpp"
+#include "libslic3r/Web/ModelEdit.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
 #include "libslic3r/Web/ProfileCompatibility.hpp"
 #include "libslic3r/Web/SettingsCatalog.hpp"
@@ -20,12 +21,12 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <boost/filesystem/operations.hpp>
 #include <boost/log/utility/setup/console.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -159,6 +160,7 @@ public:
 
     void state(Slic3r::Web::WorkerJobState state)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -169,6 +171,7 @@ public:
 
     void progress(const Slic3r::Web::SinglePlateSliceProgress &progress)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         const unsigned monotonic_percent = std::max(m_last_percent, std::min(progress.percent, 100u));
         if (monotonic_percent == m_last_percent && progress.stage == m_last_stage)
             return;
@@ -184,6 +187,7 @@ public:
 
     void warning(const Slic3r::Web::WorkerWarning &warning)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -194,6 +198,7 @@ public:
 
     void error(const Slic3r::Web::WorkerManifestError &error)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -204,6 +209,7 @@ public:
 
     void artifact(const Slic3r::Web::WorkerArtifact &artifact)
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         Slic3r::Web::WorkerEvent event;
         event.job_id = m_job_id;
         event.sequence = m_sequence++;
@@ -218,6 +224,9 @@ private:
         std::cout << Slic3r::Web::serialize_worker_event(event) << '\n' << std::flush;
     }
 
+    // Print reports status and warnings from TBB worker threads, so events are
+    // numbered and written one at a time.
+    std::mutex    m_mutex;
     std::string   m_job_id;
     std::uint64_t m_sequence {0};
     unsigned      m_last_percent {0};
@@ -475,35 +484,6 @@ void finish_timing(Slic3r::Web::WorkerResult &result,
     result.resource_usage.peak_memory_bytes = peak_memory_bytes();
 }
 
-// The engine stages project archives under Slic3r::temporary_dir(), which the
-// desktop sets at startup and which otherwise names the filesystem root. A job
-// gets a private directory there instead, removed when the job ends.
-class JobTemporaryDir
-{
-public:
-    JobTemporaryDir()
-    {
-        std::error_code error;
-        const std::filesystem::path path = std::filesystem::temp_directory_path(error) /
-            ("orca-slicer-worker-" + boost::filesystem::unique_path().string());
-        if (error || !std::filesystem::create_directories(path, error)) {
-            std::cerr << "No private temporary directory is available: " << error.message() << '\n';
-            return;
-        }
-        m_path = path;
-        Slic3r::set_temporary_dir(m_path.string());
-    }
-    ~JobTemporaryDir()
-    {
-        std::error_code ignored;
-        if (!m_path.empty())
-            std::filesystem::remove_all(m_path, ignored);
-    }
-
-private:
-    std::filesystem::path m_path;
-};
-
 } // namespace
 
 int main(int argc, char **argv)
@@ -677,22 +657,28 @@ int main(int argc, char **argv)
         }
 
         emitter.state(Slic3r::Web::WorkerJobState::Running);
-        const JobTemporaryDir temporary_dir;
         std::vector<Slic3r::Web::WorkerWarning> warnings;
         Slic3r::Web::SinglePlateSliceCallbacks callbacks;
         callbacks.progress = [&emitter](const Slic3r::Web::SinglePlateSliceProgress &progress) {
             emitter.progress(progress);
         };
-        callbacks.warning = [&emitter, &warnings](const std::string &message) {
+        std::mutex warnings_mutex;
+        callbacks.warning = [&emitter, &warnings, &warnings_mutex](const std::string &message) {
             Slic3r::Web::WorkerWarning warning {"slicing_warning", message};
-            warnings.push_back(warning);
+            {
+                std::lock_guard<std::mutex> lock(warnings_mutex);
+                warnings.push_back(warning);
+            }
             emitter.warning(warning);
         };
         callbacks.cancellation_requested = []() { return cancellation_requested(); };
         callbacks.memory_usage_bytes = []() { return peak_memory_bytes(); };
+        const Slic3r::Web::WorkerOperation operation = validation.request->operation;
         const Slic3r::Web::SinglePlateSliceResult result =
-            validation.request->operation == Slic3r::Web::WorkerOperation::Inspect ?
+            operation == Slic3r::Web::WorkerOperation::Inspect ?
                 Slic3r::Web::inspect_model(*validation.request, job_root, callbacks) :
+            operation == Slic3r::Web::WorkerOperation::Edit ?
+                Slic3r::Web::edit_model(*validation.request, job_root, callbacks) :
                 Slic3r::Web::slice_single_plate(*validation.request, job_root, callbacks);
         final_result.warnings = std::move(warnings);
         // Every published artifact is withdrawn together, so a job never
