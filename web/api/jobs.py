@@ -28,12 +28,14 @@ from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_
 
 from . import PROTOCOL_VERSION
 from .config import ApiConfig
+from .edits import EditSpec, edit_error, published_parts
 from .errors import ApiError, from_catalog_error, from_job_directory_error, from_settings_error
 from .uploads import UploadStore
 
 
 MAX_SETTINGS = 256
 MAX_SETTING_VALUE_CHARS = 4096
+MAX_LAYER_RANGES = 32
 MAX_PLATE_INDEX = 64
 # Mirrors the worker's own plate bounds so an oversized plate is refused here.
 MAX_PLATE_OBJECTS = 256
@@ -61,6 +63,7 @@ ARTIFACT_MEDIA_TYPES = {
     "mesh": ("application/octet-stream", "-mesh.bin"),
     "inspection": ("application/json", "-inspection.json"),
     "project": ("model/3mf", ".3mf"),
+    "edit_report": ("application/json", "-edit.json"),
 }
 ARTIFACT_NAMES = ("result",) + tuple(ARTIFACT_MEDIA_TYPES)
 
@@ -75,23 +78,45 @@ _EXECUTOR_FAILURES = {
 
 
 @dataclasses.dataclass(frozen=True)
+class LayerRange:
+    """Settings for one object between two heights above its bottom, in mm."""
+
+    min_z: float
+    max_z: float
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def describe(self) -> Dict[str, Any]:
+        return {"min_z": self.min_z, "max_z": self.max_z, "settings": dict(self.settings)}
+
+
+@dataclasses.dataclass(frozen=True)
 class PlacedObject:
     """One object of an upload, with the instance transforms the plater chose.
 
     Each transform is a row-major 4x4 matrix in millimetres that replaces the
-    placement the file declared.
+    placement the file declared. `settings` and `layer_ranges` override the
+    plate's settings for this object only.
     """
 
     upload_id: str
     object_index: int = 0
     instances: Tuple[Tuple[float, ...], ...] = ()
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+    layer_ranges: Tuple[LayerRange, ...] = ()
 
     def describe(self) -> Dict[str, Any]:
-        return {
+        described: Dict[str, Any] = {
             "upload_id": self.upload_id,
             "object": self.object_index,
             "instances": [{"transform": list(transform)} for transform in self.instances],
         }
+        # Only stated when used, so a plate without overrides is described
+        # and staged exactly as before.
+        if self.settings:
+            described["settings"] = dict(self.settings)
+        if self.layer_ranges:
+            described["layer_ranges"] = [layer_range.describe() for layer_range in self.layer_ranges]
+        return described
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,7 +126,8 @@ class SliceRequest:
     A slice names either one `upload_id`, which the worker arranges, or the
     placed `objects` of a plate. A project export names a plate the same way
     and saves it as a 3MF instead of slicing it. An inspection names one upload
-    and nothing else.
+    and nothing else; an edit names one upload and the tool it applies to one
+    object.
     """
 
     upload_id: Optional[str] = None
@@ -114,6 +140,7 @@ class SliceRequest:
     operation: str = "slice"
     # Embed rendered thumbnails in the G-code; slices only.
     thumbnails: bool = False
+    edit: Optional[EditSpec] = None
 
     def describe(self) -> Dict[str, Any]:
         described: Dict[str, Any] = {"operation": self.operation, "upload_id": self.upload_id}
@@ -129,6 +156,8 @@ class SliceRequest:
             )
             if self.objects:
                 described["objects"] = [placed.describe() for placed in self.objects]
+        elif self.operation == "edit" and self.edit is not None:
+            described["edit"] = self.edit.describe()
         if self.thumbnails:
             described["thumbnails"] = True
         return described
@@ -166,10 +195,12 @@ class JobRecord:
     profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
     # The parsed preview index, read once on the first page request.
     preview_index: Optional[Dict[str, Any]] = None
+    # The uploads a succeeded edit turned its models into, with their inspections.
+    derived_uploads: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
     cancellation: threading.Event = dataclasses.field(default_factory=threading.Event)
 
     def describe(self) -> Dict[str, Any]:
-        return {
+        described = {
             "job_id": self.job_id,
             "operation": self.request.operation,
             "correlation_id": self.correlation_id,
@@ -186,6 +217,9 @@ class JobRecord:
             "finished_at": self.finished_at,
             "timing": (self.result or {}).get("timing"),
         }
+        if self.request.operation == "edit":
+            described["derived_uploads"] = [dict(upload) for upload in self.derived_uploads]
+        return described
 
     def _describe_artifacts(self) -> List[Dict[str, Any]]:
         """Name the artifacts that are downloadable now.
@@ -483,7 +517,16 @@ class JobService:
             result = execution.result
             outcome = str(result.get("outcome"))
             error = result.get("error")
+            derived: List[Dict[str, Any]] = []
+            if outcome == "succeeded" and record.request.operation == "edit":
+                try:
+                    derived = self._derive_uploads(record, result)
+                except (ApiError, OSError, ValueError) as failure:
+                    self._log.warning("edit publication failed job_id=%s", record.job_id)
+                    self._fail(record, "internal", "edit_publish_failed", str(failure))
+                    return
             with self._lock:
+                record.derived_uploads = derived
                 record.result = result
                 record.warnings = [item for item in result.get("warnings", []) if isinstance(item, dict)]
                 self._finish(record, outcome, dict(error) if isinstance(error, dict) else None)
@@ -545,6 +588,39 @@ class JobService:
         """Export an upload's display geometry through a disposable worker."""
         return self.submit(SliceRequest(upload_id=upload_id, operation="inspect"), correlation_id)
 
+    def edit(self, upload_id: str, spec: EditSpec, correlation_id: str) -> Dict[str, Any]:
+        """Apply one object tool to an upload through a disposable worker."""
+        return self.submit(SliceRequest(upload_id=upload_id, operation="edit", edit=spec), correlation_id)
+
+    def _derive_uploads(self, record: JobRecord, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Store each model an edit published as a new upload, and inspect it.
+
+        The edited parts then reach the plater through exactly the path a
+        freshly uploaded file takes.
+        """
+        reports = [
+            artifact for artifact in result.get("artifacts", [])
+            if isinstance(artifact, dict) and artifact.get("kind") == "edit_report"
+        ]
+        report_path = resolve_artifact_path(record.path, reports[0].get("path")) if reports else None
+        if report_path is None:
+            raise ValueError("The edit published no report.")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        source = self._uploads.get(record.request.upload_id or "")
+        derived = []
+        for relative, filename in published_parts(result, report, source.filename):
+            path = resolve_artifact_path(record.path, relative)
+            if path is None:
+                raise ValueError("The edit published a model outside its job.")
+            with path.open("rb") as reader:
+                upload = self._uploads.create(filename, reader)
+            described = upload.describe()
+            described["inspection"] = self.inspect(upload.upload_id, record.correlation_id)
+            derived.append(described)
+        if not derived:
+            raise ValueError("The edit published no model.")
+        return derived
+
     def _validate(self, request: SliceRequest, upload_count: int) -> None:
         if request.operation == "inspect":
             if upload_count != 1 or request.objects:
@@ -552,6 +628,13 @@ class JobService:
             return
         if request.thumbnails and request.operation != "slice":
             raise ApiError("invalid_thumbnails", "Only a slice embeds G-code thumbnails.")
+        if request.operation == "edit":
+            if upload_count != 1 or request.objects:
+                raise ApiError("invalid_edit", "An edit names exactly one upload.")
+            problem = edit_error(request.edit)
+            if problem:
+                raise ApiError("invalid_edit", problem)
+            return
         if bool(request.upload_id) == bool(request.objects):
             raise ApiError("invalid_plate", "A slice names either upload_id or objects, not both.")
         if len(request.objects) > MAX_PLATE_OBJECTS or upload_count > MAX_PLATE_UPLOADS:
@@ -564,13 +647,18 @@ class JobService:
                 raise ApiError("invalid_plate", f"Every object needs 1 to {MAX_OBJECT_INSTANCES} instances.")
             if any(len(transform) != 16 for transform in placed.instances):
                 raise ApiError("invalid_instance_transform", "Every transform is a row-major 4x4 matrix.")
+            self._validate_settings(placed.settings, "object")
+            self._validate_layer_ranges(placed.layer_ranges)
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
-        if len(request.settings) > MAX_SETTINGS:
+        self._validate_settings(request.settings, "plate")
+
+    def _validate_settings(self, settings: Dict[str, str], level: str) -> None:
+        if len(settings) > MAX_SETTINGS:
             raise ApiError(
                 "invalid_settings", f"A request may override at most {MAX_SETTINGS} settings."
             )
-        for key, value in request.settings.items():
+        for key, value in settings.items():
             if not SETTING_KEY_PATTERN.match(key):
                 raise ApiError("invalid_settings", f"{key!r} is not a setting name.")
             if not isinstance(value, str) or len(value) > MAX_SETTING_VALUE_CHARS:
@@ -580,9 +668,22 @@ class JobService:
                 )
         if self._settings is not None:
             try:
-                self._settings.validate_overrides(request.settings)
+                self._settings.validate_overrides(settings, level)
             except SettingsCatalogError as error:
                 raise from_settings_error(error) from error
+
+    def _validate_layer_ranges(self, layer_ranges: Tuple[LayerRange, ...]) -> None:
+        if len(layer_ranges) > MAX_LAYER_RANGES:
+            raise ApiError("invalid_layer_ranges", f"An object holds at most {MAX_LAYER_RANGES} layer ranges.")
+        ordered = sorted(layer_ranges, key=lambda layer_range: layer_range.min_z)
+        for position, layer_range in enumerate(ordered):
+            if not 0 <= layer_range.min_z < layer_range.max_z or not layer_range.settings:
+                raise ApiError(
+                    "invalid_layer_ranges", "A layer range needs 0 <= min_z < max_z and at least one setting."
+                )
+            if position and layer_range.min_z < ordered[position - 1].max_z:
+                raise ApiError("invalid_layer_ranges", "Layer ranges of one object may not overlap.")
+            self._validate_settings(layer_range.settings, "range")
 
     def _manifest(self, job_id: str, models: Dict[str, str], request: SliceRequest) -> Dict[str, Any]:
         if request.operation == "inspect":
@@ -591,6 +692,8 @@ class JobService:
                 "output_mesh": OUTPUT_MESH,
                 "output_inspection": OUTPUT_INSPECTION,
             }
+        elif request.operation == "edit" and request.edit is not None:
+            payload = request.edit.payload(models[request.upload_id or ""])
         else:
             payload = {
                 "profiles": {
@@ -614,14 +717,11 @@ class JobService:
                 if request.thumbnails:
                     payload["thumbnails"] = True
             if request.objects:
-                payload["objects"] = [
-                    {
-                        "model": models[placed.upload_id],
-                        "object": placed.object_index,
-                        "instances": [{"transform": list(transform)} for transform in placed.instances],
-                    }
-                    for placed in request.objects
-                ]
+                payload["objects"] = []
+                for placed in request.objects:
+                    described = placed.describe()
+                    del described["upload_id"]
+                    payload["objects"].append({"model": models[placed.upload_id], **described})
             else:
                 payload["input_model"] = models[request.upload_id or ""]
         return {

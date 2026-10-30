@@ -79,8 +79,9 @@ WorkerManifestValidation validate_worker_manifest(std::string_view serialized)
     } else {
         const auto name = operation->find("name");
         if (name == operation->end() || !name->is_string() ||
-            (*name != "slice" && *name != "inspect" && *name != "export_project")) {
-            add_error(result, "unsupported_operation", "operation.name must be 'slice', 'inspect', or 'export_project'.");
+            (*name != "slice" && *name != "inspect" && *name != "export_project" && *name != "edit")) {
+            add_error(result, "unsupported_operation",
+                      "operation.name must be 'slice', 'inspect', 'export_project', or 'edit'.");
         } else {
             manifest.operation = name->get<std::string>();
         }

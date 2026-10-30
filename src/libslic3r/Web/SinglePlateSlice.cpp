@@ -5,6 +5,7 @@
 #include "PlateThumbnail.hpp"
 #include "ProjectArchive.hpp"
 #include "ProjectExport.hpp"
+#include "SettingsCatalog.hpp"
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -336,6 +337,8 @@ constexpr std::size_t MAX_OBJECT_INSTANCES = 64;
 constexpr std::size_t MAX_PLATE_MODELS     = 16;
 // A plate is at most a few metres across; anything beyond this is a mistake.
 constexpr double      MAX_TRANSLATION_MM   = 100000.;
+constexpr std::size_t MAX_SETTINGS         = 256;
+constexpr std::size_t MAX_LAYER_RANGES     = 32;
 
 // A placement is an affine, invertible transform in millimetres. Scale and
 // rotation are otherwise unconstrained, exactly as the desktop allows.
@@ -353,6 +356,73 @@ bool is_valid_transform(const std::array<double, 16> &values)
                                values[1] * (values[4] * values[10] - values[6] * values[8]) +
                                values[2] * (values[4] * values[9] - values[5] * values[8]);
     return std::abs(determinant) > 1e-9 && std::abs(determinant) < 1e9;
+}
+
+// Reads a {key: serialized value} object. `allowed`, when given, refuses a key
+// the engine does not apply at that level, naming it for the client.
+bool read_settings(const nlohmann::json &described, SerializedSettings &settings, SinglePlateSliceRequestValidation &result,
+                   bool (*allowed)(const std::string &) = nullptr, const char *refusal = "")
+{
+    if (!described.is_object() || described.size() > MAX_SETTINGS) {
+        add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
+        return false;
+    }
+    for (auto item = described.begin(); item != described.end(); ++item) {
+        if (!item.value().is_string()) {
+            add_error(result, "invalid_setting_value", "Every setting value must use OrcaSlicer's serialized string form.");
+            return false;
+        }
+        if (allowed != nullptr && !allowed(item.key())) {
+            result.errors.push_back({"setting_not_per_object", item.key() + refusal, WorkerErrorCategory::Validation, item.key()});
+            return false;
+        }
+        settings.emplace_back(item.key(), item.value().get<std::string>());
+    }
+    return true;
+}
+
+// Height ranges are measured from the object's bottom, may not overlap, and
+// carry at least one setting, as the desktop's range editor requires.
+bool read_layer_ranges(const nlohmann::json &described, PlateObject &object, SinglePlateSliceRequestValidation &result)
+{
+    if (!described.is_array() || described.size() > MAX_LAYER_RANGES) {
+        add_error(result, "invalid_layer_ranges", "layer_ranges must be an array of at most 32 ranges.", WorkerErrorCategory::Input);
+        return false;
+    }
+    for (const nlohmann::json &range : described) {
+        PlateLayerRange read;
+        const auto min_z = range.is_object() ? range.find("min_z") : range.end();
+        const auto max_z = range.is_object() ? range.find("max_z") : range.end();
+        const auto settings = range.is_object() ? range.find("settings") : range.end();
+        if (min_z == range.end() || max_z == range.end() || settings == range.end() || !min_z->is_number() ||
+            !max_z->is_number() || !std::isfinite(min_z->get<double>()) || !std::isfinite(max_z->get<double>()) ||
+            min_z->get<double>() < 0. || max_z->get<double>() > MAX_TRANSLATION_MM ||
+            min_z->get<double>() >= max_z->get<double>()) {
+            add_error(result, "invalid_layer_ranges",
+                      "Every layer range needs 0 <= min_z < max_z in millimetres and a settings object.",
+                      WorkerErrorCategory::Input);
+            return false;
+        }
+        read.min_z = min_z->get<double>();
+        read.max_z = max_z->get<double>();
+        if (!read_settings(*settings, read.settings, result, &is_layer_range_setting,
+                           " cannot be changed for a height range."))
+            return false;
+        if (read.settings.empty()) {
+            add_error(result, "invalid_layer_ranges", "A layer range must change at least one setting.",
+                      WorkerErrorCategory::Input);
+            return false;
+        }
+        object.layer_ranges.push_back(std::move(read));
+    }
+    std::sort(object.layer_ranges.begin(), object.layer_ranges.end(),
+              [](const PlateLayerRange &a, const PlateLayerRange &b) { return a.min_z < b.min_z; });
+    for (std::size_t index = 1; index < object.layer_ranges.size(); ++index)
+        if (object.layer_ranges[index].min_z < object.layer_ranges[index - 1].max_z) {
+            add_error(result, "invalid_layer_ranges", "Layer ranges of one object may not overlap.", WorkerErrorCategory::Input);
+            return false;
+        }
+    return true;
 }
 
 void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &request,
@@ -411,11 +481,111 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
             }
             object.instances.push_back(values);
         }
+        const auto settings = described.find("settings");
+        if (settings != described.end() &&
+            !read_settings(*settings, object.settings, result, &is_object_setting, " cannot be changed for one object."))
+            return;
+        const auto layer_ranges = described.find("layer_ranges");
+        if (layer_ranges != described.end() && !read_layer_ranges(*layer_ranges, object, result))
+            return;
         request.objects.push_back(std::move(object));
     }
     if (models.size() > MAX_PLATE_MODELS)
         add_error(result, "invalid_plate_objects", "A plate may reference at most 16 model files.",
                   WorkerErrorCategory::Input);
+}
+
+// An edit produces at most an upper and a lower part.
+constexpr std::size_t MAX_EDIT_MODELS = 2;
+
+bool read_vector3(const nlohmann::json &value, std::array<double, 3> &target)
+{
+    if (!value.is_array() || value.size() != 3)
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        if (!value[axis].is_number() || !std::isfinite(value[axis].get<double>()) ||
+            std::abs(value[axis].get<double>()) > MAX_TRANSLATION_MM)
+            return false;
+        target[axis] = value[axis].get<double>();
+    }
+    return true;
+}
+
+void read_model_edit(const nlohmann::json &payload, SinglePlateSliceRequest &request,
+                     SinglePlateSliceRequestValidation &result)
+{
+    ModelEdit &edit = request.edit;
+    const auto index = payload.find("object");
+    if (index != payload.end()) {
+        if (!index->is_number_unsigned() || index->get<std::uint64_t>() >= MAX_PLATE_OBJECTS)
+            add_error(result, "invalid_plate_object", "object must be the 0-based index of an object in its model.",
+                      WorkerErrorCategory::Input);
+        else
+            edit.object_index = index->get<unsigned>();
+    }
+
+    const auto transform = payload.find("transform");
+    bool readable = transform != payload.end() && transform->is_array() && transform->size() == edit.transform.size();
+    for (std::size_t position = 0; readable && position < edit.transform.size(); ++position) {
+        readable = (*transform)[position].is_number();
+        if (readable)
+            edit.transform[position] = (*transform)[position].get<double>();
+    }
+    if (!readable || !is_valid_transform(edit.transform))
+        add_error(result, "invalid_instance_transform",
+                  "transform must be a finite, invertible, row-major 4x4 affine matrix in millimetres.",
+                  WorkerErrorCategory::Input);
+
+    const auto tool = payload.find("tool");
+    if (tool != payload.end() && *tool == "repair") {
+        edit.tool = ModelEdit::Tool::Repair;
+    } else if (tool != payload.end() && *tool == "cut") {
+        edit.tool = ModelEdit::Tool::Cut;
+        const auto cut = payload.find("cut");
+        if (cut == payload.end() || !cut->is_object() || !cut->contains("point") || !cut->contains("normal") ||
+            !read_vector3(cut->at("point"), edit.plane_point) || !read_vector3(cut->at("normal"), edit.plane_normal) ||
+            Vec3d(edit.plane_normal[0], edit.plane_normal[1], edit.plane_normal[2]).norm() < 1e-6) {
+            add_error(result, "invalid_cut_plane", "cut needs a finite point and a non-zero normal, both in millimetres.",
+                      WorkerErrorCategory::Input);
+            return;
+        }
+        const auto        keep_value = cut->find("keep");
+        const std::string keep       = keep_value == cut->end() ? "both" :
+                                       keep_value->is_string()  ? keep_value->get<std::string>() :
+                                                                  "";
+        if (keep != "both" && keep != "upper" && keep != "lower")
+            add_error(result, "invalid_cut_plane", "cut.keep must be 'both', 'upper', or 'lower'.", WorkerErrorCategory::Input);
+        edit.keep_upper = keep != "lower";
+        edit.keep_lower = keep != "upper";
+        for (const auto &[key, target] : {std::pair<const char *, bool *>{"flip_upper", &edit.flip_upper},
+                                          std::pair<const char *, bool *>{"place_on_cut", &edit.place_on_cut}}) {
+            const auto flag = cut->find(key);
+            if (flag == cut->end())
+                continue;
+            if (!flag->is_boolean())
+                add_error(result, "invalid_cut_plane", "cut.flip_upper and cut.place_on_cut are booleans.",
+                          WorkerErrorCategory::Input);
+            else
+                *target = flag->get<bool>();
+        }
+    } else {
+        add_error(result, "invalid_edit_tool", "tool must be 'cut' or 'repair'.");
+    }
+
+    const auto models = payload.find("output_models");
+    if (models == payload.end() || !models->is_array() || models->empty() || models->size() > MAX_EDIT_MODELS ||
+        !std::all_of(models->begin(), models->end(), [](const nlohmann::json &model) {
+            return model.is_string() && is_safe_relative_path(model.get_ref<const std::string &>()) &&
+                   lowercase_extension(model.get_ref<const std::string &>()) == ".stl";
+        })) {
+        add_error(result, "invalid_output_path", "output_models must list one or two safe relative .stl paths.");
+    } else {
+        for (const nlohmann::json &model : *models)
+            request.output_models.push_back(model.get<std::string>());
+    }
+    read_output_path(payload, "output_report", ".json", request.output_report, result);
+    if (request.output_report.empty())
+        add_error(result, "invalid_output_path", "An edit requires output_report.");
 }
 
 // Loads one model file the request names. A project archive contributes its
@@ -471,8 +641,25 @@ SinglePlateSliceResult check_triangle_limit(const SinglePlateSliceRequest &reque
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
 
+// Deserializes overrides with the engine's strict parser, naming the setting
+// a malformed value belongs to.
+SinglePlateSliceResult apply_settings(const SerializedSettings &settings, DynamicPrintConfig &config)
+{
+    for (const auto &[key, value] : settings) {
+        try {
+            config.set_deserialize_strict(key, value);
+        } catch (const std::exception &error) {
+            SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
+            refused.setting = key;
+            return refused;
+        }
+    }
+    return {true, {}, {}, WorkerErrorCategory::Validation};
+}
+
 // Builds the plate the browser composed: each listed object is copied out of
-// its model file and given exactly the submitted instance transforms.
+// its model file and given exactly the submitted instance transforms, and its
+// own overrides on top of whatever configuration the file gave it.
 SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                       Model &model, ProjectPlate &project,
                                       const std::function<void()> &throw_if_canceled)
@@ -506,6 +693,17 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
             object->add_instance()->set_transformation(Geometry::Transformation(transform));
         }
         object->invalidate_bounding_box();
+        DynamicPrintConfig overrides;
+        if (const SinglePlateSliceResult applied = apply_settings(placed.settings, overrides); !applied.success)
+            return applied;
+        if (!overrides.empty())
+            object->config.apply(overrides);
+        for (const PlateLayerRange &range : placed.layer_ranges) {
+            DynamicPrintConfig range_overrides;
+            if (const SinglePlateSliceResult applied = apply_settings(range.settings, range_overrides); !applied.success)
+                return applied;
+            object->layer_config_ranges[{range.min_z, range.max_z}].assign_config(std::move(range_overrides));
+        }
     }
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
@@ -533,7 +731,28 @@ SinglePlateSliceResult check_placement(const Model &model, const DynamicPrintCon
     return {true, {}, {}, WorkerErrorCategory::Validation};
 }
 
+SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                        Model &model, ProjectPlate &project)
+{
+    if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
+        !loaded.success)
+        return loaded;
+    if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
+        return limited;
+    // A loose mesh declares no placement; the identity it is given here is
+    // what the browser replaces when it centers the object on the bed.
+    model.add_default_instances();
+    return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
 } // namespace
+
+SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                        Model &model)
+{
+    ProjectPlate project;
+    return load_input_model(request, job_root, model, project);
+}
 
 SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::string_view serialized)
 {
@@ -550,9 +769,11 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     request.envelope = *envelope_validation.manifest;
 
     request.operation = request.envelope.operation == "inspect"        ? WorkerOperation::Inspect :
+                        request.envelope.operation == "edit"           ? WorkerOperation::Edit :
                         request.envelope.operation == "export_project" ? WorkerOperation::ExportProject :
                                                                          WorkerOperation::Slice;
-    const bool inspecting = request.operation == WorkerOperation::Inspect;
+    // Inspections and edits read exactly one input model, never a composed plate.
+    const bool inspecting = request.operation == WorkerOperation::Inspect || request.operation == WorkerOperation::Edit;
 
     const auto input_model = payload.find("input_model");
     const auto objects = payload.find("objects");
@@ -570,7 +791,9 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         request.input_model = input_model->get<std::string>();
     }
 
-    if (inspecting) {
+    if (request.operation == WorkerOperation::Edit) {
+        read_model_edit(payload, request, result);
+    } else if (inspecting) {
         read_output_path(payload, "output_mesh", ".bin", request.output_mesh, result);
         read_output_path(payload, "output_inspection", ".json", request.output_inspection, result);
         if (request.output_mesh.empty() || request.output_inspection.empty())
@@ -601,19 +824,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     }
 
     const auto settings = payload.find("settings");
-    if (settings != payload.end()) {
-        if (!settings->is_object() || settings->size() > 256) {
-            add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
-        } else {
-            for (auto item = settings->begin(); item != settings->end(); ++item) {
-                if (!item.value().is_string()) {
-                    add_error(result, "invalid_setting_value", "Every setting value must use OrcaSlicer's serialized string form.");
-                    break;
-                }
-                request.settings.emplace_back(item.key(), item.value().get<std::string>());
-            }
-        }
-    }
+    if (settings != payload.end())
+        read_settings(*settings, request.settings, result);
 
     const auto limits = payload.find("limits");
     if (limits != payload.end()) {
@@ -722,15 +934,15 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             config.apply(profile);
             throw_if_canceled();
         }
-        for (const auto &[key, value] : request.settings) {
-            try {
-                config.set_deserialize_strict(key, value);
-            } catch (const std::exception &error) {
-                SinglePlateSliceResult refused = failure("invalid_setting_value", error.what(), WorkerErrorCategory::Validation);
-                refused.setting = key;
-                return refused;
-            }
-        }
+        if (const SinglePlateSliceResult applied = apply_settings(request.settings, config); !applied.success)
+            return applied;
+        // The engine reads a height range's layer height unconditionally, so a
+        // range that leaves it alone keeps the object's own.
+        for (ModelObject *object : model.objects)
+            for (auto &[range, range_config] : object->layer_config_ranges)
+                if (!range_config.has("layer_height"))
+                    range_config.set("layer_height", object->config.has("layer_height") ? object->config.opt_float("layer_height")
+                                                                                        : config.opt_float("layer_height"));
 
         // A plate carries the placement its author chose, so only loose meshes
         // and plate-less archives are arranged.
@@ -780,7 +992,10 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
 
         unsigned last_public_percent = 25;
         bool exporting = false;
-        print.set_status_callback([&callbacks, &last_public_percent, &exporting](const PrintBase::SlicingStatus &status) {
+        // Print may report from several TBB threads; keep the reports in order.
+        std::mutex status_mutex;
+        print.set_status_callback([&callbacks, &last_public_percent, &exporting, &status_mutex](const PrintBase::SlicingStatus &status) {
+            std::lock_guard<std::mutex> lock(status_mutex);
             if (status.warning_step >= 0 && !status.text.empty() && callbacks.warning)
                 callbacks.warning(status.text);
             if (status.percent < 0 || !callbacks.progress)
@@ -862,16 +1077,10 @@ SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, con
             callbacks.progress({"input", 5, "Loading model"});
         Model model;
         ProjectPlate project;
-        if (const SinglePlateSliceResult loaded = load_model_file(request, job_root, request.input_model, model, project);
-            !loaded.success)
+        if (const SinglePlateSliceResult loaded = load_input_model(request, job_root, model, project); !loaded.success)
             return loaded;
-        if (const SinglePlateSliceResult limited = check_triangle_limit(request, model); !limited.success)
-            return limited;
         if (callbacks.cancellation_requested && callbacks.cancellation_requested())
             return failure("job_canceled", "The inspection was canceled.", WorkerErrorCategory::Cancellation);
-        // A loose mesh declares no placement; the identity it is given here is
-        // what the browser replaces when it centers the object on the bed.
-        model.add_default_instances();
 
         if (callbacks.progress)
             callbacks.progress({"export", 60, "Exporting display mesh"});

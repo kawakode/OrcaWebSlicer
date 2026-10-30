@@ -109,6 +109,21 @@ if request["operation"]["name"] == "export_project" and mode == "success":
     event("state", state="succeeded")
     raise SystemExit(0)
 
+if request["operation"]["name"] == "edit" and mode == "success":
+    # A cut keeps the requested sides of a 20 mm cube cut at half height; a
+    # repair returns the whole object. The API copies the bytes, never reads them.
+    sides = {"both": ["upper", "lower"], "upper": ["upper"], "lower": ["lower"]}[payload["cut"]["keep"]] \
+        if payload["tool"] == "cut" else ["whole"]
+    artifacts, parts = [], []
+    for side, path in zip(sides, payload["output_models"]):
+        artifacts.append(written("model", path, ("solid " + side + "\nendsolid " + side + "\n").encode()))
+        parts.append({"side": side, "name": "cube (" + side + ")" if side != "whole" else "cube", "model": path})
+    report = {"format": "orca-web-edit", "version": 1, "tool": payload["tool"], "parts": parts}
+    artifacts.append(written("edit_report", payload["output_report"], json.dumps(report).encode()))
+    publish("succeeded", artifacts)
+    event("state", state="succeeded")
+    raise SystemExit(0)
+
 if mode == "success":
     warnings = [{"code": "thin_wall", "message": "A thin wall was detected."}]
     event("progress", progress={"stage": "slicing", "percent": 50, "message": "Slicing"})
@@ -178,22 +193,26 @@ _FILAMENT_BASE = {
 
 # A reduced copy of what `--export-settings-catalog` prints, in the same shape.
 SETTINGS_CATALOG = {
-    "catalog_version": 1,
+    "catalog_version": 2,
     "engine_version": "test",
     "groups": [{"id": "quality", "label": "Quality"}, {"id": "support", "label": "Support"}],
     "settings": [
         {"key": "layer_height", "group": "quality", "scope": "process", "type": "float", "vector": False,
-         "label": "Layer height", "unit": "mm", "min": 0, "default": "0.2"},
+         "label": "Layer height", "unit": "mm", "min": 0, "default": "0.2", "mode": "simple",
+         "per_object": True, "per_range": True},
         {"key": "sparse_infill_density", "group": "quality", "scope": "process", "type": "percent",
-         "vector": False, "label": "Sparse infill density", "unit": "%", "min": 0, "max": 100, "default": "20%"},
+         "vector": False, "label": "Sparse infill density", "unit": "%", "min": 0, "max": 100, "default": "20%",
+         "mode": "simple", "per_object": True, "per_range": True},
         {"key": "wall_loops", "group": "quality", "scope": "process", "type": "int", "vector": False,
-         "label": "Wall loops", "min": 0, "max": 1000, "default": "2"},
+         "label": "Wall loops", "min": 0, "max": 1000, "default": "2", "mode": "advanced",
+         "per_object": True, "per_range": True},
         {"key": "filament_type", "group": "quality", "scope": "filament", "type": "strings", "vector": True,
-         "label": "Type", "default": "PLA"},
+         "label": "Type", "default": "PLA", "mode": "simple", "per_object": False, "per_range": False},
         {"key": "enable_support", "group": "support", "scope": "process", "type": "bool", "vector": False,
-         "label": "Enable support", "default": "0"},
+         "label": "Enable support", "default": "0", "mode": "simple", "per_object": True, "per_range": False},
         {"key": "support_type", "group": "support", "scope": "process", "type": "enum", "vector": False,
-         "label": "Type", "enabled_by": "enable_support", "default": "normal(auto)",
+         "label": "Type", "enabled_by": "enable_support", "default": "normal(auto)", "mode": "simple",
+         "per_object": True, "per_range": False,
          "enum": [{"value": "normal(auto)", "label": "normal(auto)"}, {"value": "tree(auto)", "label": "tree(auto)"}]},
     ],
 }

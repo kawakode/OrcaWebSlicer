@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract; extended for G5
+Status: Active contract; extended for G5 and the phase 3b object tools
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -21,9 +21,10 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | --- | --- | --- |
 | `GET` | `/health` | Liveness plus the protocol and API versions |
 | `GET` | `/profiles` | Bundled machine, process, and filament profiles |
-| `GET` | `/profiles/effective` | A selected chain's curated values and bed |
+| `GET` | `/profiles/effective` | A selected chain's setting values and bed |
 | `GET` | `/settings` | The engine's catalog of overridable settings |
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
+| `POST` | `/uploads/{upload_id}/edits` | Cut or repair one object into new uploads |
 | `POST` | `/jobs` | Submit one slice request |
 | `POST` | `/projects` | Save a plate as a 3MF project |
 | `GET` | `/jobs` | List the jobs this process still holds |
@@ -35,7 +36,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 
 Request bodies are validated against the published schema before any handler
 runs, and unknown fields are refused rather than ignored. A slice request names
-its geometry, one profile of each kind, optional curated setting overrides, and
+its geometry, one profile of each kind, optional setting overrides, and
 an optional 1-based `plate_index`. The geometry is either one `upload_id`,
 which the worker arranges as in G4:
 
@@ -70,6 +71,22 @@ millimetres per instance. The worker applies those transforms unchanged:
 
 Each upload a plate uses is staged into the job once, whatever the number of
 objects that reference it. A plate holds at most 256 objects from 16 uploads.
+
+A plate object may override settings for itself alone, with `settings`, and for
+part of its height, with up to 32 non-overlapping `layer_ranges` measured from
+its bottom in millimetres:
+
+```json
+{"upload_id": "3f2a...", "instances": [...],
+ "settings": {"wall_loops": "5"},
+ "layer_ranges": [{"min_z": 5, "max_z": 10, "settings": {"layer_height": "0.1"}}]}
+```
+
+Only settings the catalog marks `per_object` (respectively `per_range`) are
+accepted there; any other is `setting_not_per_object` (422) naming it. An
+invalid or overlapping range is `invalid_layer_ranges`. Both are passed to the
+[worker](worker-protocol.md#plate-composition) unchanged, and only stated in a
+job's `request` when used.
 
 A slice request may add `"thumbnails": true` to embed rendered thumbnails in
 the G-code; it is off by default. `POST /projects` takes the same body without
@@ -117,6 +134,31 @@ the plater draws. An unreadable model fails that job with the worker's own
 `input` error, such as `model_load_failed`, and is never offered to a slice.
 Inspections share the worker pool, limits, and retention of slices.
 
+## Edits
+
+`POST /uploads/{upload_id}/edits` applies one object tool through a disposable
+worker running the [edit operation](worker-protocol.md#edit-operation). The
+body names the tool, the 0-based `object`, and the object's placement as one
+row-major 4x4 `transform`; a cut adds its plane:
+
+```json
+{"tool": "cut", "object": 0, "transform": [1,0,0,100, 0,1,0,100, 0,0,1,0, 0,0,0,1],
+ "cut": {"point": [110, 110, 10], "normal": [0, 0, 1], "keep": "both", "flip_upper": false}}
+```
+
+`{"tool": "repair", "transform": [...]}` repairs the mesh instead. A cut
+without a plane, a repair with one, or an unknown field is a 422; a zero normal
+is `invalid_edit`. The response is the edit job, whose `operation` is `edit`.
+
+When the job succeeds, every model the worker published is stored as a new
+upload named after its source and side, such as `bracket (upper).stl` or
+`bracket (repaired).stl`, and inspected like any other upload. The job lists
+them under `derived_uploads`, each with its `inspection` job, so the browser
+loads an edited part exactly as it loads a fresh file, and a slice names it by
+its `upload_id`. Because a part's geometry is already in plate coordinates,
+the plater places it with an identity rotation at its own centre. The source
+upload is never changed, and derived uploads share the uploads' retention.
+
 ## Artifacts
 
 Artifacts are named, not addressed by path. A client asks for one by name, and
@@ -128,6 +170,8 @@ relative paths never reach a URL.
 - `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
 - `mesh` and `inspection` are published by a succeeded inspection.
 - `project` is published by a succeeded project export, as `model/3mf`.
+- `edit_report` is published by a succeeded edit; its models become uploads
+  rather than artifacts.
 
 The layer preview is also served in pages: `GET
 /jobs/{job_id}/preview/layers?start=a&end=b` streams layers `a` through `b`
@@ -136,13 +180,21 @@ without loading the file, as described in [the preview contract](preview.md).
 ## Settings
 
 `GET /settings` serves the catalog the worker exports with
-`--export-settings-catalog`, read once at startup. Each curated setting carries
-its group, the profile kind that owns it, its type, unit, range, choices,
-default, and the setting that enables it, all taken from `PrintConfig.cpp`. The
-browser builds its settings form from this document alone.
+`--export-settings-catalog`, read once at startup. Since catalog version 2 it
+lists every process and filament option a profile can carry, rather than a
+curated subset; profile bookkeeping (`inherits`, `compatible_*`, `*_settings_id`,
+notes, `post_process`), developer-mode options, and value shapes a form cannot
+edit as one string (points, groups) are left out. Machine options are changed by
+choosing another printer profile. Each setting carries its group (the engine's
+own `category`, or its profile kind when it has none), the profile kind that
+owns it, its desktop `mode` (`simple`, `advanced`, or `expert`), its type, unit,
+range, choices, default, whether it is `multiline`, the setting that enables it,
+and whether an object (`per_object`) or a height range (`per_range`) may
+override it, all taken from `PrintConfig.cpp` and the engine's config classes.
+The browser builds its settings forms from this document alone.
 
 `GET /profiles/effective?machine=...&process=...&filament=...` resolves a
-selected chain and returns each curated setting's flattened value, the three
+selected chain and returns each catalog setting's flattened value, the three
 profiles with their `inherits_chain`, and the printer's `printable_area` and
 `printable_height`. A blank override in the browser keeps exactly the value
 shown here.

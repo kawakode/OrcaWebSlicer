@@ -136,11 +136,13 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/api/v1/settings")
         self.assertEqual(response.status_code, 200)
         catalog = response.json()
-        self.assertEqual(catalog["catalog_version"], 1)
+        self.assertEqual(catalog["catalog_version"], 2)
         keys = [setting["key"] for setting in catalog["settings"]]
         self.assertIn("layer_height", keys)
         support_type = next(setting for setting in catalog["settings"] if setting["key"] == "support_type")
         self.assertEqual(support_type["enabled_by"], "enable_support")
+        self.assertTrue(support_type["per_object"])
+        self.assertFalse(support_type["per_range"])
 
     def test_resolves_the_effective_values_of_a_selected_chain(self):
         response = self.client.get(
@@ -299,6 +301,137 @@ class ApiTests(unittest.TestCase):
         self.assertIs(manifest["operation"]["payload"]["thumbnails"], True)
         retried = self.client.post(f"/api/v1/jobs/{job['job_id']}/retry")
         self.assertEqual(retried.json()["request"], accepted.json()["request"])
+
+    def test_overrides_settings_for_one_object_and_one_height_range(self):
+        upload = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]
+        layer_range = {"min_z": 5, "max_z": 10, "settings": {"sparse_infill_density": "50%"}}
+        body = {
+            "objects": [
+                {"upload_id": upload, "instances": [{"transform": placed}]},
+                {
+                    "upload_id": upload,
+                    "instances": [{"transform": placed}],
+                    "settings": {"wall_loops": "5", "enable_support": "1"},
+                    "layer_ranges": [layer_range],
+                },
+            ],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        accepted = self.client.post("/api/v1/jobs", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(self.wait(accepted.json()["job_id"])["state"], "succeeded")
+
+        payload = json.loads(
+            (self.root / "state" / "jobs" / accepted.json()["job_id"] / "request.json").read_text(encoding="utf-8")
+        )["operation"]["payload"]
+        # A plain object is staged exactly as before; the other carries its own.
+        self.assertEqual(sorted(payload["objects"][0]), ["instances", "model", "object"])
+        self.assertEqual(payload["objects"][1]["settings"], {"wall_loops": "5", "enable_support": "1"})
+        self.assertEqual(payload["objects"][1]["layer_ranges"], [{**layer_range, "min_z": 5.0, "max_z": 10.0}])
+
+        def with_second(**fields):
+            return {**body, "objects": [{**body["objects"][1], **fields}]}
+
+        for invalid, code, setting in (
+            (with_second(settings={"filament_type": "PETG"}), "setting_not_per_object", "filament_type"),
+            (with_second(settings={"wall_loops": "many"}), "invalid_setting_value", "wall_loops"),
+            (
+                with_second(layer_ranges=[{**layer_range, "settings": {"enable_support": "1"}}]),
+                "setting_not_per_object",
+                "enable_support",
+            ),
+            (with_second(layer_ranges=[layer_range, {**layer_range, "min_z": 8, "max_z": 12}]), "invalid_layer_ranges", None),
+            (with_second(layer_ranges=[{**layer_range, "min_z": 10}]), "invalid_layer_ranges", None),
+        ):
+            with self.subTest(code=code, setting=setting):
+                response = self.client.post("/api/v1/jobs", json=invalid)
+                self.assertIn(response.status_code, (400, 422))
+                self.assertEqual(response.json()["error"]["code"], code)
+                self.assertEqual(response.json()["error"].get("setting"), setting)
+        # Empty ranges never reach the service.
+        self.assertEqual(
+            self.client.post("/api/v1/jobs", json=with_second(layer_ranges=[{**layer_range, "settings": {}}])).status_code,
+            422,
+        )
+
+    def test_cuts_an_upload_into_new_inspected_uploads(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 100, 0, 1, 0, 100, 0, 0, 1, 0, 0, 0, 0, 1]
+        body = {"tool": "cut", "transform": placed, "cut": {"point": [110, 110, 10], "normal": [0, 0, 1]}}
+        accepted = self.client.post(f"/api/v1/uploads/{upload_id}/edits", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(accepted.json()["operation"], "edit")
+        self.assertEqual(accepted.json()["request"]["edit"]["cut"]["keep"], "both")
+        self.assertEqual(accepted.json()["derived_uploads"], [])
+        job = self.wait(accepted.json()["job_id"])
+        self.assertEqual(job["state"], "succeeded", job["error"])
+
+        # The worker is told the tool, the placement, and where to write.
+        manifest = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )
+        payload = manifest["operation"]["payload"]
+        self.assertEqual(manifest["operation"]["name"], "edit")
+        self.assertEqual(payload["transform"], placed)
+        self.assertEqual(payload["cut"]["point"], [110, 110, 10])
+        self.assertEqual(payload["output_models"], ["output/part-0.stl", "output/part-1.stl"])
+
+        # Each part is a new upload, inspected by its own worker.
+        derived = job["derived_uploads"]
+        self.assertEqual([upload["filename"] for upload in derived], ["cube (upper).stl", "cube (lower).stl"])
+        for upload in derived:
+            self.assertEqual(upload["format"], "stl")
+            self.assertEqual(self.wait(upload["inspection"]["job_id"])["state"], "succeeded")
+        report = self.client.get(f"/api/v1/jobs/{job['job_id']}/artifacts/edit_report")
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual([part["side"] for part in report.json()["parts"]], ["upper", "lower"])
+
+        # A derived upload is sliced like any other.
+        sliced = self.client.post("/api/v1/jobs", json={
+            "objects": [{"upload_id": upload["upload_id"], "instances": [{"transform": placed}]} for upload in derived],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        })
+        self.assertEqual(sliced.status_code, 202, sliced.text)
+        self.assertEqual(self.wait(sliced.json()["job_id"])["state"], "succeeded")
+
+        repaired = self.client.post(
+            f"/api/v1/uploads/{upload_id}/edits", json={"tool": "repair", "transform": placed}
+        )
+        self.assertEqual(repaired.status_code, 202, repaired.text)
+        repaired_job = self.wait(repaired.json()["job_id"])
+        self.assertEqual([upload["filename"] for upload in repaired_job["derived_uploads"]], ["cube (repaired).stl"])
+
+    def test_validates_an_edit_before_it_reaches_a_worker(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        plane = {"point": [0, 0, 10], "normal": [0, 0, 1]}
+        for body in (
+            {"tool": "cut", "transform": placed},
+            {"tool": "repair", "transform": placed, "cut": plane},
+            {"tool": "drill", "transform": placed},
+            {"tool": "repair", "transform": [1, 0, 0]},
+            {"tool": "cut", "transform": placed, "cut": {**plane, "keep": "middle"}},
+            {"tool": "cut", "transform": placed, "cut": {**plane, "angle": 3}},
+        ):
+            with self.subTest(body=body):
+                response = self.client.post(f"/api/v1/uploads/{upload_id}/edits", json=body)
+                self.assertEqual(response.status_code, 422, response.text)
+        flat = self.client.post(
+            f"/api/v1/uploads/{upload_id}/edits",
+            json={"tool": "cut", "transform": placed, "cut": {"point": [0, 0, 1], "normal": [0, 0, 0]}},
+        )
+        self.assertEqual(flat.status_code, 400)
+        self.assertEqual(flat.json()["error"]["code"], "invalid_edit")
+        unknown = self.client.post("/api/v1/uploads/" + "0" * 32 + "/edits", json={"tool": "repair", "transform": placed})
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(unknown.json()["error"]["code"], "unknown_upload")
+        jobs = self.client.get("/api/v1/jobs").json()["jobs"]
+        self.assertEqual([job for job in jobs if job["operation"] == "edit"], [])
 
     def test_pages_the_layer_preview(self):
         job_id = self.submit().json()["job_id"]

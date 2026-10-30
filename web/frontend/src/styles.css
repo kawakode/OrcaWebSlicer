@@ -81,7 +81,30 @@ h1 {
   outline: none;
 }
 
-.stage:focus-visible {
+.stage/* Tool toggles read as outlined until pressed. */
+.object-tools .row button[aria-pressed] {
+  background: transparent;
+  color: var(--accent);
+}
+
+.object-tools .row button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.cut-tool {
+  margin: 0.5rem 0;
+}
+
+.check {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.45rem;
+  color: var(--muted);
+}
+
+:focus-visible {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 
@@ -245,7 +268,8 @@ summary {
 }
 
 input,
-select {
+select,
+textarea {
   padding: 0.35rem 0.45rem;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -264,6 +288,53 @@ fieldset {
   padding: 0.6rem 0.75rem 0.25rem;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.settings-search {
+  width: 100%;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.settings-group {
+  margin: 0.35rem 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem;
+}
+
+.settings-group > summary {
+  display: flex;
+  justify-content: space-between;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.settings-group[open] > summary {
+  margin-bottom: 0.5rem;
+}
+
+.count {
+  font-size: 0.8rem;
+}
+
+.object-settings {
+  margin-top: 0.5rem;
+}
+
+.object-settings > summary,
+.object-settings h3 {
+  font-size: 0.95rem;
+}
+
+.object-settings > summary {
+  cursor: pointer;
+}
+
+textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  resize: vertical;
 }
 
 legend {
