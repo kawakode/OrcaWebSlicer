@@ -1,6 +1,7 @@
 # Worker protocol version 1
 
-Status: Active contract; G5 added plate composition, inspection, and preview
+Status: Active contract; G5 added plate composition, inspection, and preview;
+phase 3b added object edits
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
@@ -144,6 +145,61 @@ as artifacts of kind `mesh` and `inspection`, described in
 [the plater contract](plater.md). An inspection is how the browser sees a model
 without the API ever parsing one.
 
+## Edit operation
+
+`operation.name` may be `edit`. It applies one object tool to one object of
+one `input_model` and publishes the result as new models; profiles and
+settings are not read, and the input limits are those of an inspection.
+
+```json
+"payload": {
+  "input_model": "input/model.stl",
+  "object": 0,
+  "transform": [1,0,0,100, 0,1,0,100, 0,0,1,0, 0,0,0,1],
+  "tool": "cut",
+  "cut": {"point": [110, 110, 10], "normal": [0, 0, 1], "keep": "both",
+          "flip_upper": false, "place_on_cut": false},
+  "output_models": ["output/part-0.stl", "output/part-1.stl"],
+  "output_report": "output/edit.json"
+}
+```
+
+`transform` is the object's placement on the plate, validated like a plate
+instance (`invalid_instance_transform`). The object is edited where it stands,
+and every produced model is a binary STL of its printable parts with that
+placement baked in, so its vertices are plate coordinates: drawn with an
+identity transform, a part sits exactly where it was. Modifiers and negative
+volumes do not survive an edit.
+
+`tool` is `cut` or `repair` (`invalid_edit_tool`).
+
+- A cut is a plane given by a `point` and a `normal` in plate millimetres; the
+  normal points at the upper part (`invalid_cut_plane`). `keep` is `both`,
+  `upper`, or `lower`. `flip_upper` turns the upper part upside down, and
+  `place_on_cut` lays each part on its cut face, which only matters for a tilted
+  plane. The cut goes through the engine's `Cut`, the code behind the desktop
+  cut tool, and caps every part. A plane that does not cross the object is the
+  `validation` error `cut_plane_misses_object`.
+- A repair welds coincident vertices, drops degenerate faces, and runs admesh's
+  full repair: nearby edges are joined, unconnected facets removed, holes
+  filled, and normals made consistent. Import already applies the same repair
+  except hole filling, which the desktop leaves to the slicer.
+
+`output_models` lists one or two `.stl` paths, used in order. The models are
+published with kind `model`, then `output_report` with kind `edit_report`:
+
+```json
+{"format": "orca-web-edit", "version": 1, "tool": "cut", "parts": [
+  {"side": "upper", "name": "cube (upper)", "model": "output/part-0.stl",
+   "triangle_count": 12, "bounding_box": {"min": [100,100,10], "max": [120,120,20]}}
+]}
+```
+
+`side` is `upper` or `lower` for a cut and `whole` for a repair. A repair's
+report adds `repair`: `open_edges_before`, `open_edges_after`,
+`merged_vertices`, `degenerate_facets`, `edges_fixed`, `facets_removed`,
+`facets_added`, `facets_reversed`, and `backwards_edges`.
+
 ## Event transport
 
 Each stdout line is one complete compact JSON object. Every event contains
@@ -162,7 +218,7 @@ Event types and their typed records are:
 
 Progress percentages are integers from 0 through 100 and never decrease.
 Public stages currently include `input`, `configuration`, `arrangement`,
-`slicing`, `export`, and `finalize`; they intentionally do not expose internal
+`slicing`, `edit`, `export`, and `finalize`; they intentionally do not expose internal
 class or print-step names.
 
 ## Errors and exit codes

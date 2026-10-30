@@ -101,6 +101,21 @@ if request["operation"]["name"] == "inspect" and mode != "crash":
     event("state", state="succeeded")
     raise SystemExit(0)
 
+if request["operation"]["name"] == "edit" and mode == "success":
+    # A cut keeps the requested sides of a 20 mm cube cut at half height; a
+    # repair returns the whole object. The API copies the bytes, never reads them.
+    sides = {"both": ["upper", "lower"], "upper": ["upper"], "lower": ["lower"]}[payload["cut"]["keep"]] \
+        if payload["tool"] == "cut" else ["whole"]
+    artifacts, parts = [], []
+    for side, path in zip(sides, payload["output_models"]):
+        artifacts.append(written("model", path, ("solid " + side + "\nendsolid " + side + "\n").encode()))
+        parts.append({"side": side, "name": "cube (" + side + ")" if side != "whole" else "cube", "model": path})
+    report = {"format": "orca-web-edit", "version": 1, "tool": payload["tool"], "parts": parts}
+    artifacts.append(written("edit_report", payload["output_report"], json.dumps(report).encode()))
+    publish("succeeded", artifacts)
+    event("state", state="succeeded")
+    raise SystemExit(0)
+
 if mode == "success":
     warnings = [{"code": "thin_wall", "message": "A thin wall was detected."}]
     event("progress", progress={"stage": "slicing", "percent": 50, "message": "Slicing"})

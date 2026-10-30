@@ -238,6 +238,23 @@ checks below green in CI.
 - [x] Verify that a per-object override changes only that object's G-code
   (Catch2), and the search, mode, and per-object editing flow end to end.
 
+### Object tools
+
+- [x] Cut an object with a plane through the engine's own `Cut`, keeping
+  either or both parts, optionally flipped or laid on the cut face.
+- [x] Repair a mesh: weld vertices, drop degenerate and unconnected facets,
+  fill holes, and fix normals, with a report of what changed.
+- [x] Publish edited parts as new inspected uploads in plate coordinates, so
+  the plater keeps them where they were.
+- [x] Lay an object on a picked face and measure between two points in the
+  browser.
+- [x] Cover edit requests, cut bounds, and repair in Catch2, the edit route in
+  the API suite, and every tool in the browser suite.
+- [ ] Offer a tilted cut plane, connectors, and dowels in the cut panel.
+- [x] Keep an object's setting overrides on its edited parts, and its height
+  ranges after a repair.
+- [ ] Carry modifiers and per-volume settings through an edit.
+
 ## Phase 4: Production readiness (G6, priority P3)
 
 ### 14. Harden isolation and deployment
@@ -307,6 +324,6 @@ begins:
 - Production hosting and sandbox technology.
 - Authentication provider and billing model.
 
-SLA slicing, multiple plates, painting tools, desktop gizmo parity, direct
+SLA slicing, multiple plates, painting tools, full desktop gizmo parity, direct
 printer control, plugins, arbitrary post-processing, offline WebAssembly
 slicing, and mobile-first editing remain outside the MVP.

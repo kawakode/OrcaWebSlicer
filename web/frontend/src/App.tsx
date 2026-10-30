@@ -15,6 +15,7 @@ import {
   uploadModel,
 } from "./api";
 import { decodeObjectMesh } from "./plater/mesh";
+import { ObjectTools, useObjectTools } from "./plater/ObjectTools";
 import {
   arrange,
   bedBounds,
@@ -40,6 +41,7 @@ import {
   type ProfileValue,
   type SettingMode,
   type SettingsCatalog,
+  type Upload,
 } from "./types";
 
 const POLL_INTERVAL_MS = 400;
@@ -74,8 +76,17 @@ async function waitForJob(jobId: string): Promise<Job> {
 let nextItemId = 0;
 const newItemId = () => `item-${++nextItemId}`;
 
-/** Load an upload's display geometry and turn each object instance into a plate item. */
-async function loadItems(uploadId: string, inspectionJob: Job, bed: Bed): Promise<{ items: PlateItem[]; loose: boolean }> {
+/**
+ * Load an upload's display geometry and turn each object instance into a plate
+ * item. An edited part is already in plate coordinates, so `inPlace` keeps it
+ * exactly where its geometry lies instead of centring it.
+ */
+async function loadItems(
+  uploadId: string,
+  inspectionJob: Job,
+  bed: Bed,
+  inPlace = false,
+): Promise<{ items: PlateItem[]; loose: boolean }> {
   const job = await waitForJob(inspectionJob.job_id);
   if (job.state !== "succeeded") {
     throw new ApiError(job.error?.code ?? "inspection_failed", job.error?.message ?? "The model could not be read.", 0);
@@ -88,7 +99,9 @@ async function loadItems(uploadId: string, inspectionJob: Job, bed: Bed): Promis
     const { min, max } = object.bounding_box;
     const center = new Vector3(...min).add(new Vector3(...max)).multiplyScalar(0.5);
     const base = { uploadId, objectIndex: object.index, name: object.name || "Object", mesh, center };
-    if (inspection.declares_plate) {
+    if (inPlace) {
+      items.push({ ...base, id: newItemId(), x: center.x, y: center.y, rotation: [0, 0, 0], scale: 1 });
+    } else if (inspection.declares_plate) {
       // A project keeps the placement its author chose.
       for (const instance of object.instances) {
         items.push({ ...base, id: newItemId(), ...placementFromMatrix(instance.transform, center) });
@@ -229,6 +242,17 @@ export default function App() {
   const plateValues = useMemo(() => ({ ...profileValues, ...declared(settings) }), [profileValues, settings]);
   const invalidKey = failure?.setting ?? (job?.state === "failed" ? job.error?.setting : undefined);
 
+  const replace = useCallback((id: string, parts: PlateItem[]) => {
+    setItems((current) => current.flatMap((item) => (item.id === id ? parts : [item])));
+    setSelectedId(parts[0]?.id ?? null);
+  }, []);
+  const loadPart = useCallback(async (upload: Upload) => {
+    const { items: parts } = await loadItems(upload.upload_id, upload.inspection, bedRef.current, true);
+    return parts.map((part) => ({ ...part, name: upload.filename.replace(/\.stl$/i, "") }));
+  }, []);
+  const reportFailure = useCallback((error: unknown) => setFailure(describe(error)), []);
+  const tools = useObjectTools({ selected, update, replace, load: loadPart, wait: waitForJob, onFailure: reportFailure });
+
   const onPlateKey = useCallback(
     (event: React.KeyboardEvent) => {
       if (!selected || (event.target as HTMLElement).closest("input, select, textarea")) return;
@@ -332,6 +356,9 @@ export default function App() {
               selectedId={selectedId}
               onSelect={setSelectedId}
               onMove={(id, x, y) => update(id, { x, y })}
+              picking={tools.pickMode !== null}
+              onPick={tools.onPick}
+              overlay={tools.overlay}
             />
           ) : (
             <PreviewView jobId={job!.job_id} />
@@ -394,6 +421,7 @@ export default function App() {
                 onDelete={() => remove(selected.id)}
               />
             )}
+            {selected && <ObjectTools item={selected} tools={tools} disabled={loading.length > 0 || active} />}
             {outside.length > 0 && (
               <p className="failure" data-testid="outside-warning" role="status">
                 {outside.length === 1 ? "One object is" : `${outside.length} objects are`} outside the printable volume.

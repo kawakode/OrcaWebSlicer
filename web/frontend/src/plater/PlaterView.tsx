@@ -4,25 +4,32 @@ import {
   BufferGeometry,
   GridHelper,
   Group,
+  DoubleSide,
   Line,
   LineBasicMaterial,
+  Matrix3,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Plane,
+  PlaneGeometry,
   Raycaster,
+  SphereGeometry,
   Vector2,
   Vector3,
 } from "three";
 
 import { createViewport, type Viewport } from "../viewport";
-import { bedBounds, fitsBed, itemMatrix, type Bed, type PlateItem } from "./plate";
+import type { PickHit, ToolOverlay } from "./ObjectTools";
+import { bedBounds, fitsBed, itemBounds, itemMatrix, type Bed, type PlateItem } from "./plate";
 
-const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c };
+const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c, tool: 0xf2b134 };
 
 /**
  * Draws the bed and every item, and turns pointer gestures into selection and
  * moves. Dragging a selected item slides it across the bed plane; any other
- * drag orbits the camera.
+ * drag orbits the camera. While a tool is picking, a click reports the point
+ * and face under the pointer instead of changing the selection.
  */
 export function PlaterView(props: {
   bed: Bed;
@@ -30,11 +37,15 @@ export function PlaterView(props: {
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onMove: (id: string, x: number, y: number) => void;
+  picking?: boolean;
+  onPick?: (hit: PickHit) => void;
+  overlay?: ToolOverlay;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const viewport = useRef<Viewport | null>(null);
   const objects = useRef(new Group());
   const bedGroup = useRef(new Group());
+  const overlayGroup = useRef(new Group());
   const geometries = useRef(new Map<string, BufferGeometry>());
   const latest = useRef(props);
   latest.current = props;
@@ -42,7 +53,7 @@ export function PlaterView(props: {
   useEffect(() => {
     const created = createViewport(host.current!);
     viewport.current = created;
-    created.scene.add(bedGroup.current, objects.current);
+    created.scene.add(bedGroup.current, objects.current, overlayGroup.current);
 
     const raycaster = new Raycaster();
     const pointer = new Vector2();
@@ -62,8 +73,8 @@ export function PlaterView(props: {
       cast(event);
       const hit = raycaster.intersectObjects(objects.current.children, false)[0];
       const id = hit?.object.userData.id as string | undefined;
-      const { items, selectedId } = latest.current;
-      if (id && id === selectedId) {
+      const { items, selectedId, picking } = latest.current;
+      if (id && id === selectedId && !picking) {
         const item = items.find((candidate) => candidate.id === id)!;
         const point = hitBed();
         if (point) {
@@ -83,7 +94,15 @@ export function PlaterView(props: {
       if (clicked && !drag) {
         cast(event);
         const hit = raycaster.intersectObjects(objects.current.children, false)[0];
-        latest.current.onSelect((hit?.object.userData.id as string | undefined) ?? null);
+        const { picking, onPick, onSelect } = latest.current;
+        if (picking) {
+          if (hit?.face && onPick) {
+            const normal = hit.face.normal.clone().applyMatrix3(new Matrix3().getNormalMatrix(hit.object.matrixWorld));
+            onPick({ id: hit.object.userData.id as string, point: hit.point.clone(), normal: normal.normalize() });
+          }
+        } else {
+          onSelect((hit?.object.userData.id as string | undefined) ?? null);
+        }
       }
       drag = null;
       downAt = null;
@@ -147,6 +166,38 @@ export function PlaterView(props: {
     }
     view.render();
   }, [props.items, props.selectedId, props.bed]);
+
+  // The open tool's guides: the cut plane across its item, and measured points.
+  useEffect(() => {
+    const view = viewport.current;
+    if (!view) return;
+    overlayGroup.current.children.forEach((child) => {
+      const shape = child as Mesh;
+      shape.geometry.dispose();
+      (shape.material as MeshBasicMaterial).dispose();
+    });
+    overlayGroup.current.clear();
+    const material = () => new MeshBasicMaterial({ color: COLORS.tool, transparent: true, opacity: 0.45, side: DoubleSide });
+    const cut = props.overlay?.cut;
+    const item = cut ? props.items.find((candidate) => candidate.id === cut.itemId) : undefined;
+    if (cut && item) {
+      const box = itemBounds(item);
+      const margin = 4;
+      const plane = new Mesh(new PlaneGeometry(box.maxX - box.minX + 2 * margin, box.maxY - box.minY + 2 * margin), material());
+      plane.position.set((box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2, cut.height);
+      overlayGroup.current.add(plane);
+    }
+    const points = props.overlay?.points ?? [];
+    for (const point of points) {
+      const marker = new Mesh(new SphereGeometry(0.8, 12, 8), material());
+      marker.position.copy(point);
+      overlayGroup.current.add(marker);
+    }
+    if (points.length === 2) {
+      overlayGroup.current.add(new Line(new BufferGeometry().setFromPoints(points), new LineBasicMaterial({ color: COLORS.tool })));
+    }
+    view.render();
+  }, [props.overlay, props.items]);
 
   return <div className="viewport" ref={host} data-testid="plater-view" aria-label="Build plate" role="img" />;
 }

@@ -31,6 +31,8 @@ struct TemporaryRoot
                ("orca-compatibility-" + boost::filesystem::unique_path().string()))
     {
         std::filesystem::create_directories(path / "printers");
+        // Job roots are canonical; Windows may hand out a short (8.3) temp path.
+        path = std::filesystem::canonical(path);
     }
     ~TemporaryRoot() { std::filesystem::remove_all(path); }
 
