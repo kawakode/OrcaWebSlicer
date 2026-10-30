@@ -10,12 +10,23 @@ export interface InspectedObject {
   instances: { transform: number[] }[];
 }
 
+/** The preset selection and overrides a project archive records. */
+export interface ProjectSelection {
+  printer: string;
+  process: string;
+  filaments: string[];
+  /** Overridden settings in their serialized form, keyed by setting. */
+  settings: Record<string, string>;
+}
+
 export interface Inspection {
   format: "orca-web-mesh";
   version: number;
   model_format: string;
   declares_plate: boolean;
   objects: InspectedObject[];
+  /** Present when the model is a project that names its presets. */
+  project?: ProjectSelection;
 }
 
 export interface ObjectMesh {

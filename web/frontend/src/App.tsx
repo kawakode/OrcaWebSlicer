@@ -4,6 +4,7 @@ import { Vector3 } from "three";
 import {
   artifactUrl,
   cancelJob,
+  exportProject,
   listProfiles,
   readEffectiveProfile,
   readInspection,
@@ -14,7 +15,7 @@ import {
   submitJob,
   uploadModel,
 } from "./api";
-import { decodeObjectMesh } from "./plater/mesh";
+import { decodeObjectMesh, type ProjectSelection } from "./plater/mesh";
 import { ObjectTools, useObjectTools } from "./plater/ObjectTools";
 import {
   arrange,
@@ -86,7 +87,7 @@ async function loadItems(
   inspectionJob: Job,
   bed: Bed,
   inPlace = false,
-): Promise<{ items: PlateItem[]; loose: boolean }> {
+): Promise<{ items: PlateItem[]; loose: boolean; project?: ProjectSelection }> {
   const job = await waitForJob(inspectionJob.job_id);
   if (job.state !== "succeeded") {
     throw new ApiError(job.error?.code ?? "inspection_failed", job.error?.message ?? "The model could not be read.", 0);
@@ -110,7 +111,17 @@ async function loadItems(
       items.push({ ...base, id: newItemId(), x: (minX + maxX) / 2, y: (minY + maxY) / 2, rotation: [0, 0, 0], scale: 1 });
     }
   }
-  return { items, loose: !inspection.declares_plate };
+  return { items, loose: !inspection.declares_plate, project: inspection.project };
+}
+
+/** Start a browser download of a finished job's artifact. */
+function download(jobId: string, name: "project") {
+  const anchor = document.createElement("a");
+  anchor.href = artifactUrl(jobId, name);
+  anchor.download = "";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 export default function App() {
@@ -131,8 +142,25 @@ export default function App() {
   const [view, setView] = useState<"prepare" | "preview">("prepare");
   const [failure, setFailure] = useState<Failure | null>(null);
   const [busy, setBusy] = useState(false);
+  const [thumbnails, setThumbnails] = useState(true);
+  const [saved, setSaved] = useState<Job | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const bedRef = useRef(bed);
   bedRef.current = bed;
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const printersRef = useRef(printers);
+  printersRef.current = printers;
+  const machineRef = useRef(machine);
+  machineRef.current = machine;
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
+  const settingsCatalogRef = useRef(settingsCatalog);
+  settingsCatalogRef.current = settingsCatalog;
+  // Process and filament names an opened project asks for, applied once its
+  // printer's narrowed lists arrive.
+  const restoreRef = useRef<{ process: string; filament?: string } | null>(null);
 
   useEffect(() => {
     readSettingsCatalog()
@@ -175,8 +203,10 @@ export default function App() {
         if (stale) return;
         setCatalog(narrowed);
         const printer = narrowed.machine.find((entry) => entry.profile_id === machine);
-        setProcess(firstId(narrowed.process, printer?.default_process));
-        setFilament(firstId(narrowed.filament));
+        const restoring = restoreRef.current;
+        restoreRef.current = null;
+        setProcess(firstId(narrowed.process, restoring?.process ?? printer?.default_process));
+        setFilament(firstId(narrowed.filament, restoring?.filament));
       })
       .catch((error) => !stale && setFailure(describe(error)));
     return () => {
@@ -201,13 +231,42 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [jobId, active]);
 
+  /**
+   * Select the presets and overrides a project recorded, as the desktop does
+   * when it opens one. A preset this deployment does not bundle keeps the
+   * current choice, and only overrides of catalog settings are kept.
+   */
+  const restoreProject = useCallback((project: ProjectSelection) => {
+    const printer = printersRef.current.find((entry) => entry.name === project.printer);
+    const known = new Set(settingsCatalogRef.current?.settings.map((setting) => setting.key) ?? []);
+    setSettings(Object.fromEntries(Object.entries(project.settings).filter(([key]) => known.has(key))));
+    if (!printer) {
+      setNotice(`The project's printer "${project.printer}" is not available; the current profiles are kept.`);
+      return;
+    }
+    const wanted = { process: project.process, filament: project.filaments[0] };
+    if (printer.profile_id === machineRef.current) {
+      setProcess(firstId(catalogRef.current.process, wanted.process));
+      setFilament(firstId(catalogRef.current.filament, wanted.filament));
+    } else {
+      restoreRef.current = wanted;
+      setMachine(printer.profile_id);
+    }
+    setNotice(`Restored the project's profiles: ${[project.printer, project.process, ...project.filaments].join(", ")}.`);
+  }, []);
+
   const addFiles = useCallback(async (files: File[]) => {
     setFailure(null);
+    setNotice(null);
     for (const file of files) {
       setLoading((current) => [...current, file.name]);
+      // Opening a project on an empty plate also opens its settings; adding
+      // one to an existing plate only adds its objects.
+      const opening = itemsRef.current.length === 0;
       try {
         const stored = await uploadModel(file);
-        const { items: added, loose } = await loadItems(stored.upload_id, stored.inspection, bedRef.current);
+        const { items: added, loose, project } = await loadItems(stored.upload_id, stored.inspection, bedRef.current);
+        if (project && opening) restoreProject(project);
         setItems((current) => (loose ? arrange([...current, ...added], bedRef.current) : [...current, ...added]));
         setSelectedId(added[0]?.id ?? null);
       } catch (error) {
@@ -216,7 +275,7 @@ export default function App() {
         setLoading((current) => current.filter((name) => name !== file.name));
       }
     }
-  }, []);
+  }, [restoreProject]);
 
   const update = useCallback((id: string, change: Partial<PlateItem>) => {
     setItems((current) => current.map((item) => (item.id === id ? { ...item, ...change } : item)));
@@ -284,25 +343,45 @@ export default function App() {
 
   const outside = useMemo(() => items.filter((item) => !fitsBed(item, bed)), [items, bed]);
 
+  const plate = useMemo(
+    () => ({
+      objects: plateObjects(items),
+      machine_profile: machine,
+      process_profile: process,
+      filament_profile: filament,
+      settings: declared(settings),
+    }),
+    [items, settings, machine, process, filament],
+  );
+
   const slice = useCallback(async () => {
     setBusy(true);
     setFailure(null);
     try {
-      setJob(
-        await submitJob({
-          objects: plateObjects(items),
-          machine_profile: machine,
-          process_profile: process,
-          filament_profile: filament,
-          settings: declared(settings),
-        }),
-      );
+      setJob(await submitJob({ ...plate, thumbnails }));
     } catch (error) {
       setFailure(describe(error));
     } finally {
       setBusy(false);
     }
-  }, [items, settings, machine, process, filament]);
+  }, [plate, thumbnails]);
+
+  // A project is saved by a worker like any other job, then downloaded.
+  const saveProject = useCallback(async () => {
+    setSaving(true);
+    setFailure(null);
+    setSaved(null);
+    try {
+      const finished = await waitForJob((await exportProject(plate)).job_id);
+      setSaved(finished);
+      if (finished.state === "succeeded") download(finished.job_id, "project");
+      else setFailure({ code: finished.error?.code ?? "project_export_failed", message: finished.error?.message ?? "" });
+    } catch (error) {
+      setFailure(describe(error));
+    } finally {
+      setSaving(false);
+    }
+  }, [plate]);
 
   const run = useCallback(async (action: () => Promise<Job>) => {
     setBusy(true);
@@ -318,6 +397,8 @@ export default function App() {
 
   const ready =
     items.length > 0 && outside.length === 0 && loading.length === 0 && Boolean(machine && process && filament) && !busy && !active;
+  // A project may be saved with objects outside the bed, as on the desktop.
+  const savable = items.length > 0 && loading.length === 0 && Boolean(machine && process && filament) && !saving;
   const previewable = job?.state === "succeeded" && job.artifacts.some((artifact) => artifact.name === "preview");
 
   return (
@@ -465,8 +546,20 @@ export default function App() {
           </section>
 
           <section className="actions">
+            <label className="check">
+              <input
+                type="checkbox"
+                data-testid="gcode-thumbnails"
+                checked={thumbnails}
+                onChange={(event) => setThumbnails(event.target.checked)}
+              />
+              Embed a thumbnail in the G-code
+            </label>
             <button type="button" data-testid="slice" disabled={!ready} onClick={slice}>
               Slice plate
+            </button>
+            <button type="button" className="secondary" data-testid="save-project" disabled={!savable} onClick={saveProject}>
+              {saving ? "Saving project…" : "Save project (3MF)"}
             </button>
             <button
               type="button"
@@ -489,12 +582,23 @@ export default function App() {
                 Download G-code
               </a>
             )}
+            {saved?.state === "succeeded" && (
+              <a data-testid="download-project" href={artifactUrl(saved.job_id, "project")} download>
+                Download project
+              </a>
+            )}
             {job?.artifacts.some((artifact) => artifact.name === "result") && (
               <a data-testid="download-result" href={artifactUrl(job.job_id, "result")} download>
                 Download report
               </a>
             )}
           </section>
+
+          {notice && (
+            <p className="notice" data-testid="notice" role="status">
+              {notice}
+            </p>
+          )}
 
           {failure && (
             <p className="failure" data-testid="failure" role="alert">

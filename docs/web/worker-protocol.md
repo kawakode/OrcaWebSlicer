@@ -200,6 +200,21 @@ report adds `repair`: `open_edges_before`, `open_edges_after`,
 `merged_vertices`, `degenerate_facets`, `edges_fixed`, `facets_removed`,
 `facets_added`, `facets_reversed`, and `backwards_edges`.
 
+## Project export operation
+
+`operation.name` may be `export_project`. Its payload describes a plate exactly
+as a slice does (`input_model` or `objects`, `profiles`, `settings`,
+`plate_index`, `limits`) and names one output, `output_project` (`.3mf`), in
+place of the G-code and preview outputs. The plate is built, configured, and
+validated as for a slice, then saved through the engine's 3MF exporter instead
+of being sliced, and published as an artifact of kind `project`. The archive's
+contents and how the selection is recorded are described in
+[the projects contract](projects.md).
+
+A slice payload may also set `thumbnails` to `true` to embed rendered
+thumbnails in the G-code at the sizes the printer's `thumbnails` setting names.
+It defaults to `false`; any other type is `invalid_thumbnails`.
+
 ## Event transport
 
 Each stdout line is one complete compact JSON object. Every event contains

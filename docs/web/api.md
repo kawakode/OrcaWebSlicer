@@ -26,6 +26,7 @@ Every route is under `/api/v1`. The generated OpenAPI document is served at
 | `POST` | `/uploads` | Store one STL, OBJ, or 3MF model and inspect it |
 | `POST` | `/uploads/{upload_id}/edits` | Cut or repair one object into new uploads |
 | `POST` | `/jobs` | Submit one slice request |
+| `POST` | `/projects` | Save a plate as a 3MF project |
 | `GET` | `/jobs` | List the jobs this process still holds |
 | `GET` | `/jobs/{job_id}` | Read state, progress, warnings, and artifacts |
 | `POST` | `/jobs/{job_id}/cancel` | Cancel a queued or running job |
@@ -86,6 +87,11 @@ accepted there; any other is `setting_not_per_object` (422) naming it. An
 invalid or overlapping range is `invalid_layer_ranges`. Both are passed to the
 [worker](worker-protocol.md#plate-composition) unchanged, and only stated in a
 job's `request` when used.
+
+A slice request may add `"thumbnails": true` to embed rendered thumbnails in
+the G-code; it is off by default. `POST /projects` takes the same body without
+`thumbnails` and starts a job that saves the plate as a desktop-compatible 3MF
+instead of slicing it; see [projects](projects.md).
 
 Overrides are checked against the engine's [settings catalog](#settings) before
 any worker starts: an unknown key is `unknown_setting`, and a value of the wrong
@@ -163,6 +169,7 @@ relative paths never reach a URL.
   whatever the outcome, because a failed run's report is the useful part.
 - `gcode`, `preview`, and `preview_index` are published by a succeeded slice.
 - `mesh` and `inspection` are published by a succeeded inspection.
+- `project` is published by a succeeded project export, as `model/3mf`.
 - `edit_report` is published by a succeeded edit; its models become uploads
   rather than artifacts.
 

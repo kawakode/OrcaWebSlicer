@@ -5,6 +5,7 @@
 #include <string>
 
 namespace Slic3r {
+class DynamicPrintConfig;
 class Model;
 struct GCodeProcessorResult;
 } // namespace Slic3r
@@ -24,10 +25,12 @@ inline constexpr int PREVIEW_FORMAT_VERSION = 1;
 // `inspection` receives the JSON index that names each object, its byte offset,
 // its object-space bounds, and the instance transforms the file declared, as
 // row-major 4x4 matrices in millimetres. A slice request that submits those
-// matrices unchanged reproduces the file's own placement.
+// matrices unchanged reproduces the file's own placement. A project archive's
+// configuration, when given, adds the preset selection and overrides it
+// records under `project`.
 bool write_model_inspection(const Model &model, bool declares_plate, const std::string &model_format,
                             const std::filesystem::path &mesh, const std::filesystem::path &inspection,
-                            std::string &error);
+                            std::string &error, const DynamicPrintConfig *project_config = nullptr);
 
 // Layer preview of produced G-code, derived from the engine's own G-code
 // processor so no desktop viewer or OpenGL context is needed. `segments`

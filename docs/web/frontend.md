@@ -36,7 +36,10 @@ Status: Active contract for G5; phase 3b adds the object tools
   overrides it applied.
 - Inspect the result in the Preview tab, which opens on its own when a slice
   succeeds; see [the layer preview](preview.md).
-- Download the G-code and the machine-readable job report.
+- Download the G-code, with an embedded thumbnail unless that box is
+  cleared, and the machine-readable job report.
+- Save the plate as a 3MF project the desktop opens, and reopen it later with
+  its placement, profiles, and overrides; see [projects](projects.md).
 
 Every failure the user sees is the API's stable code plus its message.
 Framework schema rejections are reduced to the same shape, so the screen has one
@@ -77,6 +80,9 @@ against the API serving the real built bundle and the real native worker:
 - An unsupported or unreadable model never reaches the plate.
 - The prepared plate has no serious or critical axe-core WCAG 2 A/AA
   violations.
+- A saved project reopens in a fresh session with its placement, process, and
+  overrides, and slices where it was saved with a G-code thumbnail; a project
+  added to an existing plate keeps the current settings.
 - Cutting a cube at half height gives two 10 mm objects that slice below
   10 mm, repair leaves a closed cube unchanged, laying the cube on its front
   face turns it a quarter about X, and measuring reports a distance.

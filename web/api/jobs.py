@@ -51,6 +51,9 @@ OUTPUT_PREVIEW = "output/preview.bin"
 OUTPUT_PREVIEW_INDEX = "output/preview.json"
 OUTPUT_MESH = "output/mesh.bin"
 OUTPUT_INSPECTION = "output/inspection.json"
+OUTPUT_PROJECT = "output/project.3mf"
+# The operations that compose a plate from profiles, settings, and placements.
+PLATE_OPERATIONS = frozenset({"slice", "export_project"})
 # Artifacts are downloaded by name, never by the worker's own relative path.
 # A worker artifact's kind is its public name.
 ARTIFACT_MEDIA_TYPES = {
@@ -59,6 +62,7 @@ ARTIFACT_MEDIA_TYPES = {
     "preview_index": ("application/json", "-preview.json"),
     "mesh": ("application/octet-stream", "-mesh.bin"),
     "inspection": ("application/json", "-inspection.json"),
+    "project": ("model/3mf", ".3mf"),
     "edit_report": ("application/json", "-edit.json"),
 }
 ARTIFACT_NAMES = ("result",) + tuple(ARTIFACT_MEDIA_TYPES)
@@ -120,8 +124,10 @@ class SliceRequest:
     """The immutable inputs of one job, reused verbatim by a retry.
 
     A slice names either one `upload_id`, which the worker arranges, or the
-    placed `objects` of a plate. An inspection names one upload and nothing
-    else; an edit names one upload and the tool it applies to one object.
+    placed `objects` of a plate. A project export names a plate the same way
+    and saves it as a 3MF instead of slicing it. An inspection names one upload
+    and nothing else; an edit names one upload and the tool it applies to one
+    object.
     """
 
     upload_id: Optional[str] = None
@@ -132,11 +138,13 @@ class SliceRequest:
     plate_index: int = 1
     objects: Tuple[PlacedObject, ...] = ()
     operation: str = "slice"
+    # Embed rendered thumbnails in the G-code; slices only.
+    thumbnails: bool = False
     edit: Optional[EditSpec] = None
 
     def describe(self) -> Dict[str, Any]:
         described: Dict[str, Any] = {"operation": self.operation, "upload_id": self.upload_id}
-        if self.operation == "slice":
+        if self.operation in PLATE_OPERATIONS:
             described.update(
                 {
                     "machine_profile": self.machine_profile,
@@ -150,6 +158,8 @@ class SliceRequest:
                 described["objects"] = [placed.describe() for placed in self.objects]
         elif self.operation == "edit" and self.edit is not None:
             described["edit"] = self.edit.describe()
+        if self.thumbnails:
+            described["thumbnails"] = True
         return described
 
     def upload_ids(self) -> List[str]:
@@ -358,7 +368,7 @@ class JobService:
         inputs = [JobInput(models[upload.upload_id], upload.path, "model") for upload in uploads]
         selected: Dict[str, Any] = {}
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
-            if request.operation == "slice":
+            if request.operation in PLATE_OPERATIONS:
                 try:
                     selected = self._catalog.select(
                         request.machine_profile, request.process_profile, request.filament_profile
@@ -616,6 +626,8 @@ class JobService:
             if upload_count != 1 or request.objects:
                 raise ApiError("invalid_inspection", "An inspection names exactly one upload.")
             return
+        if request.thumbnails and request.operation != "slice":
+            raise ApiError("invalid_thumbnails", "Only a slice embeds G-code thumbnails.")
         if request.operation == "edit":
             if upload_count != 1 or request.objects:
                 raise ApiError("invalid_edit", "An edit names exactly one upload.")
@@ -684,9 +696,6 @@ class JobService:
             payload = request.edit.payload(models[request.upload_id or ""])
         else:
             payload = {
-                "output_gcode": OUTPUT_GCODE,
-                "output_preview": OUTPUT_PREVIEW,
-                "output_preview_index": OUTPUT_PREVIEW_INDEX,
                 "profiles": {
                     "machine": "profiles/machine.json",
                     "process": "profiles/process.json",
@@ -695,6 +704,18 @@ class JobService:
                 "settings": dict(request.settings),
                 "plate_index": request.plate_index,
             }
+            if request.operation == "export_project":
+                payload["output_project"] = OUTPUT_PROJECT
+            else:
+                payload.update(
+                    {
+                        "output_gcode": OUTPUT_GCODE,
+                        "output_preview": OUTPUT_PREVIEW,
+                        "output_preview_index": OUTPUT_PREVIEW_INDEX,
+                    }
+                )
+                if request.thumbnails:
+                    payload["thumbnails"] = True
             if request.objects:
                 payload["objects"] = []
                 for placed in request.objects:

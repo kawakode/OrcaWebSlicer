@@ -396,6 +396,17 @@ code {
   color: var(--failure);
 }
 
+.notice {
+  color: var(--muted);
+}
+
+.check {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-basis: 100%;
+}
+
 ul {
   margin: 0.5rem 0 0;
   padding-left: 1.25rem;

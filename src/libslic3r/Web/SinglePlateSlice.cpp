@@ -2,7 +2,9 @@
 
 #include "ArtifactTransaction.hpp"
 #include "PlateArtifacts.hpp"
+#include "PlateThumbnail.hpp"
 #include "ProjectArchive.hpp"
+#include "ProjectExport.hpp"
 #include "SettingsCatalog.hpp"
 
 #include "libslic3r/ClipperUtils.hpp"
@@ -235,8 +237,8 @@ struct ProjectPlate
 // Loads one plate of a project archive into the neutral worker model. The
 // importer streams the archive itself, so containment and extraction limits are
 // checked against the central directory before it is handed over.
-SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &input_path,
-                                          Model &model, ProjectPlate &project)
+SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                          const std::filesystem::path &input_path, Model &model, ProjectPlate &project)
 {
     ProjectArchiveLimits archive_limits;
     if (request.max_extracted_bytes) {
@@ -256,6 +258,10 @@ SinglePlateSliceResult load_project_plate(const SinglePlateSliceRequest &request
     bool                      is_orca_3mf = false;
     Semver                    file_version;
     const ProjectImportGuard  import_guard {plate_data_list, project_presets};
+    const ModelScratchDirectory scratch(model, job_root / ("." + request.envelope.job_id + ".import-" +
+                                                           std::to_string(model.id().id)));
+    if (!scratch.ready())
+        return failure("project_load_failed", "Unable to stage the project archive.");
 
     // LoadAuxiliary is deliberately omitted: the worker never needs the
     // embedded thumbnails or auxiliary files the desktop renders.
@@ -601,7 +607,7 @@ SinglePlateSliceResult load_model_file(const SinglePlateSliceRequest &request, c
 
     const std::string extension = lowercase_extension(relative_path);
     if (extension == ".3mf") {
-        if (const SinglePlateSliceResult loaded = load_project_plate(request, input_path, model, project); !loaded.success)
+        if (const SinglePlateSliceResult loaded = load_project_plate(request, job_root, input_path, model, project); !loaded.success)
             return loaded;
         if (model.objects.empty())
             return failure("empty_plate_selection", "The selected plate contains no printable objects.",
@@ -762,11 +768,12 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     SinglePlateSliceRequest request;
     request.envelope = *envelope_validation.manifest;
 
-    request.operation = request.envelope.operation == "inspect" ? WorkerOperation::Inspect :
-                        request.envelope.operation == "edit"    ? WorkerOperation::Edit :
-                                                                  WorkerOperation::Slice;
+    request.operation = request.envelope.operation == "inspect"        ? WorkerOperation::Inspect :
+                        request.envelope.operation == "edit"           ? WorkerOperation::Edit :
+                        request.envelope.operation == "export_project" ? WorkerOperation::ExportProject :
+                                                                         WorkerOperation::Slice;
     // Inspections and edits read exactly one input model, never a composed plate.
-    const bool inspecting = request.operation != WorkerOperation::Slice;
+    const bool inspecting = request.operation == WorkerOperation::Inspect || request.operation == WorkerOperation::Edit;
 
     const auto input_model = payload.find("input_model");
     const auto objects = payload.find("objects");
@@ -791,6 +798,10 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         read_output_path(payload, "output_inspection", ".json", request.output_inspection, result);
         if (request.output_mesh.empty() || request.output_inspection.empty())
             add_error(result, "invalid_output_path", "An inspection requires output_mesh and output_inspection.");
+    } else if (request.operation == WorkerOperation::ExportProject) {
+        read_output_path(payload, "output_project", ".3mf", request.output_project, result);
+        if (request.output_project.empty())
+            add_error(result, "invalid_output_path", "A project export requires output_project.");
     } else {
         const auto output_gcode = payload.find("output_gcode");
         if (output_gcode == payload.end() || !output_gcode->is_string() || !is_safe_relative_path(output_gcode->get_ref<const std::string &>())) {
@@ -804,6 +815,12 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         read_output_path(payload, "output_preview_index", ".json", request.output_preview_index, result);
         if (request.output_preview.empty() != request.output_preview_index.empty())
             add_error(result, "invalid_output_path", "output_preview and output_preview_index are given together.");
+        if (const auto thumbnails = payload.find("thumbnails"); thumbnails != payload.end()) {
+            if (thumbnails->is_boolean())
+                request.gcode_thumbnails = thumbnails->get<bool>();
+            else
+                add_error(result, "invalid_thumbnails", "thumbnails must be a boolean.");
+        }
     }
 
     const auto settings = payload.find("settings");
@@ -941,6 +958,12 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         }
         throw_if_canceled();
 
+        if (request.operation == WorkerOperation::ExportProject) {
+            for (ModelObject *object : model.objects)
+                object->ensure_on_bed(project.declares_plate || explicit_placement);
+            return export_plate_project(request, job_root, model, config, callbacks);
+        }
+
         std::optional<ArtifactTransaction> artifact =
             ArtifactTransaction::begin(job_root, request.output_gcode, request.envelope.job_id, path_error);
         if (!artifact)
@@ -991,7 +1014,8 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         progress("export", 90, "Exporting G-code");
         const bool wants_preview = !request.output_preview.empty();
         GCodeProcessorResult processed;
-        print.export_gcode(artifact->temporary_path().string(), wants_preview ? &processed : nullptr, nullptr);
+        print.export_gcode(artifact->temporary_path().string(), wants_preview ? &processed : nullptr,
+                           request.gcode_thumbnails ? plate_thumbnail_generator(model, config) : nullptr);
         if (!std::filesystem::is_regular_file(artifact->temporary_path()))
             return failure("gcode_export_failed", "G-code export did not produce a non-empty artifact.");
         const std::uintmax_t output_size = std::filesystem::file_size(artifact->temporary_path());
@@ -1072,7 +1096,7 @@ SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, con
         std::string export_error;
         const std::string model_format = lowercase_extension(request.input_model).substr(1);
         if (!write_model_inspection(model, project.declares_plate, model_format, mesh->temporary_path(),
-                                    inspection->temporary_path(), export_error))
+                                    inspection->temporary_path(), export_error, project.loaded ? &project.config : nullptr))
             return failure("mesh_export_failed", export_error, WorkerErrorCategory::Internal);
         if (request.max_output_bytes) {
             std::error_code ignored;

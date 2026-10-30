@@ -23,6 +23,8 @@ enum class WorkerOperation {
     Slice,
     // Load one model and export its display geometry for the plater.
     Inspect,
+    // Save the composed plate as a desktop-compatible project archive.
+    ExportProject,
     // Apply one object tool, such as a planar cut or a mesh repair, and
     // publish the resulting objects as new models.
     Edit
@@ -88,6 +90,11 @@ struct SinglePlateSliceRequest
     // Required by inspection: the display mesh and its JSON index.
     std::string output_mesh;
     std::string output_inspection;
+    // Required by a project export: the 3MF archive to write.
+    std::string output_project;
+    // Embed rendered thumbnails in the G-code, at the sizes the printer's
+    // `thumbnails` setting asks for. Off by default, as in G4.
+    bool gcode_thumbnails {false};
     // Required by an edit: the tool, the paths its models may be written to in
     // order, and its JSON report.
     ModelEdit edit;

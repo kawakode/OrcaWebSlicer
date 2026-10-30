@@ -77,10 +77,10 @@ class ObjectSubmission(BaseModel):
     layer_ranges: List[LayerRangeSubmission] = Field(default_factory=list, max_length=MAX_LAYER_RANGES)
 
 
-class SliceSubmission(BaseModel):
-    """One slice request. Unknown fields are refused rather than ignored.
+class PlateSubmission(BaseModel):
+    """One plate with its profiles. Unknown fields are refused rather than ignored.
 
-    `upload_id` slices one model as the worker arranges it; `objects` slices a
+    `upload_id` names one model as the worker arranges it; `objects` names a
     plate exactly as the plater placed it. Exactly one of the two is given.
     """
 
@@ -95,13 +95,14 @@ class SliceSubmission(BaseModel):
     plate_index: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
-    def names_one_plate(self) -> "SliceSubmission":
+    def names_one_plate(self) -> "PlateSubmission":
         if (self.upload_id is None) == (self.objects is None):
             raise ValueError("give either upload_id or objects, not both")
         return self
 
-    def to_request(self) -> SliceRequest:
+    def to_request(self, operation: str = "slice", **options: Any) -> SliceRequest:
         return SliceRequest(
+            operation=operation,
             upload_id=self.upload_id,
             machine_profile=self.machine_profile,
             process_profile=self.process_profile,
@@ -121,7 +122,21 @@ class SliceSubmission(BaseModel):
                 )
                 for placed in self.objects or ()
             ),
+            **options,
         )
+
+
+class SliceSubmission(PlateSubmission):
+    """One slice request: a plate, plus whether the G-code embeds thumbnails."""
+
+    thumbnails: bool = False
+
+    def to_request(self, operation: str = "slice", **options: Any) -> SliceRequest:
+        return super().to_request(operation, thumbnails=self.thumbnails, **options)
+
+
+class ProjectSubmission(PlateSubmission):
+    """One plate to save as a desktop-compatible 3MF project instead of slicing."""
 
 
 class CutSubmission(BaseModel):
@@ -322,6 +337,11 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     @app.post(f"{PREFIX}/jobs", status_code=202, tags=["jobs"])
     def submit_job(request: Request, submission: SliceSubmission) -> Dict[str, Any]:
         return request.app.state.jobs.submit(submission.to_request(), correlation_id(request))
+
+    @app.post(f"{PREFIX}/projects", status_code=202, tags=["jobs"])
+    def export_project(request: Request, submission: ProjectSubmission) -> Dict[str, Any]:
+        """Save a plate as a 3MF project through a worker; the job publishes `project`."""
+        return request.app.state.jobs.submit(submission.to_request("export_project"), correlation_id(request))
 
     @app.get(f"{PREFIX}/jobs", tags=["jobs"])
     def list_jobs(request: Request) -> Dict[str, Any]:
