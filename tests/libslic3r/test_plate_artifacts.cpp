@@ -592,10 +592,17 @@ TEST_CASE("An object on the second filament is printed with tool 1", "[PlateArti
     const nlohmann::json index = nlohmann::json::parse(root.read("output/preview.json"));
     CHECK(index["tools"] == nlohmann::json::array({0, 1}));
     CHECK(index["tool_colours"] == nlohmann::json::array({"#FF0000", "#0000FF"}));
-    // The cube right of X = 100 is the one printed with the second filament.
+    // The cube right of X = 100 is the one printed with the second filament;
+    // the prime tower, which every filament visits, is left out.
+    int prime_tower = -1;
+    for (const nlohmann::json &role : index["roles"])
+        if (role["name"] == "Prime tower")
+            prime_tower = role["id"].get<int>();
     const std::string segments = root.read("output/preview.bin");
     std::set<int> left_tools, right_tools;
     for (std::size_t at = 0; at + 36 <= segments.size(); at += 36) {
+        if (static_cast<unsigned char>(segments[at + 32]) == prime_tower)
+            continue;
         float x = 0.f;
         std::memcpy(&x, segments.data() + at + 12, sizeof(x));
         const int tool = static_cast<unsigned char>(segments[at + 33]);
