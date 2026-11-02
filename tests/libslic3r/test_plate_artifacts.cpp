@@ -592,26 +592,22 @@ TEST_CASE("An object on the second filament is printed with tool 1", "[PlateArti
     const nlohmann::json index = nlohmann::json::parse(root.read("output/preview.json"));
     CHECK(index["tools"] == nlohmann::json::array({0, 1}));
     CHECK(index["tool_colours"] == nlohmann::json::array({"#FF0000", "#0000FF"}));
-    // The cube at X = 140 is the one printed with the second filament; the
-    // prime tower, which every filament visits, is left out.
-    int prime_tower = -1;
+    // The cube right of X = 100 is the one printed with the second filament.
+    // The prime tower, which every filament visits, and the skirt and brim
+    // around both cubes, printed with the layer's first filament, are left out.
+    std::set<int> shared_roles;
     for (const nlohmann::json &role : index["roles"])
-        if (role["name"] == "Prime tower")
-            prime_tower = role["id"].get<int>();
+        if (role["name"] == "Prime tower" || role["name"] == "Skirt" || role["name"] == "Brim")
+            shared_roles.insert(role["id"].get<int>());
     const std::string segments = root.read("output/preview.bin");
     std::set<int> left_tools, right_tools;
     for (std::size_t at = 0; at + 36 <= segments.size(); at += 36) {
-        if (static_cast<unsigned char>(segments[at + 32]) == prime_tower)
+        if (shared_roles.count(static_cast<unsigned char>(segments[at + 32])) != 0)
             continue;
         float x = 0.f;
         std::memcpy(&x, segments.data() + at + 12, sizeof(x));
         const int tool = static_cast<unsigned char>(segments[at + 33]);
-        // Only segments inside a cube's footprint count: the skirt around
-        // both cubes is printed with whichever filament comes first.
-        if (std::abs(x - 50.f) <= 10.f)
-            left_tools.insert(tool);
-        else if (std::abs(x - 140.f) <= 10.f)
-            right_tools.insert(tool);
+        (x < 100.f ? left_tools : right_tools).insert(tool);
     }
     CHECK(left_tools == std::set<int> {0});
     CHECK(right_tools == std::set<int> {1});
