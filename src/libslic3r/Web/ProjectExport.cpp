@@ -91,7 +91,9 @@ void record_selection(const SinglePlateSliceRequest &request, const std::filesys
     }
     for (std::size_t index = 0; index < request.filaments.size() && index < filaments; ++index)
         for (const auto &[key, value] : request.filaments[index].settings)
-            if (!contains(overridden[index + 1], key))
+            // The desktop keeps a filament's colour beside its preset, so a
+            // colour never marks the preset as modified.
+            if (key != "filament_colour" && !contains(overridden[index + 1], key))
                 overridden[index + 1].push_back(key);
     std::vector<std::string> different;
     for (std::vector<std::string> &keys : overridden) {

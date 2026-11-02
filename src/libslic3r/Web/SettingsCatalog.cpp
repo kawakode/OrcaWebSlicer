@@ -1,4 +1,5 @@
 #include "SettingsCatalog.hpp"
+#include "FilamentComposition.hpp"
 
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -214,7 +215,7 @@ std::string serialize_settings_catalog()
         }
     };
     add_options(Preset::print_options(), "process");
-    add_options(Preset::filament_options(), "filament");
+    add_options(job_filament_options(), "filament");
     return catalog.dump();
 }
 

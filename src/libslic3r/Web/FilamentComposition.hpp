@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 namespace Slic3r {
@@ -10,6 +11,11 @@ namespace Slic3r::Web {
 
 // Most filaments one job may load: the desktop's own ceiling for a plate.
 inline constexpr unsigned MAX_JOB_FILAMENTS = 16;
+
+// The filament profile's options a web job treats per filament: the
+// desktop's filament preset options plus `filament_colour`, which the desktop
+// keeps beside the preset rather than in it.
+const std::vector<std::string> &job_filament_options();
 
 // Merges several flattened filament profiles into `config`, one value per
 // filament, as PresetBundle::full_fff_config() does for the desktop: a vector

@@ -424,7 +424,7 @@ bool read_settings(const nlohmann::json &described, SerializedSettings &settings
 
 bool is_filament_setting(const std::string &key)
 {
-    const std::vector<std::string> &keys = Preset::filament_options();
+    const std::vector<std::string> &keys = job_filament_options();
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 

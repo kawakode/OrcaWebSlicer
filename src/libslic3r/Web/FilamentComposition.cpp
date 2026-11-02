@@ -25,11 +25,22 @@ const ConfigOption *first_usable(const ConfigOption *option)
 
 } // namespace
 
+const std::vector<std::string> &job_filament_options()
+{
+    static const std::vector<std::string> keys = [] {
+        std::vector<std::string> options = Preset::filament_options();
+        if (std::find(options.begin(), options.end(), "filament_colour") == options.end())
+            options.push_back("filament_colour");
+        return options;
+    }();
+    return keys;
+}
+
 void compose_filaments(DynamicPrintConfig &config, const std::vector<DynamicPrintConfig> &filaments)
 {
     if (filaments.empty())
         return;
-    for (const std::string &key : Preset::filament_options()) {
+    for (const std::string &key : job_filament_options()) {
         // These clash with the print profile's keys of the same name, which
         // the desktop resolves by never merging them.
         if (key == "compatible_prints" || key == "compatible_printers" || key == "compatible_prints_condition" ||
@@ -68,11 +79,12 @@ void compose_filaments(DynamicPrintConfig &config, const std::vector<DynamicPrin
 
 void fill_flush_volumes(DynamicPrintConfig &config)
 {
-    const auto *colours = config.option<ConfigOptionStrings>("filament_colour");
-    const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
-    if (colours == nullptr || nozzles == nullptr || colours->size() < 2)
+    const auto *colours   = config.option<ConfigOptionStrings>("filament_colour");
+    const auto *diameters = config.option<ConfigOptionFloats>("filament_diameter");
+    const auto *nozzles   = config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (colours == nullptr || colours->empty() || diameters == nullptr || nozzles == nullptr || diameters->size() < 2)
         return;
-    const std::size_t filaments = colours->size();
+    const std::size_t filaments = diameters->size();
     const std::size_t heads     = std::max<std::size_t>(1, nozzles->size());
 
     auto &multipliers = config.option<ConfigOptionFloats>("flush_multiplier", true)->values;
@@ -86,7 +98,7 @@ void fill_flush_volumes(DynamicPrintConfig &config)
 
     std::vector<std::array<unsigned char, 4>> decoded(filaments, {0, 0, 0, 255});
     for (std::size_t index = 0; index < filaments; ++index)
-        if (!decode_color(colours->values[index], decoded[index]))
+        if (!decode_color(colours->get_at(index), decoded[index]))
             decoded[index] = {0, 0, 0, 255};
     const auto *supports = config.option<ConfigOptionBools>("filament_is_support");
     const auto  is_support = [supports](std::size_t index) {
