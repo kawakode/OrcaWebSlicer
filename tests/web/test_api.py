@@ -16,11 +16,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (  # noqa: E402
     CONDITIONAL_PROCESS_ID,
+    DUAL_MACHINE_ID,
     FILAMENT_ID,
     MACHINE_ID,
     OTHER_MACHINE_ID,
     OTHER_PROCESS_ID,
+    PETG_ID,
     PROCESS_ID,
+    WIDE_NOZZLE_FILAMENT_ID,
     VENDOR,
     write_fake_worker,
     write_profile_tree,
@@ -104,23 +107,30 @@ class ApiTests(unittest.TestCase):
         document = schema.json()
         self.assertIn("/api/v1/jobs/{job_id}/artifacts/{name}", document["paths"])
         submission = document["components"]["schemas"]["SliceSubmission"]
-        self.assertEqual(
-            sorted(submission["required"]),
-            ["filament_profile", "machine_profile", "process_profile"],
-        )
+        # A plate names one filament_profile or several filaments.
+        self.assertEqual(sorted(submission["required"]), ["machine_profile", "process_profile"])
 
     def test_lists_bundled_profiles_and_narrows_them_to_a_printer(self):
         response = self.client.get("/api/v1/profiles")
         self.assertEqual(response.status_code, 200)
         catalog = response.json()
         self.assertEqual(
-            [entry["profile_id"] for entry in catalog["machine"]], [OTHER_MACHINE_ID, MACHINE_ID]
+            [entry["profile_id"] for entry in catalog["machine"]], [DUAL_MACHINE_ID, OTHER_MACHINE_ID, MACHINE_ID]
         )
         self.assertEqual(len(catalog["process"]), 3)
 
         narrowed = self.client.get("/api/v1/profiles", params={"printer": MACHINE_ID}).json()
         self.assertEqual([entry["profile_id"] for entry in narrowed["process"]], [PROCESS_ID])
-        self.assertEqual([entry["profile_id"] for entry in narrowed["filament"]], [FILAMENT_ID])
+        # The 0.6 mm filament is judged by the engine against the 0.4 mm nozzle.
+        self.assertEqual([entry["profile_id"] for entry in narrowed["filament"]], [PETG_ID, FILAMENT_ID])
+        self.assertNotIn("extruders", narrowed["filament"][0])
+        # A printer with two nozzles says which extruders accept each filament.
+        dual = self.client.get("/api/v1/profiles", params={"printer": DUAL_MACHINE_ID}).json()
+        self.assertEqual(
+            {entry["profile_id"]: entry["extruders"] for entry in dual["filament"]},
+            {WIDE_NOZZLE_FILAMENT_ID: [2], PETG_ID: [1, 2], FILAMENT_ID: [1, 2]},
+        )
+        self.assertEqual(dual["machine"][0]["extruder_count"], 2)
         # The conditional profile is narrowed by the worker's evaluation of its
         # compatible_printers_condition, not offered everywhere.
         other = self.client.get("/api/v1/profiles", params={"printer": OTHER_MACHINE_ID}).json()
@@ -356,6 +366,97 @@ class ApiTests(unittest.TestCase):
             self.client.post("/api/v1/jobs", json=with_second(layer_ranges=[{**layer_range, "settings": {}}])).status_code,
             422,
         )
+
+    def test_slices_a_multi_material_plate(self):
+        upload = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]
+        body = {
+            "objects": [
+                {"upload_id": upload, "instances": [{"transform": placed}]},
+                {
+                    "upload_id": upload,
+                    "instances": [{"transform": placed}],
+                    "extruder": 2,
+                    "volume_extruders": [{"volume": 0, "extruder": 1}],
+                },
+            ],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filaments": [
+                {"profile": FILAMENT_ID},
+                {"profile": PETG_ID, "settings": {"filament_type": "PETG"}},
+            ],
+            "settings": {"enable_support": "1"},
+            "wipe_tower": {"x": 150, "y": 160},
+            "filament_order": [2, 1],
+        }
+        accepted = self.client.post("/api/v1/jobs", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        job = self.wait(accepted.json()["job_id"])
+        self.assertEqual(job["state"], "succeeded")
+        # Every filament's chain is reported, in extruder order.
+        self.assertNotIn("filament", job["profiles"])
+        self.assertEqual([entry["profile_id"] for entry in job["profiles"]["filaments"]], [FILAMENT_ID, PETG_ID])
+        self.assertEqual(job["request"]["filaments"][1], {"profile": PETG_ID, "settings": {"filament_type": "PETG"}})
+
+        job_root = self.root / "state" / "jobs" / job["job_id"]
+        payload = json.loads((job_root / "request.json").read_text(encoding="utf-8"))["operation"]["payload"]
+        self.assertEqual(
+            payload["profiles"],
+            {
+                "machine": "profiles/machine.json",
+                "process": "profiles/process.json",
+                "filaments": [
+                    {"profile": "profiles/filament-0.json", "settings": {}},
+                    {"profile": "profiles/filament-1.json", "settings": {"filament_type": "PETG"}},
+                ],
+            },
+        )
+        self.assertEqual(
+            json.loads((job_root / "profiles" / "filament-1.json").read_text(encoding="utf-8"))["filament_type"], ["PETG"]
+        )
+        self.assertEqual(sorted(payload["objects"][0]), ["instances", "model", "object"])
+        self.assertEqual(payload["objects"][1]["extruder"], 2)
+        self.assertEqual(payload["objects"][1]["volume_extruders"], [{"volume": 0, "extruder": 1}])
+        self.assertEqual(payload["wipe_tower"], {"x": 150.0, "y": 160.0})
+        self.assertEqual(payload["filament_order"], [2, 1])
+
+        retried = self.client.post(f"/api/v1/jobs/{job['job_id']}/retry")
+        self.assertEqual(retried.json()["request"], job["request"])
+
+        def changed(**fields):
+            return {**body, **fields}
+
+        second = body["objects"][1]
+        for invalid, code, setting in (
+            (changed(objects=[{**second, "extruder": 3}]), "extruder_out_of_range", "extruder"),
+            (changed(objects=[{**second, "volume_extruders": [{"volume": 0, "extruder": 3}]}]), "extruder_out_of_range", "extruder"),
+            (changed(filament_order=[1, 1]), "invalid_filament_order", None),
+            (changed(filament_order=[3]), "invalid_filament_order", None),
+            (changed(filaments=[{"profile": FILAMENT_ID, "settings": {"layer_height": "0.1"}}], objects=[body["objects"][0]]),
+             "setting_not_per_filament", "layer_height"),
+            (changed(filaments=[{"profile": FILAMENT_ID}] * 17), None, None),
+            (changed(filament_profile=FILAMENT_ID), None, None),
+            (changed(machine_profile=DUAL_MACHINE_ID, filaments=[{"profile": WIDE_NOZZLE_FILAMENT_ID}, {"profile": FILAMENT_ID}]),
+             "incompatible_profile", None),
+        ):
+            with self.subTest(code=code, setting=setting):
+                response = self.client.post("/api/v1/jobs", json=invalid)
+                self.assertIn(response.status_code, (400, 409, 422), response.text)
+                if code:
+                    self.assertEqual(response.json()["error"]["code"], code)
+                    self.assertEqual(response.json()["error"].get("setting"), setting)
+        # A plate of one filament is staged exactly as before.
+        single = self.client.post(
+            "/api/v1/jobs", json={**body, "filaments": None, "filament_profile": FILAMENT_ID, "objects": [body["objects"][0]],
+                                  "filament_order": []},
+        )
+        self.assertEqual(single.status_code, 202, single.text)
+        staged = json.loads(
+            (self.root / "state" / "jobs" / single.json()["job_id"] / "request.json").read_text(encoding="utf-8")
+        )["operation"]["payload"]["profiles"]
+        self.assertEqual(staged["filament"], "profiles/filament.json")
+        self.assertNotIn("filament_order", staged)
 
     def test_cuts_an_upload_into_new_inspected_uploads(self):
         upload_id = self.upload().json()["upload_id"]

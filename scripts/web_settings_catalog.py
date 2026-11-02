@@ -78,8 +78,9 @@ class SettingsCatalog:
     def validate_overrides(self, overrides: Mapping[str, str], level: str = "plate") -> None:
         """Refuse an override the engine's own definition cannot accept.
 
-        `level` is "plate", "object", or "range": an object or a height range
-        may only override the settings the engine applies at that level.
+        `level` is "plate", "object", "range", or "filament": an object or a
+        height range may only override the settings the engine applies at that
+        level, and one filament of a multi-material job only its own settings.
         The worker still validates everything it is given; this check only turns
         the common mistakes into an immediate, categorized answer.
         """
@@ -93,7 +94,12 @@ class SettingsCatalog:
                 raise SettingsCatalogError(
                     "unavailable_setting", f"{key} is not available in this engine build.", key
                 )
-            if level != "plate" and not definition.get("per_object" if level == "object" else "per_range"):
+            if level == "filament":
+                if definition.get("scope") != "filament":
+                    raise SettingsCatalogError(
+                        "setting_not_per_filament", f"{key} is not a filament setting.", key
+                    )
+            elif level != "plate" and not definition.get("per_object" if level == "object" else "per_range"):
                 where = "one object" if level == "object" else "a height range"
                 raise SettingsCatalogError(
                     "setting_not_per_object", f"{key} cannot be changed for {where}.", key

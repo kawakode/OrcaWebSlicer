@@ -4,7 +4,9 @@ import { Vector3 } from "three";
 import {
   addToPlates,
   arrange,
+  defaultWipeTower,
   fitsBed,
+  highestExtruder,
   itemBounds,
   itemMatrix,
   parseBed,
@@ -164,5 +166,35 @@ describe("project plates", () => {
   it("creates the empty plates a project declares", () => {
     const placed = addToPlates([plate()], 0, [{ item: cube("a"), plate: 1 }], ["", "", ""], () => plate());
     expect(placed.map((entry) => entry.items.length)).toEqual([1, 0, 0]);
+  });
+});
+
+describe("multi-material plates", () => {
+  it("submits an item's filament and its parts' filaments, grouped only with identical choices", () => {
+    const objects = plateObjects([
+      cube("a"),
+      cube("b", { extruder: 2 }),
+      cube("c", { extruder: 2 }),
+      cube("d", { extruder: 2, volumeExtruders: { 1: 3, 0: 1 } }),
+    ]);
+    expect(objects).toHaveLength(3);
+    // A plain item is submitted exactly as before.
+    expect(Object.keys(objects[0]).sort()).toEqual(["instances", "object", "upload_id"]);
+    expect(objects[1].extruder).toBe(2);
+    expect(objects[1].instances).toHaveLength(2);
+    expect(objects[2].volume_extruders).toEqual([
+      { volume: 0, extruder: 1 },
+      { volume: 1, extruder: 3 },
+    ]);
+  });
+
+  it("reports the highest filament any item asks for", () => {
+    expect(highestExtruder([])).toBe(1);
+    expect(highestExtruder([cube("a"), cube("b", { extruder: 2 }), cube("c", { volumeExtruders: { 0: 4 } })])).toBe(4);
+  });
+
+  it("places the default prime tower inside the front right of the bed", () => {
+    const bed = parseBed(["0x0", "220x0", "220x220", "0x220"], "250");
+    expect(defaultWipeTower(bed, 35)).toEqual({ x: 170, y: 15 });
   });
 });

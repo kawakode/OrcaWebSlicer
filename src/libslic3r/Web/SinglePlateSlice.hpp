@@ -41,10 +41,19 @@ struct PlateLayerRange
     SerializedSettings settings;
 };
 
+// The filament one volume of an object is printed with, overriding the
+// object's own, as the desktop's object list assigns it per part.
+struct PlateVolumeExtruder
+{
+    unsigned volume {0};
+    unsigned extruder {1};
+};
+
 // One object of an uploaded model file, placed on the plate by the browser.
 // Each instance is a row-major 4x4 matrix in millimetres that replaces the
 // placement the file declared; the worker neither arranges nor centers it.
-// Its settings override the plate's for this object only.
+// Its settings override the plate's for this object only. `extruder` is the
+// 1-based filament the object is printed with, 0 to keep the file's choice.
 struct PlateObject
 {
     std::string                         model;
@@ -52,6 +61,16 @@ struct PlateObject
     std::vector<std::array<double, 16>> instances;
     SerializedSettings                  settings;
     std::vector<PlateLayerRange>        layer_ranges;
+    unsigned                            extruder {0};
+    std::vector<PlateVolumeExtruder>    volume_extruders;
+};
+
+// One filament of a multi-material job: a flattened filament profile and the
+// overrides that apply to that filament only.
+struct JobFilament
+{
+    std::string        profile;
+    SerializedSettings settings;
 };
 
 // The tool an edit applies to one object of its input model. The object is
@@ -103,7 +122,16 @@ struct SinglePlateSliceRequest
     std::string machine_profile;
     std::string process_profile;
     std::string filament_profile;
+    // A multi-material job's filaments, in extruder order; it then names no
+    // `filament_profile`. Empty for a single-filament job.
+    std::vector<JobFilament> filaments;
     SerializedSettings settings;
+    // The front left corner of the plate's prime tower in millimetres, which
+    // the desktop stores per plate rather than in a profile.
+    std::optional<std::array<double, 2>> wipe_tower;
+    // The 1-based filaments in the order the first layer prints them; empty
+    // leaves the order to the engine.
+    std::vector<unsigned> filament_order;
     // 1-based plate of a project archive. An `input_model` slice keeps only
     // that plate's objects; an `objects` slice takes that plate's own settings
     // from the first archive it uses. Mesh inputs describe a single implicit

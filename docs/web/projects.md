@@ -35,6 +35,11 @@ the other keys the desktop strips from a project are removed. Enum lists the eng
 defaults build without their value names, such as `extruder_type`, are given
 those names first, because an empty token cannot be read back by any importer.
 
+A multi-material plate records each filament's preset name and its own
+overrides in its slot, and an inspection of the project lists
+`filament_colours`, so reopening it restores every filament and colour, and
+each object's filament.
+
 A plate may be saved with objects outside the printable volume, as on the
 desktop; only slicing refuses them. Multiple plates are not exported yet: the
 browser composes one.

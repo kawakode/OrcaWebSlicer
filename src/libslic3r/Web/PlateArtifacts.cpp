@@ -43,6 +43,18 @@ nlohmann::json matrix_json(const Transform3d &transform)
 
 nlohmann::json point_json(const Vec3d &point) { return {point.x(), point.y(), point.z()}; }
 
+const char *volume_type_name(ModelVolumeType type)
+{
+    switch (type) {
+    case ModelVolumeType::MODEL_PART: return "part";
+    case ModelVolumeType::NEGATIVE_VOLUME: return "negative";
+    case ModelVolumeType::PARAMETER_MODIFIER: return "modifier";
+    case ModelVolumeType::SUPPORT_BLOCKER: return "support_blocker";
+    case ModelVolumeType::SUPPORT_ENFORCER: return "support_enforcer";
+    default: return "other";
+    }
+}
+
 bool finish(std::ofstream &output, const char *what, std::string &error)
 {
     output.close();
@@ -99,6 +111,16 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
             }
             instances.push_back(std::move(described));
         }
+        // Every volume, so a multi-part file's parts can each be given a
+        // filament; `extruder` is the file's own choice, 0 for none.
+        nlohmann::json volumes = nlohmann::json::array();
+        for (std::size_t volume = 0; volume < object.volumes.size(); ++volume) {
+            const ModelVolume &part = *object.volumes[volume];
+            volumes.push_back({{"index", volume},
+                               {"name", part.name},
+                               {"type", volume_type_name(part.type())},
+                               {"extruder", part.config.has("extruder") ? part.config.opt_int("extruder") : 0}});
+        }
         objects.push_back({
             {"index", index},
             {"name", object.name},
@@ -107,6 +129,8 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
             {"triangle_count", its.indices.size()},
             {"bounding_box", {{"min", point_json(bounds.min)}, {"max", point_json(bounds.max)}}},
             {"instances", std::move(instances)},
+            {"extruder", object.config.has("extruder") ? object.config.opt_int("extruder") : 0},
+            {"volumes", std::move(volumes)},
         });
     }
     if (!finish(output, "mesh artifact", error))
@@ -136,7 +160,8 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
 }
 
 bool write_gcode_preview(const GCodeProcessorResult &result, const std::filesystem::path &segments,
-                         const std::filesystem::path &index, std::string &error)
+                         const std::filesystem::path &index, std::string &error,
+                         const std::vector<std::string> &tool_colours)
 {
     if (!is_little_endian()) {
         error = "Preview export requires a little-endian host.";
@@ -216,6 +241,8 @@ bool write_gcode_preview(const GCodeProcessorResult &result, const std::filesyst
         {"tools", nlohmann::json(std::vector<unsigned>(tools.begin(), tools.end()))},
         {"layers", std::move(layer_table)},
     };
+    if (!tool_colours.empty())
+        document["tool_colours"] = tool_colours;
     if (!layers.empty())
         document["bounding_box"] = {{"min", point_json(bounds.min)}, {"max", point_json(bounds.max)}};
     index_output << document.dump() << '\n';

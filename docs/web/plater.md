@@ -77,6 +77,15 @@ that holds an object at once as one batch ([ADR 0003](adr/0003-multiple-plates.m
 - A plate from an archive remembers which archive plate it came from and sends
   it as `plate_index`, so the archive plate's own settings still apply.
 
+## Filaments
+
+An object is drawn in its filament's colour once a plate loads more than one
+filament. The object panel puts it on a filament, and lists each part and
+modifier of a 3MF object with its own filament, as the inspection reported
+them. Objects that differ only by filament are sent as separate objects. With
+the prime tower enabled, its footprint is drawn at its position, front right of
+the bed by default.
+
 ## Placement
 
 Every length is in millimetres. An item's transform is built from its user

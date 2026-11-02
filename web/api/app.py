@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from web_job_directory import JOB_ID_PATTERN
-from web_profile_catalog import KINDS, ProfileCatalogError, load_catalog
+from web_profile_catalog import KINDS, MAX_FILAMENTS, ProfileCatalogError, load_catalog
 from web_settings_catalog import SettingsCatalogError, evaluate_compatibility, load_settings_catalog
 
 from . import API_VERSION, PROTOCOL_VERSION
@@ -31,10 +31,12 @@ from .jobs import (
     MAX_BATCH_PLATES,
     MAX_OBJECT_INSTANCES,
     MAX_LAYER_RANGES,
+    MAX_OBJECT_VOLUMES,
     MAX_PLATE_NAME_CHARS,
     MAX_PLATE_OBJECTS,
     MAX_SETTINGS,
     PREVIEW_CHUNK_BYTES,
+    FilamentChoice,
     JobService,
     LayerRange,
     PlacedObject,
@@ -68,6 +70,15 @@ class LayerRangeSubmission(BaseModel):
     settings: Dict[str, str] = Field(min_length=1, max_length=MAX_SETTINGS)
 
 
+class VolumeExtruderSubmission(BaseModel):
+    """The filament one part of a multi-part object is printed with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    volume: int = Field(ge=0, lt=MAX_OBJECT_VOLUMES)
+    extruder: int = Field(ge=1, le=MAX_FILAMENTS)
+
+
 class ObjectSubmission(BaseModel):
     """One object of an upload, placed by the plater, with its own overrides."""
 
@@ -78,9 +89,58 @@ class ObjectSubmission(BaseModel):
     instances: List[InstanceSubmission] = Field(min_length=1, max_length=MAX_OBJECT_INSTANCES)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
     layer_ranges: List[LayerRangeSubmission] = Field(default_factory=list, max_length=MAX_LAYER_RANGES)
+    # The 1-based filament of the object, and of any of its parts.
+    extruder: Optional[int] = Field(default=None, ge=1, le=MAX_FILAMENTS)
+    volume_extruders: List[VolumeExtruderSubmission] = Field(default_factory=list, max_length=MAX_OBJECT_VOLUMES)
 
 
-class PlateSubmission(BaseModel):
+class FilamentSubmission(BaseModel):
+    """One filament of a multi-material plate and the overrides of that filament only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: str = Field(min_length=1, max_length=512)
+    settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+
+
+class WipeTowerSubmission(BaseModel):
+    """The front left corner of the plate's prime tower, in millimetres."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(allow_inf_nan=False, ge=-100000, le=100000)
+    y: float = Field(allow_inf_nan=False, ge=-100000, le=100000)
+
+
+class MaterialSubmission(BaseModel):
+    """The filament choice every plate submission shares.
+
+    A plate names one `filament_profile`, or the `filaments` of a
+    multi-material job in extruder order. `filament_order` is the order in
+    which the first layer prints them.
+    """
+
+    filament_profile: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    filaments: Optional[List[FilamentSubmission]] = Field(default=None, min_length=1, max_length=MAX_FILAMENTS)
+    filament_order: List[int] = Field(default_factory=list, max_length=MAX_FILAMENTS)
+
+    @model_validator(mode="after")
+    def names_one_filament_choice(self):
+        if (self.filament_profile is None) == (self.filaments is None):
+            raise ValueError("give either filament_profile or filaments, not both")
+        return self
+
+    def material_options(self) -> Dict[str, Any]:
+        return {
+            "filament_profile": self.filament_profile or "",
+            "filaments": tuple(
+                FilamentChoice(filament.profile, dict(filament.settings)) for filament in self.filaments or ()
+            ),
+            "filament_order": tuple(self.filament_order),
+        }
+
+
+class PlateSubmission(MaterialSubmission):
     """One plate with its profiles. Unknown fields are refused rather than ignored.
 
     `upload_id` names one model as the worker arranges it; `objects` names a
@@ -93,8 +153,8 @@ class PlateSubmission(BaseModel):
     objects: Optional[List[ObjectSubmission]] = Field(default=None, min_length=1, max_length=MAX_PLATE_OBJECTS)
     machine_profile: str = Field(min_length=1, max_length=512)
     process_profile: str = Field(min_length=1, max_length=512)
-    filament_profile: str = Field(min_length=1, max_length=512)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+    wipe_tower: Optional[WipeTowerSubmission] = None
     plate_index: int = Field(default=1, ge=1)
     # The browser project's plate this slices, which names the job and its
     # artifacts.
@@ -113,12 +173,13 @@ class PlateSubmission(BaseModel):
             upload_id=self.upload_id,
             machine_profile=self.machine_profile,
             process_profile=self.process_profile,
-            filament_profile=self.filament_profile,
             settings=dict(self.settings),
             plate_index=self.plate_index,
             objects=_placed_objects(self.objects or ()),
             plate=self.plate,
             plate_name=self.plate_name,
+            wipe_tower=(self.wipe_tower.x, self.wipe_tower.y) if self.wipe_tower else None,
+            **self.material_options(),
             **options,
         )
 
@@ -190,6 +251,8 @@ def _placed_objects(objects: List[ObjectSubmission]) -> tuple:
                 LayerRange(layer_range.min_z, layer_range.max_z, dict(layer_range.settings))
                 for layer_range in placed.layer_ranges
             ),
+            extruder=placed.extruder,
+            volume_extruders=tuple((entry.volume, entry.extruder) for entry in placed.volume_extruders),
         )
         for placed in objects
     )
@@ -207,9 +270,11 @@ class BatchPlateSubmission(BaseModel):
     # The archive plate whose own settings apply, when the plate came from one.
     plate_index: int = Field(default=1, ge=1)
     name: Optional[str] = Field(default=None, max_length=MAX_PLATE_NAME_CHARS)
+    # Each plate places its own prime tower, as on the desktop.
+    wipe_tower: Optional[WipeTowerSubmission] = None
 
 
-class BatchSubmission(BaseModel):
+class BatchSubmission(MaterialSubmission):
     """Every plate of a project, sliced with one profile chain and one set of overrides."""
 
     model_config = ConfigDict(extra="forbid")
@@ -217,7 +282,6 @@ class BatchSubmission(BaseModel):
     plates: List[BatchPlateSubmission] = Field(min_length=1, max_length=MAX_BATCH_PLATES)
     machine_profile: str = Field(min_length=1, max_length=512)
     process_profile: str = Field(min_length=1, max_length=512)
-    filament_profile: str = Field(min_length=1, max_length=512)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
     thumbnails: bool = False
 
@@ -226,13 +290,14 @@ class BatchSubmission(BaseModel):
             SliceRequest(
                 machine_profile=self.machine_profile,
                 process_profile=self.process_profile,
-                filament_profile=self.filament_profile,
                 settings=dict(self.settings),
                 plate_index=plate.plate_index,
                 objects=_placed_objects(plate.objects),
                 plate=plate.plate or position,
                 plate_name=plate.name,
                 thumbnails=self.thumbnails,
+                wipe_tower=(plate.wipe_tower.x, plate.wipe_tower.y) if plate.wipe_tower else None,
+                **self.material_options(),
             )
             for position, plate in enumerate(self.plates, start=1)
         ]
@@ -331,9 +396,14 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
         catalog = request.app.state.catalog
         try:
             selected = catalog.get(printer, "machine") if printer else None
-            return {
-                kind: [entry.describe() for entry in catalog.list(kind, selected)] for kind in KINDS
-            }
+            listed = {kind: [entry.describe() for entry in catalog.list(kind, selected)] for kind in KINDS}
+            # On a printer with several extruders a filament may suit only some.
+            if selected is not None and selected.extruder_count > 1:
+                for described in listed["filament"]:
+                    described["extruders"] = catalog.compatible_extruders(
+                        catalog.get(described["profile_id"], "filament"), selected
+                    )
+            return listed
         except ProfileCatalogError as error:
             raise from_catalog_error(error) from error
 

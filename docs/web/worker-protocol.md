@@ -135,6 +135,44 @@ does not set `layer_height` keeps the object's. The overrides are applied on top
 of any configuration the object brought from its file, and affect that object
 only.
 
+## Multi-material
+
+`profiles` may name `filaments` instead of `filament`, never both
+(`invalid_filaments`): 1 to 16 entries, each a job-local `profile` path and the
+optional `settings` that apply to that filament alone. Only filament settings are
+accepted there (`setting_not_per_filament`).
+
+```json
+"profiles": {"machine": "profiles/machine.json", "process": "profiles/process.json",
+  "filaments": [{"profile": "profiles/filament-1.json"},
+                {"profile": "profiles/filament-2.json", "settings": {"filament_colour": "#0000FF"}}]},
+"wipe_tower": {"x": 170, "y": 20},
+"filament_order": [2, 1]
+```
+
+The worker merges the filaments as the desktop's `full_fff_config` does: each
+vector option takes every filament's first value, in order. Request `settings`
+that are filament settings apply to every filament before the merge; the rest
+apply to the composed configuration. The filament map, the role filaments
+(`support_filament`, `wipe_tower_filament`, and the feature `*_filament_id`
+keys), and `flush_multiplier` are sized to the job, and `flush_volumes_matrix`
+is computed from the colours as the desktop does when a filament is added,
+unless the configuration already holds one of the right size. A job with one
+filament takes exactly the single-filament path.
+
+An object may name its 1-based `extruder`, and a 3MF object may give its parts
+their own with `volume_extruders`, a list of `{"volume": n, "extruder": e}`
+using the 0-based volume indices the inspection lists; a volume the object does
+not have is `unknown_model_volume`, and a value outside 1 to 16 is
+`invalid_extruder`. A filament number above the loaded filaments is the
+`validation` error `extruder_out_of_range`, naming `extruder`.
+
+`wipe_tower` places the prime tower's front-left corner in bed millimetres
+(`invalid_wipe_tower`); `enable_prime_tower` stays an ordinary setting.
+`filament_order` is the first layer's tool order as distinct 1-based filament
+numbers, written to `first_layer_print_sequence` (`invalid_filament_order`).
+The engine applies it only when it lists every filament the first layer uses.
+
 `output_preview` and `output_preview_index` optionally ask for a layer preview
 of the produced G-code, always together. The format is documented in
 [the preview contract](preview.md). The preview is published only alongside its
@@ -150,6 +188,10 @@ as artifacts of kind `mesh` and `inspection`, described in
 [the plater contract](plater.md). An inspection is how the browser sees a model
 without the API ever parsing one. A project archive is inspected whole: every
 plate, and every instance with its plate.
+
+An inspection also lists each object's `extruder` (0 when the file sets none)
+and its `volumes`, each with its `index`, `name`, `type` (`part`,
+`negative`, `modifier`, `support_blocker`, `support_enforcer`), and `extruder`.
 
 ## Edit operation
 

@@ -20,6 +20,12 @@ Status: Active contract for G5; phase 3b adds the object tools and multiple plat
 - Choose a bundled printer, then a process and filament narrowed to that
   printer by the [API](api.md), including `compatible_printers_condition`
   answers from the engine.
+- Load several filaments, up to what the printer takes, each with its colour;
+  a filament list only offers those its extruder accepts. Put an object, or a
+  part of a 3MF object, on a filament, enable and place the prime tower, and
+  set the first layer's filament order. The plater draws objects in their
+  filament's colour; removing a filament moves its objects to the first one, and
+  an object on a filament the printer no longer loads blocks slicing.
 - Edit any process or filament setting in a form generated from the engine's
   settings catalog: each control's group, type, unit, choices, mode, and
   dependency come from `PrintConfig.cpp`, and its placeholder is the selected

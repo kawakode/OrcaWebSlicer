@@ -51,16 +51,29 @@ void record_selection(const SinglePlateSliceRequest &request, const std::filesys
 {
     const nlohmann::json machine  = read_profile_metadata(job_root, request.machine_profile);
     const nlohmann::json process  = read_profile_metadata(job_root, request.process_profile);
-    const nlohmann::json filament = read_profile_metadata(job_root, request.filament_profile);
+    // A multi-material job names each filament's profile; a single profile
+    // otherwise names every filament the configuration holds.
+    std::vector<nlohmann::json> profiles;
+    if (request.filaments.empty())
+        profiles.push_back(read_profile_metadata(job_root, request.filament_profile));
+    for (const JobFilament &filament : request.filaments)
+        profiles.push_back(read_profile_metadata(job_root, filament.profile));
     const std::size_t filaments = std::max<std::size_t>(1, config.option<ConfigOptionFloats>("filament_diameter", true)->size());
 
     if (!machine.empty())
         config.option<ConfigOptionString>("printer_settings_id", true)->value = string_field(machine, "name");
     if (!process.empty())
         config.option<ConfigOptionString>("print_settings_id", true)->value = string_field(process, "name");
-    if (!filament.empty()) {
-        config.option<ConfigOptionStrings>("filament_settings_id", true)->values.assign(filaments, string_field(filament, "name"));
-        config.option<ConfigOptionStrings>("filament_ids", true)->values.assign(filaments, string_field(filament, "filament_id"));
+    if (std::any_of(profiles.begin(), profiles.end(), [](const nlohmann::json &profile) { return !profile.empty(); })) {
+        std::vector<std::string> &names = config.option<ConfigOptionStrings>("filament_settings_id", true)->values;
+        std::vector<std::string> &ids   = config.option<ConfigOptionStrings>("filament_ids", true)->values;
+        names.clear();
+        ids.clear();
+        for (std::size_t index = 0; index < filaments; ++index) {
+            const nlohmann::json &profile = profiles[std::min(index, profiles.size() - 1)];
+            names.push_back(string_field(profile, "name"));
+            ids.push_back(string_field(profile, "filament_id"));
+        }
     }
 
     std::vector<std::vector<std::string>> overridden(filaments + 2);
@@ -76,6 +89,10 @@ void record_selection(const SinglePlateSliceRequest &request, const std::filesys
         else if (contains(Preset::printer_options(), key))
             overridden.back().push_back(key);
     }
+    for (std::size_t index = 0; index < request.filaments.size() && index < filaments; ++index)
+        for (const auto &[key, value] : request.filaments[index].settings)
+            if (!contains(overridden[index + 1], key))
+                overridden[index + 1].push_back(key);
     std::vector<std::string> different;
     for (std::vector<std::string> &keys : overridden) {
         std::sort(keys.begin(), keys.end());
@@ -213,10 +230,12 @@ nlohmann::json describe_project_selection(const DynamicPrintConfig &config)
             }
         }
     }
+    const auto *colours = config.option<ConfigOptionStrings>("filament_colour");
     return {
         {"printer", printer ? printer->value : std::string()},
         {"process", process ? process->value : std::string()},
         {"filaments", filaments ? filaments->values : std::vector<std::string>()},
+        {"filament_colours", colours ? colours->values : std::vector<std::string>()},
         {"settings", std::move(settings)},
     };
 }

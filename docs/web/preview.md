@@ -39,6 +39,9 @@ segment starts, but are not drawn.
 }
 ```
 
+A multi-material job adds `tool_colours`, the configured colour of each tool,
+indexed by tool number.
+
 Role ids are the engine's extrusion roles and their names are the same names
 the G-code writes after `;TYPE:`. A layer is the engine's layer, which is also
 one `;LAYER_CHANGE` block in the G-code. `offset` and `count` locate a layer's
@@ -58,7 +61,9 @@ the first layers draw while later ones are still arriving.
 
 The preview tab draws each segment as a line coloured with the desktop viewer's
 default role colours. A slider sets the highest visible layer, and each used
-role can be hidden from the legend.
+role can be hidden from the legend. A job that used more than one tool opens
+coloured by filament instead, from `tool_colours`, and a selector switches
+between the two.
 
 ## Verification
 

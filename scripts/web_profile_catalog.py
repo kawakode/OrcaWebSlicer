@@ -21,6 +21,11 @@ CompatibilityEvaluator = Callable[[Path], Dict[str, Any]]
 
 DEFAULT_VENDORS: Tuple[str, ...] = ("Anycubic",)
 KINDS: Tuple[str, ...] = ("machine", "process", "filament")
+# The desktop's ceiling on the filaments of one plate.
+MAX_FILAMENTS = 16
+# The per-extruder machine options a filament's compatibility condition may
+# read through index 0, rotated so each extruder is evaluated in turn.
+_PER_EXTRUDER_KEYS = ("nozzle_diameter", "nozzle_type", "extruder_type", "nozzle_volume", "nozzle_hrc")
 _LIST_KEY = {"machine": "machine_list", "process": "process_list", "filament": "filament_list"}
 
 
@@ -52,6 +57,12 @@ class ProfileEntry:
     # The names of the inherited profiles this one flattens, root first, ending
     # with this profile. This is the effective chain the job report shows.
     inherits_chain: Tuple[str, ...] = ()
+    # A machine's extruder count, from its nozzle list, and whether one nozzle
+    # is fed several filaments in turn (an AMS-style changer).
+    extruder_count: int = 1
+    single_extruder_multi_material: bool = True
+    # A filament's own colour, the default of its slot in a multi-material job.
+    colour: str = ""
 
     def describe(self) -> Dict[str, Any]:
         described: Dict[str, Any] = {
@@ -65,7 +76,25 @@ class ProfileEntry:
             described["printer_model"] = self.printer_model
             described["nozzle_diameter"] = self.nozzle_diameter
             described["default_process"] = self.default_process
+            described["extruder_count"] = self.extruder_count
+            described["max_filaments"] = self.max_filaments()
+        if self.kind == "filament" and self.colour:
+            described["colour"] = self.colour
         return described
+
+    def max_filaments(self) -> int:
+        """How many filaments a job may load on this machine.
+
+        One nozzle fed by a filament changer takes up to the desktop's limit;
+        several nozzles take one filament each, filament i on extruder i.
+        """
+        if self.extruder_count > 1 or not self.single_extruder_multi_material:
+            return self.extruder_count
+        return MAX_FILAMENTS
+
+    def extruder_of(self, filament_index: int) -> int:
+        """The 1-based extruder that prints the 0-based filament on this machine."""
+        return 1 if self.extruder_count == 1 else filament_index + 1
 
 
 class _InheritanceIndex:
@@ -134,25 +163,66 @@ class ProfileCatalog:
         return entry
 
     def list(self, kind: str, printer: Optional[ProfileEntry] = None) -> List[ProfileEntry]:
+        """List one kind, narrowed to a printer when given.
+
+        A filament is listed when at least one of the printer's extruders
+        accepts it; `compatible_extruders` names which.
+        """
         if kind not in self._by_kind:
             raise ProfileCatalogError("unknown_profile_kind", f"{kind} is not a bundled profile kind.")
         entries = self._by_kind[kind]
         if printer is None or kind == "machine":
             return list(entries)
+        if kind == "filament":
+            return [entry for entry in entries if self.compatible_extruders(entry, printer)]
         return [entry for entry in entries if self.is_compatible(entry, printer)]
 
-    def is_compatible(self, entry: ProfileEntry, printer: ProfileEntry) -> bool:
+    def is_compatible(self, entry: ProfileEntry, printer: ProfileEntry, extruder: int = 1) -> bool:
         """Report whether a process or filament profile suits a selected printer.
 
         A declared `compatible_printers` list wins over the expression, exactly
         as the desktop resolves the two. An expression the engine never
         evaluated is treated as compatible, which is also the desktop's answer
-        for a condition it cannot parse.
+        for a condition it cannot parse. A filament on a later extruder of a
+        multi-nozzle printer is judged against that extruder's nozzle.
         """
         if entry.compatible_printers:
             return printer.name in entry.compatible_printers
         matches = self._condition_matches.get(entry.profile_id)
-        return matches is None or printer.profile_id in matches
+        return matches is None or _extruder_id(printer.profile_id, extruder) in matches
+
+    def compatible_extruders(self, entry: ProfileEntry, printer: ProfileEntry) -> List[int]:
+        """The 1-based extruders of `printer` that accept a filament profile."""
+        return [
+            extruder
+            for extruder in range(1, printer.extruder_count + 1)
+            if self.is_compatible(entry, printer, extruder)
+        ]
+
+    def select_filaments(self, printer: ProfileEntry, filament_ids: Sequence[str]) -> List[ProfileEntry]:
+        """Look up a multi-material job's filaments, each judged on its own extruder."""
+        if not 1 <= len(filament_ids) <= printer.max_filaments():
+            raise ProfileCatalogError(
+                "too_many_filaments",
+                f"{printer.name} takes 1 to {printer.max_filaments()} filaments in one job.",
+            )
+        selected = [self.get(filament_id, "filament") for filament_id in filament_ids]
+        for index, entry in enumerate(selected):
+            extruder = printer.extruder_of(index)
+            if not self.is_compatible(entry, printer, extruder):
+                where = f"extruder {extruder} of {printer.name}" if printer.extruder_count > 1 else printer.name
+                raise ProfileCatalogError(
+                    "incompatible_profile", f"Filament {index + 1} ({entry.name}) is not compatible with {where}."
+                )
+        return selected
+
+    def materialize_filaments(self, filaments: Sequence[ProfileEntry], destination: Path) -> List[Path]:
+        """Resolve selected filaments into job-local files, in extruder order."""
+        destination.mkdir(parents=True, exist_ok=True)
+        return [
+            _write_profile(self.resolve(entry), destination / f"filament-{index}.json")
+            for index, entry in enumerate(filaments)
+        ]
 
     def select(self, machine_id: str, process_id: str, filament_id: str) -> Dict[str, ProfileEntry]:
         """Look up one machine, process, and filament and refuse a mismatched chain."""
@@ -260,6 +330,32 @@ def _first_value(value: Any) -> str:
     return str(value) if value is not None else ""
 
 
+def _extruder_count(profile: Dict[str, Any]) -> int:
+    nozzles = profile.get("nozzle_diameter")
+    return max(1, len(nozzles)) if isinstance(nozzles, list) else 1
+
+
+def _extruder_id(printer_id: str, extruder: int) -> str:
+    """The id a printer is evaluated under for one extruder: itself for the first."""
+    return printer_id if extruder == 1 else f"{printer_id}#extruder-{extruder}"
+
+
+def _for_extruder(profile: Dict[str, Any], extruder: int) -> Dict[str, Any]:
+    """A copy of a machine profile whose first extruder is `extruder`.
+
+    A condition reads the nozzle through `nozzle_diameter[0]`, as the desktop
+    writes them, so each later extruder is checked by rotating its own
+    per-extruder values to the front.
+    """
+    rotated = dict(profile)
+    count = _extruder_count(profile)
+    for key in _PER_EXTRUDER_KEYS:
+        values = profile.get(key)
+        if isinstance(values, list) and len(values) == count:
+            rotated[key] = values[extruder - 1 :] + values[: extruder - 1]
+    return rotated
+
+
 def _compatible_printers(profile: Dict[str, Any]) -> Tuple[str, ...]:
     declared = profile.get("compatible_printers")
     if not isinstance(declared, list):
@@ -322,6 +418,11 @@ def load_catalog(
                         # A bundled profile's file is named after the profile,
                         # so the chain is read from the resolved sources.
                         inherits_chain=tuple(path.stem for path in sources),
+                        extruder_count=_extruder_count(profile),
+                        single_extruder_multi_material=str(
+                            profile.get("single_extruder_multi_material", "1")
+                        ).strip() not in ("0", "false"),
+                        colour=_first_value(profile.get("filament_colour")) if kind == "filament" else "",
                     )
                 )
     catalog = ProfileCatalog(entries, lookups)
@@ -349,10 +450,14 @@ def _evaluate_conditions(
         root = Path(staging)
         (root / "printers").mkdir()
         printers = []
-        for index, printer in enumerate(catalog.list("machine")):
-            relative = f"printers/{index}.json"
-            _write_profile(catalog.resolve(printer), root / relative)
-            printers.append({"id": printer.profile_id, "name": printer.name, "profile": relative})
+        for printer in catalog.list("machine"):
+            resolved = catalog.resolve(printer)
+            for extruder in range(1, printer.extruder_count + 1):
+                relative = f"printers/{len(printers)}.json"
+                _write_profile(_for_extruder(resolved, extruder), root / relative)
+                printers.append(
+                    {"id": _extruder_id(printer.profile_id, extruder), "name": printer.name, "profile": relative}
+                )
         request = root / "request.json"
         request.write_text(
             json.dumps({"catalog_version": 1, "printers": printers, "candidates": candidates}),

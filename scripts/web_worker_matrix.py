@@ -27,10 +27,22 @@ def run_once(worker, case, sources, job, timeout):
     input_model = "model{}".format(model.suffix.lower())
     shutil.copy2(model, job / input_model)
     payload = {"input_model": input_model, "output_gcode": "result.gcode"}
+    # A case may place copies of its model explicitly, each with its own
+    # filament, instead of letting the worker arrange one model.
+    if "objects" in case:
+        del payload["input_model"]
+        payload["objects"] = [dict(placed, model=input_model) for placed in case["objects"]]
     if case.get("profiles"):
         materialize_profile_set(sources, job / "profiles")
         payload["profiles"] = {label: "profiles/{}.json".format(label) for label in sources}
-    for key in ("plate_index", "settings", "limits"):
+        # A multi-filament case loads the baseline filament once per entry,
+        # each with its own overrides.
+        if "filaments" in case:
+            filament = payload["profiles"].pop("filament")
+            payload["profiles"]["filaments"] = [
+                {"profile": filament, "settings": entry.get("settings", {})} for entry in case["filaments"]
+            ]
+    for key in ("plate_index", "settings", "limits", "wipe_tower", "filament_order"):
         if key in case:
             payload[key] = case[key]
     request = {

@@ -13,6 +13,17 @@ export interface InspectedObject {
    * plate.
    */
   instances: { transform: number[]; plate?: number | null }[];
+  /** The 1-based filament the file assigned the object, 0 for none. */
+  extruder?: number;
+  /** Every part of the object, with the filament the file gave it (0 for none). */
+  volumes?: InspectedVolume[];
+}
+
+export interface InspectedVolume {
+  index: number;
+  name: string;
+  type: "part" | "negative" | "modifier" | "support_blocker" | "support_enforcer" | "other";
+  extruder: number;
 }
 
 /** The preset selection and overrides a project archive records. */
@@ -20,6 +31,8 @@ export interface ProjectSelection {
   printer: string;
   process: string;
   filaments: string[];
+  /** Each filament's colour, `#RRGGBB`, in the same order. */
+  filament_colours?: string[];
   /** Overridden settings in their serialized form, keyed by setting. */
   settings: Record<string, string>;
 }

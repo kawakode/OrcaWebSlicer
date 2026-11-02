@@ -24,6 +24,22 @@
       "expect": {"outcome": "succeeded", "tools": [0]}
     },
     {
+      "name": "multi-filament",
+      "model": "{repo}/tests/data/20mm_cube.obj",
+      "profiles": true,
+      "filaments": [
+        {"settings": {"filament_colour": "#FF0000"}},
+        {"settings": {"filament_colour": "#0000FF"}}
+      ],
+      "objects": [
+        {"instances": [{"transform": [1,0,0,70, 0,1,0,110, 0,0,1,0, 0,0,0,1]}]},
+        {"extruder": 2, "instances": [{"transform": [1,0,0,140, 0,1,0,110, 0,0,1,0, 0,0,0,1]}]}
+      ],
+      "settings": {"enable_prime_tower": "1"},
+      "wipe_tower": {"x": 170, "y": 20},
+      "expect": {"outcome": "succeeded", "tools": [0, 1], "roles_include": ["Prime tower"]}
+    },
+    {
       "name": "unicode-3mf",
       "model": "{repo}/tests/data/test_3mf/Geräte/Büchse.3mf",
       "plate_index": 1,

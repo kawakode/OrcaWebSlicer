@@ -488,3 +488,126 @@ TEST_CASE("A height range override changes only that part of its object", "[Plat
     CHECK(below == 50);
     CHECK(ranged.size() - below == 100);
 }
+
+TEST_CASE("Plate request reads filaments, object filaments, and plate-level multi-material choices", "[PlateArtifacts]")
+{
+    const SinglePlateSliceRequest request = valid_request(slice_manifest(R"({
+        "objects": [{"model": "input/cube.obj", "extruder": 2, "volume_extruders": [{"volume": 1, "extruder": 3}],
+                     "instances": [{"transform": )" + IDENTITY_AT_CENTER + R"(}]}],
+        "output_gcode": "output/plate.gcode",
+        "profiles": {"filaments": [{"profile": "profiles/red.json"},
+                                   {"profile": "profiles/blue.json", "settings": {"filament_colour": "#0000FF"}},
+                                   {"profile": "profiles/green.json"}]},
+        "wipe_tower": {"x": 150, "y": 20},
+        "filament_order": [3, 1, 2]
+    })"));
+
+    REQUIRE(request.filaments.size() == 3);
+    CHECK(request.filament_profile.empty());
+    CHECK(request.filaments[1].profile == "profiles/blue.json");
+    CHECK(request.filaments[1].settings == SerializedSettings {{"filament_colour", "#0000FF"}});
+    CHECK(request.objects[0].extruder == 2);
+    REQUIRE(request.objects[0].volume_extruders.size() == 1);
+    CHECK(request.objects[0].volume_extruders[0].volume == 1);
+    CHECK(request.objects[0].volume_extruders[0].extruder == 3);
+    REQUIRE(request.wipe_tower.has_value());
+    CHECK((*request.wipe_tower)[0] == 150.);
+    CHECK(request.filament_order == std::vector<unsigned> {3, 1, 2});
+}
+
+TEST_CASE("Plate request refuses unusable multi-material choices", "[PlateArtifacts]")
+{
+    const auto refused = [](const std::string &fields, const std::string &code) {
+        const SinglePlateSliceRequestValidation validation = validate_single_plate_slice_request(slice_manifest(
+            R"({"objects": [{"model": "input/cube.obj", "instances": [{"transform": )" + IDENTITY_AT_CENTER +
+            R"(}]}], "output_gcode": "output/plate.gcode", )" + fields + "}"));
+        INFO(fields);
+        CHECK_FALSE(validation.is_valid());
+        CHECK(has_error(validation, code));
+    };
+    refused(R"("profiles": {"machine": "m.json", "process": "p.json", "filament": "f.json", "filaments": [{"profile": "f.json"}]})",
+            "invalid_filaments");
+    refused(R"("profiles": {"machine": "m.json", "process": "p.json", "filaments": []})", "invalid_filaments");
+    refused(R"("profiles": {"machine": "m.json", "process": "p.json", "filaments": [{"profile": "../f.json"}]})",
+            "invalid_profile_path");
+    refused(R"("profiles": {"machine": "m.json", "process": "p.json", "filaments": [{"profile": "f.json", "settings": {"layer_height": "0.1"}}]})",
+            "setting_not_per_filament");
+    refused(R"("wipe_tower": {"x": 10})", "invalid_wipe_tower");
+    refused(R"("filament_order": [1, 1])", "invalid_filament_order");
+    refused(R"("filament_order": [0])", "invalid_filament_order");
+    // An object's filament is a 1-based filament number.
+    const SinglePlateSliceRequestValidation zero = validate_single_plate_slice_request(slice_manifest(
+        R"({"objects": [{"model": "input/cube.obj", "extruder": 0, "instances": [{"transform": )" + IDENTITY_AT_CENTER +
+        R"(}]}], "output_gcode": "output/plate.gcode"})"));
+    CHECK(has_error(zero, "invalid_extruder"));
+}
+
+namespace {
+
+void write_filament_profile(const JobRoot &root, const std::string &name, const std::string &colour)
+{
+    std::filesystem::create_directories(root.path / "profiles");
+    std::ofstream(root.path / "profiles" / (name + ".json")) << R"({"name": ")" << name << R"(", "type": "filament", "filament_colour": [")"
+                                                              << colour << R"("]})";
+}
+
+std::string two_filament_cubes(const std::string &second_cube_fields, const std::string &extra = "")
+{
+    return slice_manifest(R"({
+        "objects": [
+            {"model": "input/cube.obj", "instances": [{"transform": [1,0,0,50, 0,1,0,100, 0,0,1,10, 0,0,0,1]}]},
+            {"model": "input/cube.obj", "instances": [{"transform": [1,0,0,140, 0,1,0,100, 0,0,1,10, 0,0,0,1]}], )" +
+                          second_cube_fields + R"(}
+        ],
+        "output_gcode": "output/plate.gcode",
+        "output_preview": "output/preview.bin",
+        "output_preview_index": "output/preview.json",
+        "profiles": {"filaments": [{"profile": "profiles/red.json"}, {"profile": "profiles/blue.json"}]},
+        )" + extra + R"(
+        "settings": {"layer_height": "0.2", "initial_layer_print_height": "0.2", "layer_change_gcode": "G92 E0\n"}
+    })");
+}
+
+} // namespace
+
+TEST_CASE("An object on the second filament is printed with tool 1", "[PlateArtifacts]")
+{
+    JobRoot root;
+    write_filament_profile(root, "red", "#FF0000");
+    write_filament_profile(root, "blue", "#0000FF");
+    const SinglePlateSliceResult result =
+        slice_single_plate(valid_request(two_filament_cubes(R"("extruder": 2)", R"("filament_order": [2, 1],)")), root.path);
+    INFO(result.code << ": " << result.message);
+    REQUIRE(result.success);
+
+    const std::string gcode = root.read("output/plate.gcode");
+    CHECK(gcode.find("\nT1") != std::string::npos);
+    CHECK(gcode.find("; filament_colour = #FF0000;#0000FF") != std::string::npos);
+
+    const nlohmann::json index = nlohmann::json::parse(root.read("output/preview.json"));
+    CHECK(index["tools"] == nlohmann::json::array({0, 1}));
+    CHECK(index["tool_colours"] == nlohmann::json::array({"#FF0000", "#0000FF"}));
+    // The cube right of X = 100 is the one printed with the second filament.
+    const std::string segments = root.read("output/preview.bin");
+    std::set<int> left_tools, right_tools;
+    for (std::size_t at = 0; at + 36 <= segments.size(); at += 36) {
+        float x = 0.f;
+        std::memcpy(&x, segments.data() + at + 12, sizeof(x));
+        const int tool = static_cast<unsigned char>(segments[at + 33]);
+        (x < 100.f ? left_tools : right_tools).insert(tool);
+    }
+    CHECK(left_tools == std::set<int> {0});
+    CHECK(right_tools == std::set<int> {1});
+}
+
+TEST_CASE("An object on a filament the job does not load is refused", "[PlateArtifacts]")
+{
+    JobRoot root;
+    write_filament_profile(root, "red", "#FF0000");
+    write_filament_profile(root, "blue", "#0000FF");
+    const SinglePlateSliceResult result = slice_single_plate(valid_request(two_filament_cubes(R"("extruder": 3)")), root.path);
+    CHECK_FALSE(result.success);
+    CHECK(result.code == "extruder_out_of_range");
+    CHECK(result.category == WorkerErrorCategory::Validation);
+    CHECK(result.setting == "extruder");
+}
