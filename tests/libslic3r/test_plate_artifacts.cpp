@@ -495,7 +495,8 @@ TEST_CASE("Plate request reads filaments, object filaments, and plate-level mult
         "objects": [{"model": "input/cube.obj", "extruder": 2, "volume_extruders": [{"volume": 1, "extruder": 3}],
                      "instances": [{"transform": )" + IDENTITY_AT_CENTER + R"(}]}],
         "output_gcode": "output/plate.gcode",
-        "profiles": {"filaments": [{"profile": "profiles/red.json"},
+        "profiles": {"machine": "profiles/machine.json", "process": "profiles/process.json",
+                     "filaments": [{"profile": "profiles/red.json"},
                                    {"profile": "profiles/blue.json", "settings": {"filament_colour": "#0000FF"}},
                                    {"profile": "profiles/green.json"}]},
         "wipe_tower": {"x": 150, "y": 20},
@@ -547,6 +548,9 @@ namespace {
 void write_filament_profile(const JobRoot &root, const std::string &name, const std::string &colour)
 {
     std::filesystem::create_directories(root.path / "profiles");
+    // Empty machine and process profiles keep the engine defaults.
+    std::ofstream(root.path / "profiles" / "machine.json") << R"({"name": "machine", "type": "machine"})";
+    std::ofstream(root.path / "profiles" / "process.json") << R"({"name": "process", "type": "process"})";
     std::ofstream(root.path / "profiles" / (name + ".json")) << R"({"name": ")" << name << R"(", "type": "filament", "filament_colour": [")"
                                                               << colour << R"("]})";
 }
@@ -562,7 +566,8 @@ std::string two_filament_cubes(const std::string &second_cube_fields, const std:
         "output_gcode": "output/plate.gcode",
         "output_preview": "output/preview.bin",
         "output_preview_index": "output/preview.json",
-        "profiles": {"filaments": [{"profile": "profiles/red.json"}, {"profile": "profiles/blue.json"}]},
+        "profiles": {"machine": "profiles/machine.json", "process": "profiles/process.json",
+                     "filaments": [{"profile": "profiles/red.json"}, {"profile": "profiles/blue.json"}]},
         )" + extra + R"(
         "settings": {"layer_height": "0.2", "initial_layer_print_height": "0.2", "layer_change_gcode": "G92 E0\n"}
     })");
