@@ -32,6 +32,7 @@
 #include <mutex>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -939,7 +940,7 @@ SinglePlateSliceResult load_filaments(const SinglePlateSliceRequest &request, co
         if (const SinglePlateSliceResult loaded = load_profile(job_root, request.filaments[index].profile, filaments[index]);
             !loaded.success)
             return loaded;
-        for (const SerializedSettings *settings : {&shared, &request.filaments[index].settings})
+        for (const SerializedSettings *settings : {&std::as_const(shared), &request.filaments[index].settings})
             if (SinglePlateSliceResult applied = apply_settings(*settings, filaments[index]); !applied.success) {
                 applied.message = "Filament " + std::to_string(index + 1) + ": " + applied.message;
                 return applied;
