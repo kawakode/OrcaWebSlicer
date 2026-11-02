@@ -7,7 +7,12 @@ export interface InspectedObject {
   vertex_count: number;
   triangle_count: number;
   bounding_box: { min: [number, number, number]; max: [number, number, number] };
-  instances: { transform: number[] }[];
+  /**
+   * Placements the file declared. A project's are relative to the bed of the
+   * 1-based `plate` holding each instance, which is null for an instance on no
+   * plate.
+   */
+  instances: { transform: number[]; plate?: number | null }[];
 }
 
 /** The preset selection and overrides a project archive records. */
@@ -24,6 +29,8 @@ export interface Inspection {
   version: number;
   model_format: string;
   declares_plate: boolean;
+  /** The plates a project declares, empty for a mesh. */
+  plates?: { index: number; name: string }[];
   objects: InspectedObject[];
   /** Present when the model is a project that names its presets. */
   project?: ProjectSelection;

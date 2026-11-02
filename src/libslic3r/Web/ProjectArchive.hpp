@@ -2,12 +2,15 @@
 
 #include "WorkerManifest.hpp"
 
+#include "libslic3r/BoundingBox.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 
 namespace Slic3r {
+class DynamicPrintConfig;
 class Model;
 } // namespace Slic3r
 
@@ -41,6 +44,30 @@ struct ProjectArchiveInspection
 // failure.
 bool inspect_project_archive(const std::filesystem::path &archive_path, const ProjectArchiveLimits &limits,
                              ProjectArchiveInspection &inspection, WorkerManifestError &error);
+
+// Where the desktop puts each plate of a project. Its plate list lays every
+// plate out on one shared coordinate system, in a grid whose plates sit one bed
+// plus a fifth apart, and a project archive stores instance placements in those
+// shared coordinates. This mirrors that layout so the worker can move each
+// plate's objects back onto its own bed without the desktop plate list.
+struct ProjectPlateGrid
+{
+    // Printable-area bounds of the first plate.
+    BoundingBoxf bed;
+    Vec2d        stride {0., 0.};
+    int          columns {1};
+    int          plate_count {1};
+
+    // Offset of the 0-based plate from the first one.
+    Vec2d origin(int plate) const;
+    // The 0-based plate whose bed is centred nearest to the point, or -1 when
+    // the point lies beyond every plate, as an object off the plates does.
+    int plate_at(const Vec2d &point) const;
+};
+
+// The layout of `plate_count` plates for the printer `config` describes, as the
+// desktop computes it from the archive's own printable area.
+ProjectPlateGrid project_plate_grid(const DynamicPrintConfig &config, int plate_count);
 
 // Exposed for tests: the entry-name containment rule applied to every archive
 // entry. Rejects absolute paths, drive letters, backslashes, parent traversal,

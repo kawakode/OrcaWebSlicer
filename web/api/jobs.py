@@ -41,6 +41,9 @@ MAX_PLATE_INDEX = 64
 MAX_PLATE_OBJECTS = 256
 MAX_OBJECT_INSTANCES = 64
 MAX_PLATE_UPLOADS = 16
+# The desktop's own plate-count ceiling bounds one batch.
+MAX_BATCH_PLATES = 36
+MAX_PLATE_NAME_CHARS = 64
 # One preview page is read in chunks, never held whole.
 MAX_PREVIEW_PAGE_BYTES = 256 * 1024 * 1024
 PREVIEW_CHUNK_BYTES = 1024 * 1024
@@ -138,6 +141,10 @@ class SliceRequest:
     plate_index: int = 1
     objects: Tuple[PlacedObject, ...] = ()
     operation: str = "slice"
+    # The 1-based plate of the browser's project this job slices, and its name.
+    # They only name the job and its artifacts; the worker never sees them.
+    plate: Optional[int] = None
+    plate_name: Optional[str] = None
     # Embed rendered thumbnails in the G-code; slices only.
     thumbnails: bool = False
     edit: Optional[EditSpec] = None
@@ -152,6 +159,8 @@ class SliceRequest:
                     "filament_profile": self.filament_profile,
                     "settings": dict(self.settings),
                     "plate_index": self.plate_index,
+                    "plate": self.plate,
+                    "plate_name": self.plate_name,
                 }
             )
             if self.objects:
@@ -190,6 +199,8 @@ class JobRecord:
     error: Optional[Dict[str, str]] = None
     result: Optional[Dict[str, Any]] = None
     retry_of: Optional[str] = None
+    # The batch that submitted this job with the other plates of its project.
+    batch_id: Optional[str] = None
     # The effective profile chain this job was resolved from, kept so a report
     # names every inherited profile and not only the selected leaf.
     profiles: Dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -212,6 +223,7 @@ class JobRecord:
             "request": self.request.describe(),
             "profiles": dict(self.profiles),
             "retry_of": self.retry_of,
+            "batch_id": self.batch_id,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -264,6 +276,8 @@ class JobService:
         self._log = logger or logging.getLogger("orca.web.api.jobs")
         self._lock = threading.RLock()
         self._jobs: Dict[str, JobRecord] = {}
+        # A batch is the jobs of one project's plates, submitted together.
+        self._batches: Dict[str, List[str]] = {}
         self._pool = ThreadPoolExecutor(
             max_workers=config.max_concurrent_jobs, thread_name_prefix="orca-slice-job"
         )
@@ -296,7 +310,15 @@ class JobService:
 
             path = self._artifact_path(record, name)
             media_type, suffix = ARTIFACT_MEDIA_TYPES[name]
-            return self._readable(path), media_type, f"{job_id}{suffix}"
+            # A plate's artifacts carry its number, so a project's downloads
+            # stay distinguishable side by side.
+            plate = record.request.plate
+            stem = f"{job_id}-plate-{plate}" if plate else job_id
+            return self._readable(path), media_type, f"{stem}{suffix}"
+
+    def batch(self, batch_id: str) -> Dict[str, Any]:
+        with self._lock:
+            return self._describe_batch(batch_id)
 
     def preview_page(self, job_id: str, start: int, end: int) -> Tuple[Path, int, int]:
         """Locate the bytes of preview layers `start` to `end`, inclusive.
@@ -349,11 +371,16 @@ class JobService:
     # Commands
 
     def submit(
-        self, request: SliceRequest, correlation_id: str, retry_of: Optional[str] = None
+        self,
+        request: SliceRequest,
+        correlation_id: str,
+        retry_of: Optional[str] = None,
+        batch_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         uploads = [self._uploads.get(upload_id) for upload_id in request.upload_ids()]
         self._validate(request, len(uploads))
-        self.sweep()
+        if batch_id is None:
+            self.sweep()
 
         job_id = f"job-{uuid.uuid4().hex}"
         # A single legacy upload keeps its original staged name.
@@ -403,6 +430,7 @@ class JobService:
             path=prepared.path,
             created_at=time.time(),
             retry_of=retry_of,
+            batch_id=batch_id,
             profiles={
                 kind: {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)}
                 for kind, entry in selected.items()
@@ -422,6 +450,52 @@ class JobService:
         )
         self._pool.submit(self._run, job_id)
         return accepted
+
+    def submit_batch(self, requests: List[SliceRequest], correlation_id: str) -> Dict[str, Any]:
+        """Slice every plate of a project, one disposable worker per plate.
+
+        Each plate stays an ordinary job, so plates run in parallel within the
+        worker pool and are canceled, retried, and downloaded one by one. Every
+        plate is validated before the first job is accepted, so a refused plate
+        leaves no partial batch behind.
+        """
+        if not 1 <= len(requests) <= MAX_BATCH_PLATES:
+            raise ApiError("invalid_batch", f"A batch slices 1 to {MAX_BATCH_PLATES} plates.")
+        for request in requests:
+            if request.operation != "slice" or request.plate is None:
+                raise ApiError("invalid_batch", "Every plate of a batch is a numbered slice.")
+            self._validate(request, len([self._uploads.get(upload_id) for upload_id in request.upload_ids()]))
+        if len({request.plate for request in requests}) != len(requests):
+            raise ApiError("invalid_batch", "Every plate of a batch has its own number.")
+        self.sweep()
+
+        batch_id = f"batch-{uuid.uuid4().hex}"
+        accepted: List[str] = []
+        try:
+            for request in requests:
+                accepted.append(self.submit(request, correlation_id, batch_id=batch_id)["job_id"])
+        except ApiError:
+            self._cancel_unfinished(accepted)
+            raise
+        with self._lock:
+            self._batches[batch_id] = accepted
+            described = self._describe_batch(batch_id)
+        self._log.info(
+            "batch accepted batch_id=%s plates=%d correlation_id=%s", batch_id, len(accepted), correlation_id
+        )
+        return described
+
+    def cancel_batch(self, batch_id: str) -> Dict[str, Any]:
+        with self._lock:
+            self._cancel_unfinished(self._require_batch(batch_id))
+            return self._describe_batch(batch_id)
+
+    def _cancel_unfinished(self, job_ids: List[str]) -> None:
+        with self._lock:
+            for job_id in job_ids:
+                record = self._jobs.get(job_id)
+                if record is not None and record.state not in TERMINAL_STATES:
+                    self.cancel(job_id)
 
     def cancel(self, job_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -457,6 +531,9 @@ class JobService:
         with self._lock:
             for job_id in report.removed:
                 self._jobs.pop(job_id, None)
+            for batch_id, job_ids in list(self._batches.items()):
+                if not any(job_id in self._jobs for job_id in job_ids):
+                    del self._batches[batch_id]
         uploads = self._uploads.sweep(self._config.job_limits.retention_seconds)
         return {"jobs_removed": report.removed, "jobs_retained": report.retained, "uploads_removed": uploads}
 
@@ -578,6 +655,29 @@ class JobService:
             raise ApiError("unknown_job", "No job is known under that id.", 404)
         return record
 
+    def _require_batch(self, batch_id: str) -> List[str]:
+        job_ids = self._batches.get(batch_id)
+        if job_ids is None:
+            raise ApiError("unknown_batch", "No batch is known under that id.", 404)
+        return job_ids
+
+    def _describe_batch(self, batch_id: str) -> Dict[str, Any]:
+        jobs = [self._jobs[job_id].describe() for job_id in self._require_batch(batch_id) if job_id in self._jobs]
+        # A batch runs until its last plate finishes, and fails when any plate
+        # fails.
+        states = {job["state"] for job in jobs}
+        if jobs and states == {"queued"}:
+            state = "queued"
+        elif states - TERMINAL_STATES:
+            state = "running"
+        elif "failed" in states or not jobs:
+            state = "failed"
+        elif "canceled" in states:
+            state = "canceled"
+        else:
+            state = "succeeded"
+        return {"batch_id": batch_id, "state": state, "jobs": jobs}
+
     @staticmethod
     def _readable(path: Path) -> Path:
         if path.is_symlink() or not path.is_file():
@@ -651,6 +751,10 @@ class JobService:
             self._validate_layer_ranges(placed.layer_ranges)
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
+        if request.plate is not None and not 1 <= request.plate <= MAX_BATCH_PLATES:
+            raise ApiError("invalid_plate", f"plate must be a plate number from 1 to {MAX_BATCH_PLATES}.")
+        if request.plate_name is not None and len(request.plate_name) > MAX_PLATE_NAME_CHARS:
+            raise ApiError("invalid_plate", f"A plate name has at most {MAX_PLATE_NAME_CHARS} characters.")
         self._validate_settings(request.settings, "plate")
 
     def _validate_settings(self, settings: Dict[str, str], level: str) -> None:

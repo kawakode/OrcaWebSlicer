@@ -433,6 +433,92 @@ class ApiTests(unittest.TestCase):
         jobs = self.client.get("/api/v1/jobs").json()["jobs"]
         self.assertEqual([job for job in jobs if job["operation"] == "edit"], [])
 
+    def test_slices_every_plate_of_a_project_as_one_batch(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [{"upload_id": upload_id, "instances": [{"transform": [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]}]}]
+        body = {
+            "plates": [{"objects": placed, "name": "Brackets"}, {"objects": placed, "plate": 3, "plate_index": 2}],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+            "settings": {"layer_height": "0.28"},
+            "thumbnails": True,
+        }
+        accepted = self.client.post("/api/v1/batches", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        batch = accepted.json()
+        self.assertTrue(batch["batch_id"].startswith("batch-"))
+        # One ordinary job per plate, numbered by position unless it says otherwise.
+        jobs = batch["jobs"]
+        self.assertEqual([job["request"]["plate"] for job in jobs], [1, 3])
+        self.assertEqual([job["request"]["plate_name"] for job in jobs], ["Brackets", None])
+        self.assertEqual({job["batch_id"] for job in jobs}, {batch["batch_id"]})
+        for job in jobs:
+            self.assertEqual(self.wait(job["job_id"])["state"], "succeeded")
+        self.assertEqual(self.client.get(f"/api/v1/batches/{batch['batch_id']}").json()["state"], "succeeded")
+
+        # The archive plate whose settings apply reaches the worker; the
+        # browser's own plate number only names the artifacts.
+        second = jobs[1]["job_id"]
+        manifest = json.loads((self.root / "state" / "jobs" / second / "request.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["operation"]["payload"]["plate_index"], 2)
+        self.assertIs(manifest["operation"]["payload"]["thumbnails"], True)
+        self.assertNotIn("plate", manifest["operation"]["payload"])
+        gcode = self.client.get(f"/api/v1/jobs/{second}/artifacts/gcode")
+        self.assertIn(f"{second}-plate-3.gcode", gcode.headers["content-disposition"])
+        preview = self.client.get(f"/api/v1/jobs/{second}/artifacts/preview")
+        self.assertIn(f"{second}-plate-3-preview.bin", preview.headers["content-disposition"])
+
+        # A finished batch has nothing left to cancel.
+        canceled = self.client.post(f"/api/v1/batches/{batch['batch_id']}/cancel")
+        self.assertEqual(canceled.json()["state"], "succeeded")
+
+    def test_refuses_a_batch_before_any_plate_reaches_a_worker(self):
+        upload_id = self.upload().json()["upload_id"]
+        placed = [{"upload_id": upload_id, "instances": [{"transform": [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]}]}]
+        body = {
+            "plates": [{"objects": placed}, {"objects": placed}],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        before = len(self.slice_jobs())
+        refused = self.client.post("/api/v1/batches", json={**body, "settings": {"layer_height": "thick"}})
+        self.assertEqual(refused.status_code, 422)
+        self.assertEqual(refused.json()["error"]["code"], "invalid_setting_value")
+        for invalid in (
+            {**body, "plates": []},
+            {**body, "plates": [{"objects": []}]},
+            {**body, "plates": [{"objects": placed, "upload_id": upload_id}]},
+            {**body, "plates": [{"objects": placed}] * 37},
+        ):
+            with self.subTest(invalid=len(invalid["plates"])):
+                self.assertEqual(self.client.post("/api/v1/batches", json=invalid).status_code, 422)
+        duplicated = self.client.post(
+            "/api/v1/batches", json={**body, "plates": [{"objects": placed, "plate": 2}, {"objects": placed}]}
+        )
+        self.assertEqual(duplicated.status_code, 400)
+        self.assertEqual(duplicated.json()["error"]["code"], "invalid_batch")
+        unknown = self.client.post(
+            "/api/v1/batches", json={**body, "plates": [{"objects": [{**placed[0], "upload_id": "0" * 32}]}]}
+        )
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(len(self.slice_jobs()), before)
+        self.assertEqual(self.client.get("/api/v1/batches/batch-" + "0" * 32).status_code, 404)
+        self.assertEqual(self.client.get("/api/v1/batches/not-a-batch").status_code, 404)
+
+    def test_names_a_single_plate_job_after_its_plate(self):
+        accepted = self.submit(plate=3, plate_name="Spare parts")
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        job_id = accepted.json()["job_id"]
+        self.assertEqual(accepted.json()["request"]["plate"], 3)
+        self.assertIsNone(accepted.json()["batch_id"])
+        self.wait(job_id)
+        gcode = self.client.get(f"/api/v1/jobs/{job_id}/artifacts/gcode")
+        self.assertIn(f"{job_id}-plate-3.gcode", gcode.headers["content-disposition"])
+        self.assertEqual(self.submit(plate=0).status_code, 422)
+        self.assertEqual(self.submit(plate_name="x" * 65).status_code, 422)
+
     def test_pages_the_layer_preview(self):
         job_id = self.submit().json()["job_id"]
         self.assertEqual(self.wait(job_id)["state"], "succeeded")

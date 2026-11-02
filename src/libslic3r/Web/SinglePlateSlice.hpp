@@ -104,8 +104,10 @@ struct SinglePlateSliceRequest
     std::string process_profile;
     std::string filament_profile;
     SerializedSettings settings;
-    // 1-based plate selection inside a project archive. Mesh inputs describe a
-    // single implicit plate and ignore it.
+    // 1-based plate of a project archive. An `input_model` slice keeps only
+    // that plate's objects; an `objects` slice takes that plate's own settings
+    // from the first archive it uses. Mesh inputs describe a single implicit
+    // plate and ignore it.
     unsigned plate_index {1};
     std::optional<std::uintmax_t> max_input_bytes;
     std::optional<std::uintmax_t> max_triangles;
@@ -155,7 +157,7 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
                                           const SinglePlateSliceCallbacks &callbacks = {});
 SinglePlateSliceResult inspect_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                      const SinglePlateSliceCallbacks &callbacks = {});
-// Loads `input_model` under the request's size, archive, and triangle limits,
+// Loads every plate of `input_model` under the request's size, archive, and triangle limits,
 // giving every object at least one instance, as inspections and edits need.
 SinglePlateSliceResult load_input_model(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
                                         Model &model);

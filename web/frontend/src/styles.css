@@ -69,6 +69,33 @@ h1 {
   color: var(--accent);
 }
 
+.plates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.plates .tabs {
+  flex-wrap: wrap;
+}
+
+.tabs .count {
+  color: var(--muted);
+}
+
+button.link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.plate-summary li[data-state="failed"] {
+  color: var(--failure);
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 1fr 24rem;

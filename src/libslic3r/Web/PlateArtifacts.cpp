@@ -54,7 +54,8 @@ bool finish(std::ofstream &output, const char *what, std::string &error)
 
 } // namespace
 
-bool write_model_inspection(const Model &model, bool declares_plate, const std::string &model_format,
+bool write_model_inspection(const Model &model, bool declares_plate, const InspectedPlates &plates,
+                            const std::string &model_format,
                             const std::filesystem::path &mesh, const std::filesystem::path &inspection,
                             std::string &error, const DynamicPrintConfig *project_config)
 {
@@ -87,8 +88,17 @@ bool write_model_inspection(const Model &model, bool declares_plate, const std::
                 write_value<std::uint32_t>(output, static_cast<std::uint32_t>(triangle[corner]));
 
         nlohmann::json instances = nlohmann::json::array();
-        for (const ModelInstance *instance : object.instances)
-            instances.push_back({{"transform", matrix_json(instance->get_matrix())}});
+        for (std::size_t instance = 0; instance < object.instances.size(); ++instance) {
+            nlohmann::json described = {{"transform", matrix_json(object.instances[instance]->get_matrix())}};
+            if (!plates.names.empty()) {
+                const unsigned plate = index < plates.instance_plates.size() &&
+                                               instance < plates.instance_plates[index].size()
+                                           ? plates.instance_plates[index][instance]
+                                           : 0;
+                described["plate"] = plate == 0 ? nlohmann::json(nullptr) : nlohmann::json(plate);
+            }
+            instances.push_back(std::move(described));
+        }
         objects.push_back({
             {"index", index},
             {"name", object.name},
@@ -107,11 +117,15 @@ bool write_model_inspection(const Model &model, bool declares_plate, const std::
         error = "Unable to create the inspection artifact.";
         return false;
     }
+    nlohmann::json described_plates = nlohmann::json::array();
+    for (std::size_t plate = 0; plate < plates.names.size(); ++plate)
+        described_plates.push_back({{"index", plate + 1}, {"name", plates.names[plate]}});
     nlohmann::json described {
         {"format", "orca-web-mesh"},
         {"version", MESH_FORMAT_VERSION},
         {"model_format", model_format},
         {"declares_plate", declares_plate},
+        {"plates", std::move(described_plates)},
         {"objects", std::move(objects)},
     };
     if (project_config != nullptr)

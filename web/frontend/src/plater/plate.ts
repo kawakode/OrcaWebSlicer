@@ -7,6 +7,7 @@ import { Euler, Matrix4, Quaternion, Vector3 } from "three";
 
 import type { PlacedObjectSubmission } from "../api";
 import { declared } from "../settings/catalog";
+import type { Job } from "../types";
 import type { ObjectMesh } from "./mesh";
 
 /** Settings for part of an object, between two heights above its bottom. */
@@ -226,4 +227,52 @@ export function plateObjects(items: PlateItem[]): PlacedObjectSubmission[] {
     entry.instances.push({ transform: rowMajor(itemMatrix(item)) });
   }
   return [...grouped.values()];
+}
+
+/** One plate of the project: what the plater draws and one job slices. */
+export interface Plate {
+  id: string;
+  /** The name a project file gave the plate, or empty. */
+  name: string;
+  items: PlateItem[];
+  /** The plate of the project file it came from, whose own settings apply. */
+  sourcePlate?: number;
+  /** The plate's latest slice. */
+  job: Job | null;
+}
+
+export const plateLabel = (plate: Plate, position: number) => plate.name || `Plate ${position + 1}`;
+
+/** An item a model file contributes, with the 1-based plate of that file it sits on. */
+export interface LoadedItem {
+  item: PlateItem;
+  plate: number;
+}
+
+/**
+ * Put a file's items onto the project's plates. The file's first plate lands on
+ * the plate at `start` and each later plate on the next one, created with
+ * `create` when the project runs out of plates, so a project archive keeps its
+ * plates in order. `names` are the file's own plate names.
+ */
+export function addToPlates(
+  plates: Plate[],
+  start: number,
+  added: LoadedItem[],
+  names: string[],
+  create: () => Plate,
+): Plate[] {
+  const next = plates.map((plate) => ({ ...plate, items: [...plate.items] }));
+  const count = Math.max(1, names.length, ...added.map(({ plate }) => plate));
+  for (let filePlate = 1; filePlate <= count; filePlate++) {
+    const position = start + filePlate - 1;
+    while (next.length <= position) next.push(create());
+    const target = next[position];
+    if (names.length > 0) {
+      target.name ||= names[filePlate - 1] ?? "";
+      target.sourcePlate ??= filePlate;
+    }
+    target.items.push(...added.filter(({ plate }) => plate === filePlate).map(({ item }) => item));
+  }
+  return next;
 }

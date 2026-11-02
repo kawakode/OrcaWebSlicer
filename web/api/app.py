@@ -28,8 +28,10 @@ from .edits import EditSpec
 from .errors import ApiError, from_catalog_error, from_settings_error
 from .jobs import (
     ARTIFACT_NAMES,
+    MAX_BATCH_PLATES,
     MAX_OBJECT_INSTANCES,
     MAX_LAYER_RANGES,
+    MAX_PLATE_NAME_CHARS,
     MAX_PLATE_OBJECTS,
     MAX_SETTINGS,
     PREVIEW_CHUNK_BYTES,
@@ -43,6 +45,7 @@ from .uploads import UploadStore
 
 CORRELATION_HEADER = "X-Correlation-Id"
 CORRELATION_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+BATCH_ID_PATTERN = re.compile(r"^batch-[0-9a-f]{32}$")
 PREFIX = f"/api/{API_VERSION}"
 
 logger = logging.getLogger("orca.web.api")
@@ -93,6 +96,10 @@ class PlateSubmission(BaseModel):
     filament_profile: str = Field(min_length=1, max_length=512)
     settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
     plate_index: int = Field(default=1, ge=1)
+    # The browser project's plate this slices, which names the job and its
+    # artifacts.
+    plate: Optional[int] = Field(default=None, ge=1, le=MAX_BATCH_PLATES)
+    plate_name: Optional[str] = Field(default=None, max_length=MAX_PLATE_NAME_CHARS)
 
     @model_validator(mode="after")
     def names_one_plate(self) -> "PlateSubmission":
@@ -109,19 +116,9 @@ class PlateSubmission(BaseModel):
             filament_profile=self.filament_profile,
             settings=dict(self.settings),
             plate_index=self.plate_index,
-            objects=tuple(
-                PlacedObject(
-                    upload_id=placed.upload_id,
-                    object_index=placed.object,
-                    instances=tuple(tuple(instance.transform) for instance in placed.instances),
-                    settings=dict(placed.settings),
-                    layer_ranges=tuple(
-                        LayerRange(layer_range.min_z, layer_range.max_z, dict(layer_range.settings))
-                        for layer_range in placed.layer_ranges
-                    ),
-                )
-                for placed in self.objects or ()
-            ),
+            objects=_placed_objects(self.objects or ()),
+            plate=self.plate,
+            plate_name=self.plate_name,
             **options,
         )
 
@@ -182,6 +179,65 @@ class EditSubmission(BaseModel):
         )
 
 
+def _placed_objects(objects: List[ObjectSubmission]) -> tuple:
+    return tuple(
+        PlacedObject(
+            upload_id=placed.upload_id,
+            object_index=placed.object,
+            instances=tuple(tuple(instance.transform) for instance in placed.instances),
+            settings=dict(placed.settings),
+            layer_ranges=tuple(
+                LayerRange(layer_range.min_z, layer_range.max_z, dict(layer_range.settings))
+                for layer_range in placed.layer_ranges
+            ),
+        )
+        for placed in objects
+    )
+
+
+class BatchPlateSubmission(BaseModel):
+    """One plate of a batch, placed by the plater."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    objects: List[ObjectSubmission] = Field(min_length=1, max_length=MAX_PLATE_OBJECTS)
+    # The plate's number in the browser's project; its position by default, so
+    # a project can leave its empty plates out without renumbering the rest.
+    plate: Optional[int] = Field(default=None, ge=1, le=MAX_BATCH_PLATES)
+    # The archive plate whose own settings apply, when the plate came from one.
+    plate_index: int = Field(default=1, ge=1)
+    name: Optional[str] = Field(default=None, max_length=MAX_PLATE_NAME_CHARS)
+
+
+class BatchSubmission(BaseModel):
+    """Every plate of a project, sliced with one profile chain and one set of overrides."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plates: List[BatchPlateSubmission] = Field(min_length=1, max_length=MAX_BATCH_PLATES)
+    machine_profile: str = Field(min_length=1, max_length=512)
+    process_profile: str = Field(min_length=1, max_length=512)
+    filament_profile: str = Field(min_length=1, max_length=512)
+    settings: Dict[str, str] = Field(default_factory=dict, max_length=MAX_SETTINGS)
+    thumbnails: bool = False
+
+    def to_requests(self) -> List[SliceRequest]:
+        return [
+            SliceRequest(
+                machine_profile=self.machine_profile,
+                process_profile=self.process_profile,
+                filament_profile=self.filament_profile,
+                settings=dict(self.settings),
+                plate_index=plate.plate_index,
+                objects=_placed_objects(plate.objects),
+                plate=plate.plate or position,
+                plate_name=plate.name,
+                thumbnails=self.thumbnails,
+            )
+            for position, plate in enumerate(self.plates, start=1)
+        ]
+
+
 def correlation_id(request: Request) -> str:
     return getattr(request.state, "correlation_id", "")
 
@@ -190,6 +246,12 @@ def _job_id(job_id: str = PathParam(max_length=128)) -> str:
     if not JOB_ID_PATTERN.match(job_id):
         raise ApiError("unknown_job", "No job is known under that id.", 404)
     return job_id
+
+
+def _batch_id(batch_id: str = PathParam(max_length=64)) -> str:
+    if not BATCH_ID_PATTERN.match(batch_id):
+        raise ApiError("unknown_batch", "No batch is known under that id.", 404)
+    return batch_id
 
 
 def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
@@ -342,6 +404,19 @@ def create_app(config: Optional[ApiConfig] = None) -> FastAPI:
     def export_project(request: Request, submission: ProjectSubmission) -> Dict[str, Any]:
         """Save a plate as a 3MF project through a worker; the job publishes `project`."""
         return request.app.state.jobs.submit(submission.to_request("export_project"), correlation_id(request))
+
+    @app.post(f"{PREFIX}/batches", status_code=202, tags=["jobs"])
+    def submit_batch(request: Request, submission: BatchSubmission) -> Dict[str, Any]:
+        """Slice every plate of a project, one job per plate."""
+        return request.app.state.jobs.submit_batch(submission.to_requests(), correlation_id(request))
+
+    @app.get(f"{PREFIX}/batches/{{batch_id}}", tags=["jobs"])
+    def read_batch(request: Request, batch_id: str = Depends(_batch_id)) -> Dict[str, Any]:
+        return request.app.state.jobs.batch(batch_id)
+
+    @app.post(f"{PREFIX}/batches/{{batch_id}}/cancel", tags=["jobs"])
+    def cancel_batch(request: Request, batch_id: str = Depends(_batch_id)) -> Dict[str, Any]:
+        return request.app.state.jobs.cancel_batch(batch_id)
 
     @app.get(f"{PREFIX}/jobs", tags=["jobs"])
     def list_jobs(request: Request) -> Dict[str, Any]:

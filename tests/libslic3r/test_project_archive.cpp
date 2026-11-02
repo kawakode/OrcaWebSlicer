@@ -1,5 +1,6 @@
 #include <catch2/catch_all.hpp>
 
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Web/ProjectArchive.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "test_utils.hpp"
@@ -201,4 +202,32 @@ TEST_CASE("Project archive inspection enforces the entry count limit", "[Project
     WorkerManifestError error;
     REQUIRE_FALSE(inspect_project_archive(archive, limits, inspection, error));
     CHECK(error.code == "archive_entry_count_limit_exceeded");
+}
+
+TEST_CASE("Project plate grid mirrors the desktop plate layout", "[ProjectArchive]")
+{
+    DynamicPrintConfig config;
+    config.set_key_value("printable_area", new ConfigOptionPoints{Vec2d(0, 0), Vec2d(220.6, 0), Vec2d(220.6, 220), Vec2d(0, 220)});
+
+    // Four plates form two columns, one bed plus a fifth apart; the desktop
+    // keeps the plate size in whole millimetres.
+    const ProjectPlateGrid grid = project_plate_grid(config, 4);
+    CHECK(grid.columns == 2);
+    CHECK(grid.origin(0) == Vec2d(0., 0.));
+    CHECK(grid.origin(1).x() == Catch::Approx(264.));
+    CHECK(grid.origin(3).x() == Catch::Approx(264.));
+    CHECK(grid.origin(3).y() == Catch::Approx(-264.));
+
+    CHECK(grid.plate_at(Vec2d(110., 110.)) == 0);
+    CHECK(grid.plate_at(Vec2d(264. + 10., 200.)) == 1);
+    CHECK(grid.plate_at(Vec2d(110., 110. - 264.)) == 2);
+    // Beyond the grid, or left of and above the first plate, is no plate.
+    CHECK(grid.plate_at(Vec2d(110. + 2 * 264., 110.)) == -1);
+    CHECK(grid.plate_at(Vec2d(-200., 110.)) == -1);
+    CHECK(grid.plate_at(Vec2d(110., 110. + 264.)) == -1);
+
+    // Three plates still take two columns, and the fourth cell is empty.
+    CHECK(project_plate_grid(config, 3).plate_at(Vec2d(264. + 110., 110. - 264.)) == -1);
+    CHECK(project_plate_grid(config, 1).columns == 1);
+    CHECK(project_plate_grid(config, 5).columns == 3);
 }

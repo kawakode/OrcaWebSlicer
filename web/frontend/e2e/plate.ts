@@ -7,7 +7,12 @@ import { expect, type Page } from "@playwright/test";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 export const CUBE = resolve(REPO_ROOT, "tests/data/20mm_cube.obj");
-if (!existsSync(CUBE)) throw new Error(`The fixture ${CUBE} is missing.`);
+// Two plates holding one cube each; see write_two_plate_project in
+// tests/libslic3r/test_plate_artifacts.cpp, which writes the same project.
+export const TWO_PLATES = resolve(REPO_ROOT, "tests/data/web-worker/two-plates.3mf");
+for (const fixture of [CUBE, TWO_PLATES]) {
+  if (!existsSync(fixture)) throw new Error(`The fixture ${fixture} is missing.`);
+}
 // Displayed and sliced placement must agree within this many millimetres; see
 // docs/web/plater.md for why it is not zero.
 export const PLACEMENT_TOLERANCE_MM = 0.5;
