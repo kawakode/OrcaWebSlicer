@@ -16,6 +16,7 @@ import {
   submitBatch,
   submitJob,
   uploadModel,
+  type MaterialSubmission,
 } from "./api";
 import { decodeObjectMesh, type ProjectSelection } from "./plater/mesh";
 import { ObjectTools, useObjectTools } from "./plater/ObjectTools";
@@ -23,7 +24,9 @@ import {
   addToPlates,
   arrange,
   bedBounds,
+  defaultWipeTower,
   fitsBed,
+  highestExtruder,
   itemBounds,
   parseBed,
   placementFromMatrix,
@@ -36,6 +39,7 @@ import {
   type PlateItem,
 } from "./plater/plate";
 import { PlaterView } from "./plater/PlaterView";
+import { parseColour } from "./preview/preview";
 import { PreviewView } from "./preview/PreviewView";
 import { declared, MODES } from "./settings/catalog";
 import { SettingsForm } from "./settings/SettingsForm";
@@ -58,6 +62,15 @@ const DUPLICATE_OFFSET_MM = 10;
 const DEFAULT_RANGE_MM = 5;
 
 const EMPTY_CATALOG: ProfileCatalog = { machine: [], process: [], filament: [] };
+// A filament profile that names no colour is shown in the desktop's default.
+const DEFAULT_FILAMENT_COLOUR = "#F2754E";
+const DEFAULT_PRIME_TOWER_WIDTH = 35;
+
+/** One loaded filament: a bundled profile and the colour it prints in. */
+interface FilamentSlot {
+  profileId: string;
+  colour: string;
+}
 const DEFAULT_BED: Bed = parseBed(["0x0", "200x0", "200x200", "0x200"], "200");
 
 type Failure = { code: string; message: string; setting?: string };
@@ -71,6 +84,39 @@ function firstId(entries: ProfileEntry[], preferred?: string): string {
   const match = preferred ? entries.find((entry) => entry.name === preferred) : undefined;
   return (match ?? entries[0])?.profile_id ?? "";
 }
+
+/** Whether a filament suits the 1-based extruder of the selected printer. */
+const suitsExtruder = (entry: ProfileEntry, extruder: number) => !entry.extruders || entry.extruders.includes(extruder);
+
+/**
+ * The filaments to load on a printer: each slot keeps its profile where the
+ * printer accepts it on that slot's extruder, and otherwise takes the first
+ * that it does. `names` and `colours` restore a project's own choice.
+ */
+function pickFilaments(
+  entries: ProfileEntry[],
+  printer: ProfileEntry | undefined,
+  current: FilamentSlot[],
+  names?: string[],
+  colours?: string[],
+): FilamentSlot[] {
+  const limit = printer?.max_filaments ?? 16;
+  const wanted = names && names.length > 0 ? names.length : Math.max(1, current.length);
+  const extruderOf = (index: number) => ((printer?.extruder_count ?? 1) > 1 ? index + 1 : 1);
+  return Array.from({ length: Math.min(limit, wanted) }, (_, index) => {
+    const usable = entries.filter((entry) => suitsExtruder(entry, extruderOf(index)));
+    const kept = usable.find((entry) => entry.profile_id === current[index]?.profileId);
+    const profileId = kept?.profile_id ?? firstId(usable, names?.[index]);
+    const entry = entries.find((candidate) => candidate.profile_id === profileId);
+    const colour = colours?.[index] ?? (kept ? current[index].colour : entry?.colour) ?? DEFAULT_FILAMENT_COLOUR;
+    return { profileId, colour };
+  });
+}
+
+const colourHex = (colour: string) => {
+  const [r, g, b] = parseColour(colour);
+  return (r << 16) | (g << 8) | b;
+};
 
 async function waitForJob(jobId: string): Promise<Job> {
   for (;;) {
@@ -123,6 +169,7 @@ async function loadItems(
       name: object.name || "Object",
       mesh,
       center,
+      volumes: object.volumes,
     };
     const centred = {
       x: (minX + maxX) / 2,
@@ -165,7 +212,9 @@ export default function App() {
   const [printers, setPrinters] = useState<ProfileEntry[]>([]);
   const [machine, setMachine] = useState("");
   const [process, setProcess] = useState("");
-  const [filament, setFilament] = useState("");
+  const [filaments, setFilaments] = useState<FilamentSlot[]>([]);
+  // The first layer's filament order, 1-based; empty leaves it to the engine.
+  const [filamentOrder, setFilamentOrder] = useState<number[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [settingsCatalog, setSettingsCatalog] = useState<SettingsCatalog | null>(null);
   const [mode, setMode] = useState<SettingMode>("simple");
@@ -192,9 +241,15 @@ export default function App() {
   catalogRef.current = catalog;
   const settingsCatalogRef = useRef(settingsCatalog);
   settingsCatalogRef.current = settingsCatalog;
+  const filamentsRef = useRef(filaments);
+  filamentsRef.current = filaments;
   // Process and filament names an opened project asks for, applied once its
   // printer's narrowed lists arrive.
-  const restoreRef = useRef<{ process: string; filament?: string } | null>(null);
+  const restoreRef = useRef<{ process: string; filaments: string[]; colours?: string[] } | null>(null);
+  // The first filament stands for the chain whose values the settings show.
+  const filament = filaments[0]?.profileId ?? "";
+  const printer = printers.find((entry) => entry.profile_id === machine);
+  const multiMaterial = filaments.length > 1;
 
   // A removed plate falls back to the first one.
   const currentIndex = Math.max(
@@ -251,11 +306,20 @@ export default function App() {
       .then((narrowed) => {
         if (stale) return;
         setCatalog(narrowed);
-        const printer = narrowed.machine.find((entry) => entry.profile_id === machine);
+        const selectedPrinter = narrowed.machine.find((entry) => entry.profile_id === machine);
         const restoring = restoreRef.current;
         restoreRef.current = null;
-        setProcess(firstId(narrowed.process, restoring?.process ?? printer?.default_process));
-        setFilament(firstId(narrowed.filament, restoring?.filament));
+        setProcess(firstId(narrowed.process, restoring?.process ?? selectedPrinter?.default_process));
+        setFilaments(
+          pickFilaments(
+            narrowed.filament,
+            selectedPrinter,
+            restoring ? [] : filamentsRef.current,
+            restoring?.filaments,
+            restoring?.colours,
+          ),
+        );
+        setFilamentOrder([]);
       })
       .catch((error) => !stale && setFailure(describe(error)));
     return () => {
@@ -293,20 +357,22 @@ export default function App() {
    * current choice, and only overrides of catalog settings are kept.
    */
   const restoreProject = useCallback((project: ProjectSelection) => {
-    const printer = printersRef.current.find((entry) => entry.name === project.printer);
+    const projectPrinter = printersRef.current.find((entry) => entry.name === project.printer);
     const known = new Set(settingsCatalogRef.current?.settings.map((setting) => setting.key) ?? []);
     setSettings(Object.fromEntries(Object.entries(project.settings).filter(([key]) => known.has(key))));
-    if (!printer) {
+    if (!projectPrinter) {
       setNotice(`The project's printer "${project.printer}" is not available; the current profiles are kept.`);
       return;
     }
-    const wanted = { process: project.process, filament: project.filaments[0] };
-    if (printer.profile_id === machineRef.current) {
+    // Every filament the project loads is restored, with its colour.
+    const wanted = { process: project.process, filaments: project.filaments, colours: project.filament_colours };
+    if (projectPrinter.profile_id === machineRef.current) {
       setProcess(firstId(catalogRef.current.process, wanted.process));
-      setFilament(firstId(catalogRef.current.filament, wanted.filament));
+      setFilaments(pickFilaments(catalogRef.current.filament, projectPrinter, [], wanted.filaments, wanted.colours));
+      setFilamentOrder([]);
     } else {
       restoreRef.current = wanted;
-      setMachine(printer.profile_id);
+      setMachine(projectPrinter.profile_id);
     }
     setNotice(`Restored the project's profiles: ${[project.printer, project.process, ...project.filaments].join(", ")}.`);
   }, []);
@@ -422,6 +488,38 @@ export default function App() {
     showPlate(neighbour.id);
   }, [plates, plate, currentIndex, showPlate]);
 
+  const setSlot = useCallback((index: number, change: Partial<FilamentSlot>) => {
+    setFilaments((current) => current.map((slot, at) => (at === index ? { ...slot, ...change } : slot)));
+  }, []);
+
+  const addFilament = useCallback(() => {
+    setFilaments((current) => [...current, ...pickFilaments(catalogRef.current.filament, printersRef.current.find((entry) => entry.profile_id === machineRef.current), [...current, { profileId: "", colour: "" }]).slice(current.length)]);
+    setFilamentOrder([]);
+  }, []);
+
+  /** Unload a filament; objects that used it, or a later one, fall back to the first. */
+  const removeFilament = useCallback((index: number) => {
+    const shift = (extruder: number | undefined) =>
+      extruder === undefined || extruder < index + 1 ? extruder : extruder === index + 1 ? undefined : extruder - 1;
+    setFilaments((current) => current.filter((_, at) => at !== index));
+    setFilamentOrder([]);
+    setPlates((current) =>
+      current.map((entry) => ({
+        ...entry,
+        items: entry.items.map((item) => ({
+          ...item,
+          extruder: shift(item.extruder),
+          volumeExtruders: Object.fromEntries(
+            Object.entries(item.volumeExtruders ?? {}).flatMap(([volume, extruder]) => {
+              const moved = shift(extruder);
+              return moved === undefined ? [] : [[volume, moved]];
+            }),
+          ),
+        })),
+      })),
+    );
+  }, []);
+
   const selected = items.find((item) => item.id === selectedId) ?? null;
   // What an object inherits: the profile chain with the plate's overrides on top.
   const plateValues = useMemo(() => ({ ...profileValues, ...declared(settings) }), [profileValues, settings]);
@@ -473,12 +571,47 @@ export default function App() {
     [plates, bed],
   );
 
+  // One filament is submitted exactly as before multi-material plates; several
+  // are listed in extruder order, each with the colour it was given.
+  const material = (): MaterialSubmission =>
+    multiMaterial
+      ? {
+          filaments: filaments.map((slot) => ({ profile: slot.profileId, settings: { filament_colour: slot.colour } })),
+          filament_order: filamentOrder.length === filaments.length ? filamentOrder : undefined,
+        }
+      : { filament_profile: filament };
+
   const submission = () => ({
     machine_profile: machine,
     process_profile: process,
-    filament_profile: filament,
+    ...material(),
     settings: declared(settings),
   });
+
+  const towerWidth = Number(plateValues.prime_tower_width) || DEFAULT_PRIME_TOWER_WIDTH;
+  const towerOf = (entry: Plate) => (multiMaterial ? (entry.wipeTower ?? defaultWipeTower(bed, towerWidth)) : undefined);
+  const wipeTower = towerOf(plate);
+  const towerFootprint = useMemo(
+    () => (wipeTower ? { ...wipeTower, width: towerWidth } : undefined),
+    [wipeTower?.x, wipeTower?.y, towerWidth],
+  );
+  const itemColour = useMemo(
+    () => (multiMaterial ? (item: PlateItem) => colourHex(filaments[(item.extruder ?? 1) - 1]?.colour ?? "") : undefined),
+    [multiMaterial, filaments],
+  );
+
+  const setWipeTower = useCallback(
+    (change: Partial<{ x: number; y: number }>) =>
+      setPlates((current) =>
+        current.map((entry) =>
+          entry.id === plateRef.current
+            ? { ...entry, wipeTower: { ...(entry.wipeTower ?? defaultWipeTower(bedRef.current, towerWidth)), ...change } }
+            : entry,
+        ),
+      ),
+    [towerWidth],
+  );
+
 
   // A project is saved by a worker like any other job, then downloaded. It
   // holds the plate shown.
@@ -488,7 +621,14 @@ export default function App() {
     setSaved(null);
     try {
       const finished = await waitForJob(
-        (await exportProject({ ...submission(), objects: plateObjects(items), plate_index: plate.sourcePlate })).job_id,
+        (
+          await exportProject({
+            ...submission(),
+            objects: plateObjects(items),
+            plate_index: plate.sourcePlate,
+            wipe_tower: towerOf(plate),
+          })
+        ).job_id,
       );
       setSaved(finished);
       if (finished.state === "succeeded") download(finished.job_id, "project");
@@ -524,6 +664,7 @@ export default function App() {
           plate: currentIndex + 1,
           plate_name: target.name || undefined,
           plate_index: target.sourcePlate,
+          wipe_tower: towerOf(target),
         }),
       );
     });
@@ -542,6 +683,7 @@ export default function App() {
           plate: number,
           plate_index: entry.sourcePlate,
           name: entry.name || undefined,
+          wipe_tower: towerOf(entry),
         })),
       });
       for (const { entry, number } of numbered) {
@@ -563,7 +705,17 @@ export default function App() {
 
   const active = isActive(job);
   const anyActive = activeJobs !== "";
-  const profilesReady = Boolean(machine && process && filament) && loading.length === 0 && !busy;
+  // An object may not ask for a filament the plate does not load.
+  const unloaded = useMemo(
+    () => plates.some((entry) => highestExtruder(entry.items) > Math.max(1, filaments.length)),
+    [plates, filaments.length],
+  );
+  const profilesReady =
+    Boolean(machine && process && filament) &&
+    filaments.every((slot) => slot.profileId) &&
+    !unloaded &&
+    loading.length === 0 &&
+    !busy;
   const ready = items.length > 0 && outside.length === 0 && profilesReady && !active;
   const readyAll = plates.some((entry) => entry.items.length > 0) && !outsideAnywhere && profilesReady && !anyActive;
   // A project may be saved with objects outside the bed, as on the desktop.
@@ -635,6 +787,8 @@ export default function App() {
               picking={tools.pickMode !== null}
               onPick={tools.onPick}
               overlay={tools.overlay}
+              itemColour={itemColour}
+              wipeTower={towerFootprint}
             />
           ) : (
             <PreviewView key={job!.job_id} jobId={job!.job_id} />
@@ -708,6 +862,7 @@ export default function App() {
                 inherited={plateValues}
                 mode={mode}
                 invalidKey={invalidKey}
+                filaments={filaments}
                 onChange={(change) => update(selected.id, change)}
                 onMove={(targetId) => moveToPlate(selected.id, targetId)}
                 onDuplicate={() => duplicate(selected.id)}
@@ -720,14 +875,48 @@ export default function App() {
                 {outside.length === 1 ? "One object is" : `${outside.length} objects are`} outside the printable volume.
               </p>
             )}
+            {unloaded && (
+              <p className="failure" data-testid="unloaded-filament-warning" role="status">
+                An object uses a filament that is not loaded.
+              </p>
+            )}
           </section>
 
           <section>
             <h2>Profiles</h2>
             <ProfileSelect label="Printer" testId="printer-select" value={machine} entries={printers} onChange={setMachine} />
             <ProfileSelect label="Process" testId="process-select" value={process} entries={catalog.process} onChange={setProcess} />
-            <ProfileSelect label="Filament" testId="filament-select" value={filament} entries={catalog.filament} onChange={setFilament} />
+            <FilamentList
+              filaments={filaments}
+              entries={catalog.filament}
+              printer={printer}
+              onChange={setSlot}
+              onAdd={addFilament}
+              onRemove={removeFilament}
+            />
           </section>
+
+          {multiMaterial && (
+            <section data-testid="multi-material">
+              <h2>Multi-material</h2>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  data-testid="prime-tower"
+                  checked={String(plateValues.enable_prime_tower ?? "0") === "1"}
+                  onChange={(event) => setSettings((current) => ({ ...current, enable_prime_tower: event.target.checked ? "1" : "0" }))}
+                />
+                Prime tower
+              </label>
+              {wipeTower && (
+                <>
+                  <NumberField label="Tower X" testId="prime-tower-x" value={wipeTower.x} unit="mm" onCommit={(x) => setWipeTower({ x })} />
+                  <NumberField label="Tower Y" testId="prime-tower-y" value={wipeTower.y} unit="mm" onCommit={(y) => setWipeTower({ y })} />
+                </>
+              )}
+              <FirstLayerOrder filaments={filaments} order={filamentOrder} onChange={setFilamentOrder} />
+            </section>
+          )}
 
           <section>
             <details open>
@@ -912,6 +1101,7 @@ function ObjectPanel(props: {
   inherited: Record<string, ProfileValue>;
   mode: SettingMode;
   invalidKey?: string;
+  filaments: FilamentSlot[];
   onChange: (change: Partial<PlateItem>) => void;
   onMove: (plateId: string) => void;
   onDuplicate: () => void;
@@ -947,6 +1137,39 @@ function ObjectPanel(props: {
         step={5}
         onCommit={(percent) => percent > 0 && onChange({ scale: percent / 100 })}
       />
+      {props.filaments.length > 1 && (
+        <FilamentChoice
+          id="object-filament"
+          label="Filament"
+          filaments={props.filaments}
+          value={item.extruder}
+          onChange={(extruder) => onChange({ extruder })}
+        />
+      )}
+      {props.filaments.length > 1 &&
+        (item.volumes ?? []).filter((volume) => volume.type === "part" || volume.type === "modifier").length > 1 && (
+          <fieldset className="volumes" data-testid="object-volumes">
+            <legend>Parts</legend>
+            {(item.volumes ?? [])
+              .filter((volume) => volume.type === "part" || volume.type === "modifier")
+              .map((volume) => (
+                <FilamentChoice
+                  key={volume.index}
+                  id={`volume-filament-${volume.index}`}
+                  label={volume.name || `Part ${volume.index + 1}`}
+                  filaments={props.filaments}
+                  value={item.volumeExtruders?.[volume.index]}
+                  inherit="Object's filament"
+                  onChange={(extruder) => {
+                    const next = { ...item.volumeExtruders };
+                    if (extruder === undefined) delete next[volume.index];
+                    else next[volume.index] = extruder;
+                    onChange({ volumeExtruders: next });
+                  }}
+                />
+              ))}
+          </fieldset>
+        )}
       {props.plates.length > 1 && (
         <div className="field wide">
           <label htmlFor="object-plate">Plate</label>
@@ -1033,6 +1256,156 @@ function ObjectPanel(props: {
   );
 }
 
+/** A choice among the loaded filaments, or none to inherit. */
+function FilamentChoice(props: {
+  id: string;
+  label: string;
+  filaments: FilamentSlot[];
+  value?: number;
+  inherit?: string;
+  onChange: (extruder: number | undefined) => void;
+}) {
+  return (
+    <div className="field wide">
+      <label htmlFor={props.id}>{props.label}</label>
+      <select
+        id={props.id}
+        data-testid={props.id}
+        value={props.value ?? ""}
+        onChange={(event) => props.onChange(event.target.value ? Number(event.target.value) : undefined)}
+      >
+        <option value="">{props.inherit ?? "Default"}</option>
+        {props.filaments.map((_, index) => (
+          <option key={index} value={index + 1}>
+            Filament {index + 1}
+          </option>
+        ))}
+      </select>
+      {props.value !== undefined && (
+        <span className="swatch" style={{ background: props.filaments[props.value - 1]?.colour }} aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The filaments a plate loads, in extruder order. A printer with one nozzle
+ * and a filament changer takes several; a multi-nozzle printer one per nozzle,
+ * each from the filaments that nozzle accepts.
+ */
+function FilamentList(props: {
+  filaments: FilamentSlot[];
+  entries: ProfileEntry[];
+  printer?: ProfileEntry;
+  onChange: (index: number, change: Partial<FilamentSlot>) => void;
+  onAdd: () => void;
+  onRemove: (index: number) => void;
+}) {
+  const multiNozzle = (props.printer?.extruder_count ?? 1) > 1;
+  const limit = props.printer?.max_filaments ?? 16;
+  return (
+    <div className="filaments" data-testid="filament-list">
+      {props.filaments.map((slot, index) => {
+        const usable = props.entries.filter((entry) => suitsExtruder(entry, multiNozzle ? index + 1 : 1));
+        const id = index === 0 ? "filament-select" : `filament-select-${index + 1}`;
+        return (
+          <div className="field wide filament" key={index} data-testid="filament-slot">
+            <label htmlFor={`profile-${id}`}>{props.filaments.length > 1 ? `Filament ${index + 1}` : "Filament"}</label>
+            <input
+              type="color"
+              aria-label={`Colour of filament ${index + 1}`}
+              data-testid={`filament-colour-${index + 1}`}
+              value={/^#[0-9a-f]{6}/i.test(slot.colour) ? slot.colour.slice(0, 7) : DEFAULT_FILAMENT_COLOUR}
+              onChange={(event) => props.onChange(index, { colour: event.target.value.toUpperCase() })}
+            />
+            <select
+              id={`profile-${id}`}
+              data-testid={id}
+              value={slot.profileId}
+              disabled={usable.length === 0}
+              onChange={(event) => {
+                const entry = props.entries.find((candidate) => candidate.profile_id === event.target.value);
+                props.onChange(index, { profileId: event.target.value, ...(entry?.colour ? { colour: entry.colour } : {}) });
+              }}
+            >
+              {usable.map((entry) => (
+                <option key={entry.profile_id} value={entry.profile_id}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
+            {index > 0 && (
+              <button
+                type="button"
+                className="secondary"
+                data-testid={`filament-remove-${index + 1}`}
+                aria-label={`Remove filament ${index + 1}`}
+                onClick={() => props.onRemove(index)}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        className="secondary"
+        data-testid="add-filament"
+        disabled={props.filaments.length >= limit || props.entries.length === 0}
+        onClick={props.onAdd}
+      >
+        Add filament
+      </button>
+    </div>
+  );
+}
+
+/** The order in which the first layer prints the filaments, or the engine's own. */
+function FirstLayerOrder(props: { filaments: FilamentSlot[]; order: number[]; onChange: (order: number[]) => void }) {
+  const custom = props.order.length === props.filaments.length;
+  const order = custom ? props.order : props.filaments.map((_, index) => index + 1);
+  const raise = (position: number) => {
+    const next = [...order];
+    [next[position - 1], next[position]] = [next[position], next[position - 1]];
+    props.onChange(next);
+  };
+  return (
+    <div className="first-layer-order">
+      <label className="check">
+        <input
+          type="checkbox"
+          data-testid="custom-filament-order"
+          checked={custom}
+          onChange={(event) => props.onChange(event.target.checked ? order : [])}
+        />
+        Choose the first layer's filament order
+      </label>
+      {custom && (
+        <ol data-testid="filament-order">
+          {order.map((filament, position) => (
+            <li key={filament} data-testid="filament-order-item" data-filament={filament}>
+              <span className="swatch" style={{ background: props.filaments[filament - 1]?.colour }} aria-hidden="true" />
+              Filament {filament}
+              {position > 0 && (
+                <button
+                  type="button"
+                  className="link"
+                  data-testid={`filament-order-up-${filament}`}
+                  aria-label={`Print filament ${filament} earlier`}
+                  onClick={() => raise(position)}
+                >
+                  ↑
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 function ProfileSelect(props: {
   label: string;
   testId: string;
@@ -1104,6 +1477,12 @@ function JobPanel({ job }: { job: Job }) {
               </div>
             ) : null,
           )}
+          {(job.profiles.filaments ?? []).map((entry, index) => (
+            <div key={`filament-${index}`}>
+              <dt>filament {index + 1}</dt>
+              <dd data-testid={`job-chain-filament-${index + 1}`}>{entry.inherits_chain.join(" → ")}</dd>
+            </div>
+          ))}
         </dl>
       )}
       {Object.keys(job.request.settings ?? {}).length > 0 && (

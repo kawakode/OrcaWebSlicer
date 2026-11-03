@@ -22,7 +22,7 @@ from web_job_directory import (
     remove_job_directory,
     sweep_job_directories,
 )
-from web_profile_catalog import ProfileCatalog, ProfileCatalogError
+from web_profile_catalog import MAX_FILAMENTS, ProfileCatalog, ProfileCatalogError
 from web_settings_catalog import SettingsCatalog, SettingsCatalogError
 from web_worker_executor import ExecutorError, execute_worker, resolve_artifact_path
 
@@ -44,6 +44,8 @@ MAX_PLATE_UPLOADS = 16
 # The desktop's own plate-count ceiling bounds one batch.
 MAX_BATCH_PLATES = 36
 MAX_PLATE_NAME_CHARS = 64
+# Mirrors the worker's bound on the volumes of one object.
+MAX_OBJECT_VOLUMES = 256
 # One preview page is read in chunks, never held whole.
 MAX_PREVIEW_PAGE_BYTES = 256 * 1024 * 1024
 PREVIEW_CHUNK_BYTES = 1024 * 1024
@@ -106,6 +108,10 @@ class PlacedObject:
     instances: Tuple[Tuple[float, ...], ...] = ()
     settings: Dict[str, str] = dataclasses.field(default_factory=dict)
     layer_ranges: Tuple[LayerRange, ...] = ()
+    # The 1-based filament printing this object, and (volume, filament) pairs
+    # for the parts of a multi-part object. None keeps the file's own choice.
+    extruder: Optional[int] = None
+    volume_extruders: Tuple[Tuple[int, int], ...] = ()
 
     def describe(self) -> Dict[str, Any]:
         described: Dict[str, Any] = {
@@ -119,6 +125,29 @@ class PlacedObject:
             described["settings"] = dict(self.settings)
         if self.layer_ranges:
             described["layer_ranges"] = [layer_range.describe() for layer_range in self.layer_ranges]
+        if self.extruder is not None:
+            described["extruder"] = self.extruder
+        if self.volume_extruders:
+            described["volume_extruders"] = [
+                {"volume": volume, "extruder": extruder} for volume, extruder in self.volume_extruders
+            ]
+        return described
+
+    def highest_extruder(self) -> int:
+        return max([self.extruder or 1] + [extruder for _, extruder in self.volume_extruders])
+
+
+@dataclasses.dataclass(frozen=True)
+class FilamentChoice:
+    """One filament of a multi-material job: a bundled profile and its own overrides."""
+
+    profile: str
+    settings: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def describe(self) -> Dict[str, Any]:
+        described: Dict[str, Any] = {"profile": self.profile}
+        if self.settings:
+            described["settings"] = dict(self.settings)
         return described
 
 
@@ -148,6 +177,15 @@ class SliceRequest:
     # Embed rendered thumbnails in the G-code; slices only.
     thumbnails: bool = False
     edit: Optional[EditSpec] = None
+    # A multi-material job's filaments in extruder order, in place of
+    # `filament_profile`; the plate's prime tower corner; and the order in
+    # which the first layer prints the filaments.
+    filaments: Tuple[FilamentChoice, ...] = ()
+    wipe_tower: Optional[Tuple[float, float]] = None
+    filament_order: Tuple[int, ...] = ()
+
+    def filament_count(self) -> int:
+        return len(self.filaments) or 1
 
     def describe(self) -> Dict[str, Any]:
         described: Dict[str, Any] = {"operation": self.operation, "upload_id": self.upload_id}
@@ -165,6 +203,12 @@ class SliceRequest:
             )
             if self.objects:
                 described["objects"] = [placed.describe() for placed in self.objects]
+            if self.filaments:
+                described["filaments"] = [filament.describe() for filament in self.filaments]
+            if self.wipe_tower is not None:
+                described["wipe_tower"] = {"x": self.wipe_tower[0], "y": self.wipe_tower[1]}
+            if self.filament_order:
+                described["filament_order"] = list(self.filament_order)
         elif self.operation == "edit" and self.edit is not None:
             described["edit"] = self.edit.describe()
         if self.thumbnails:
@@ -394,23 +438,41 @@ class JobService:
         }
         inputs = [JobInput(models[upload.upload_id], upload.path, "model") for upload in uploads]
         selected: Dict[str, Any] = {}
+        chosen_filaments: List[Any] = []
         with tempfile.TemporaryDirectory(prefix="orca-profiles-") as staging:
             if request.operation in PLATE_OPERATIONS:
+                # The first filament stands in for the chain's filament, so the
+                # printer and process are checked exactly as for one filament.
+                filament_ids = [filament.profile for filament in request.filaments]
                 try:
                     selected = self._catalog.select(
-                        request.machine_profile, request.process_profile, request.filament_profile
+                        request.machine_profile,
+                        request.process_profile,
+                        filament_ids[0] if filament_ids else request.filament_profile,
                     )
                     profiles = self._catalog.materialize(
                         request.machine_profile,
                         request.process_profile,
-                        request.filament_profile,
+                        filament_ids[0] if filament_ids else request.filament_profile,
                         Path(staging),
+                    )
+                    chosen_filaments = (
+                        self._catalog.select_filaments(selected["machine"], filament_ids) if filament_ids else []
+                    )
+                    staged_filaments = self._catalog.materialize_filaments(
+                        chosen_filaments, Path(staging) / "filaments"
                     )
                 except ProfileCatalogError as error:
                     raise from_catalog_error(error) from error
+                if filament_ids:
+                    del profiles["filament"]
                 inputs += [
                     JobInput(f"profiles/{kind}.json", path, "profile")
                     for kind, path in sorted(profiles.items())
+                ]
+                inputs += [
+                    JobInput(f"profiles/filament-{index}.json", path, "profile")
+                    for index, path in enumerate(staged_filaments)
                 ]
             try:
                 prepared = prepare_job_directory(
@@ -431,10 +493,7 @@ class JobService:
             created_at=time.time(),
             retry_of=retry_of,
             batch_id=batch_id,
-            profiles={
-                kind: {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)}
-                for kind, entry in selected.items()
-            },
+            profiles=self._describe_profiles(selected, chosen_filaments),
         )
         with self._lock:
             self._jobs[job_id] = record
@@ -721,6 +780,20 @@ class JobService:
             raise ValueError("The edit published no model.")
         return derived
 
+    @staticmethod
+    def _describe_profiles(selected: Dict[str, Any], filaments: List[Any]) -> Dict[str, Any]:
+        described: Dict[str, Any] = {
+            kind: {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)}
+            for kind, entry in selected.items()
+        }
+        if filaments:
+            # Every filament is reported; `filament` would name only the first.
+            del described["filament"]
+            described["filaments"] = [
+                {"profile_id": entry.profile_id, "inherits_chain": list(entry.inherits_chain)} for entry in filaments
+            ]
+        return described
+
     def _validate(self, request: SliceRequest, upload_count: int) -> None:
         if request.operation == "inspect":
             if upload_count != 1 or request.objects:
@@ -737,6 +810,7 @@ class JobService:
             return
         if bool(request.upload_id) == bool(request.objects):
             raise ApiError("invalid_plate", "A slice names either upload_id or objects, not both.")
+        self._validate_filaments(request)
         if len(request.objects) > MAX_PLATE_OBJECTS or upload_count > MAX_PLATE_UPLOADS:
             raise ApiError(
                 "invalid_plate",
@@ -756,6 +830,33 @@ class JobService:
         if request.plate_name is not None and len(request.plate_name) > MAX_PLATE_NAME_CHARS:
             raise ApiError("invalid_plate", f"A plate name has at most {MAX_PLATE_NAME_CHARS} characters.")
         self._validate_settings(request.settings, "plate")
+
+    def _validate_filaments(self, request: SliceRequest) -> None:
+        if bool(request.filament_profile) == bool(request.filaments):
+            raise ApiError("invalid_filaments", "A plate names either filament_profile or filaments, not both.")
+        if len(request.filaments) > MAX_FILAMENTS:
+            raise ApiError("invalid_filaments", f"A job loads at most {MAX_FILAMENTS} filaments.")
+        for filament in request.filaments:
+            self._validate_settings(filament.settings, "filament")
+        count = request.filament_count()
+        for placed in request.objects:
+            if placed.extruder is not None and not 1 <= placed.extruder <= MAX_FILAMENTS:
+                raise ApiError("invalid_extruder", f"extruder is a filament number from 1 to {MAX_FILAMENTS}.")
+            if len(placed.volume_extruders) > MAX_OBJECT_VOLUMES or any(
+                not 0 <= volume < MAX_OBJECT_VOLUMES or not 1 <= extruder <= MAX_FILAMENTS
+                for volume, extruder in placed.volume_extruders
+            ):
+                raise ApiError("invalid_extruder", "A volume extruder names a 0-based volume and a filament number.")
+            if placed.highest_extruder() > count:
+                raise ApiError(
+                    "extruder_out_of_range",
+                    f"An object is assigned filament {placed.highest_extruder()}, but the plate loads {count}.",
+                    setting="extruder",
+                )
+        if len(set(request.filament_order)) != len(request.filament_order) or any(
+            not 1 <= filament <= count for filament in request.filament_order
+        ):
+            raise ApiError("invalid_filament_order", f"filament_order lists distinct filaments from 1 to {count}.")
 
     def _validate_settings(self, settings: Dict[str, str], level: str) -> None:
         if len(settings) > MAX_SETTINGS:
@@ -808,6 +909,18 @@ class JobService:
                 "settings": dict(request.settings),
                 "plate_index": request.plate_index,
             }
+            # Only stated when used, so a single-filament plate is staged
+            # exactly as before.
+            if request.filaments:
+                del payload["profiles"]["filament"]
+                payload["profiles"]["filaments"] = [
+                    {"profile": f"profiles/filament-{index}.json", "settings": dict(filament.settings)}
+                    for index, filament in enumerate(request.filaments)
+                ]
+            if request.wipe_tower is not None:
+                payload["wipe_tower"] = {"x": request.wipe_tower[0], "y": request.wipe_tower[1]}
+            if request.filament_order:
+                payload["filament_order"] = list(request.filament_order)
             if request.operation == "export_project":
                 payload["output_project"] = OUTPUT_PROJECT
             else:

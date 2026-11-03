@@ -3,7 +3,11 @@ import { BufferAttribute, BufferGeometry, Group, LineBasicMaterial, LineSegments
 
 import { readPreviewIndex, readPreviewPage } from "../api";
 import { createViewport, type Viewport } from "../viewport";
-import { decodeSegments, pageLayers, roleColor, type PreviewIndex } from "./preview";
+import { decodeSegments, pageLayers, roleColor, toolColor, type PreviewIndex } from "./preview";
+
+type ColourMode = "role" | "filament";
+
+const hex = ([r, g, b]: [number, number, number]) => (r << 16) | (g << 8) | b;
 
 // Small enough that the first layers draw quickly on a large print.
 const PAGE_BYTES = 8 * 1024 * 1024;
@@ -22,6 +26,8 @@ export function PreviewView({ jobId }: { jobId: string }) {
   const [top, setTop] = useState(0);
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  // A multi-material slice opens coloured by filament, as the desktop does.
+  const [mode, setMode] = useState<ColourMode>("role");
 
   useEffect(() => {
     const created = createViewport(host.current!);
@@ -48,6 +54,7 @@ export function PreviewView({ jobId }: { jobId: string }) {
       const read = await readPreviewIndex(jobId);
       if (stale) return;
       setIndex(read);
+      setMode(read.tools.length > 1 ? "filament" : "role");
       setTop(read.layers.length - 1);
       const box = read.bounding_box;
       if (box && viewport.current) {
@@ -62,25 +69,29 @@ export function PreviewView({ jobId }: { jobId: string }) {
         let segment = 0;
         for (let layer = start; layer <= end; layer++) {
           const count = read.layers[layer].count;
-          // One draw per role and layer, so a role or layer is hidden by
-          // toggling visibility instead of rebuilding buffers.
-          const byRole = new Map<number, number[]>();
+          // One draw per role, tool, and layer, so a role or layer is hidden
+          // and the colouring switched without rebuilding buffers.
+          const groups = new Map<number, number[]>();
           for (let i = segment; i < segment + count; i++) {
-            const list = byRole.get(page.roles[i]) ?? [];
+            const key = page.roles[i] * 256 + page.tools[i];
+            const list = groups.get(key) ?? [];
             list.push(i);
-            byRole.set(page.roles[i], list);
+            groups.set(key, list);
           }
-          for (const [role, members] of byRole) {
+          for (const [key, members] of groups) {
+            const role = Math.floor(key / 256);
+            const tool = key % 256;
             const positions = new Float32Array(members.length * 6);
             members.forEach((member, i) => positions.set(page.positions.subarray(member * 6, member * 6 + 6), i * 6));
-            const [r, g, b] = colors.get(role) ?? [128, 128, 128];
             const geometry = new BufferGeometry();
             geometry.setAttribute("position", new BufferAttribute(positions, 3));
+            const roleHex = hex(colors.get(role) ?? [128, 128, 128]);
+            const toolHex = hex(toolColor(read, tool));
             const lines = new LineSegments(
               geometry,
-              new LineBasicMaterial({ color: (r << 16) | (g << 8) | b }),
+              new LineBasicMaterial({ color: read.tools.length > 1 ? toolHex : roleHex }),
             );
-            lines.userData = { layer, role };
+            lines.userData = { layer, role, tool, roleHex, toolHex };
             layers.current.add(lines);
           }
           segment += count;
@@ -94,13 +105,17 @@ export function PreviewView({ jobId }: { jobId: string }) {
     };
   }, [jobId]);
 
-  // Visibility follows the slider and the role toggles without refetching.
+  // Visibility and colour follow the slider, the role toggles, and the
+  // colouring without refetching.
   useEffect(() => {
     for (const child of layers.current.children) {
       child.visible = child.userData.layer <= top && !hidden.has(child.userData.role);
+      ((child as LineSegments).material as LineBasicMaterial).color.setHex(
+        mode === "filament" ? child.userData.toolHex : child.userData.roleHex,
+      );
     }
     viewport.current?.render();
-  }, [top, hidden, loaded]);
+  }, [top, hidden, loaded, mode]);
 
   const used = useMemo(() => index?.roles.filter((role) => role.used) ?? [], [index]);
   const total = index?.layers.length ?? 0;
@@ -157,7 +172,33 @@ export function PreviewView({ jobId }: { jobId: string }) {
               );
             })}
           </ul>
-          {index.tools.length > 1 && <p>Tools: {index.tools.map((tool) => `T${tool}`).join(", ")}</p>}
+          {index.tools.length > 1 && (
+            <>
+              <div className="field wide">
+                <label htmlFor="preview-colour">Colour by</label>
+                <select
+                  id="preview-colour"
+                  data-testid="preview-colour"
+                  value={mode}
+                  onChange={(event) => setMode(event.target.value as ColourMode)}
+                >
+                  <option value="filament">Filament</option>
+                  <option value="role">Line type</option>
+                </select>
+              </div>
+              <ul className="legend" data-testid="preview-tools">
+                {index.tools.map((tool) => {
+                  const [r, g, b] = toolColor(index, tool);
+                  return (
+                    <li key={tool} data-testid="preview-tool" data-tool={tool}>
+                      <span className="swatch" style={{ background: `rgb(${r}, ${g}, ${b})` }} />
+                      Filament {tool + 1} (T{tool})
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          )}
         </div>
       )}
     </div>

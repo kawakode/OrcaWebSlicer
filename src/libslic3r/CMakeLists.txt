@@ -490,6 +490,8 @@ set(lisbslic3r_sources
     Web/ArtifactTransaction.hpp
     Web/ProfileCompatibility.cpp
     Web/ProfileCompatibility.hpp
+    Web/FilamentComposition.cpp
+    Web/FilamentComposition.hpp
     Web/ModelEdit.cpp
     Web/ModelEdit.hpp
     Web/ProjectArchive.cpp

@@ -12,6 +12,13 @@ export interface ProfileEntry {
   printer_model?: string;
   nozzle_diameter?: string;
   default_process?: string;
+  /** A printer's nozzle count, and how many filaments one of its jobs may load. */
+  extruder_count?: number;
+  max_filaments?: number;
+  /** A filament's own colour, `#RRGGBB`. */
+  colour?: string;
+  /** On a printer with several extruders, the 1-based extruders that accept this filament. */
+  extruders?: number[];
   /** Inherited profiles flattened into this one, root first, ending with it. */
   inherits_chain: string[];
 }
@@ -122,7 +129,10 @@ export interface Job {
   retry_of: string | null;
   /** The batch that sliced this plate with the rest of its project. */
   batch_id?: string | null;
-  profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>>;
+  profiles: Partial<Record<"machine" | "process" | "filament", { profile_id: string; inherits_chain: string[] }>> & {
+    /** A multi-material job's filaments, in extruder order. */
+    filaments?: { profile_id: string; inherits_chain: string[] }[];
+  };
   timing: { duration_ms: number; cpu_time_ms: number } | null;
   /** An edit's resulting models, each a new upload with its own inspection. */
   derived_uploads?: Upload[];

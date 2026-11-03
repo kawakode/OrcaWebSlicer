@@ -1,6 +1,7 @@
 #include "SinglePlateSlice.hpp"
 
 #include "ArtifactTransaction.hpp"
+#include "FilamentComposition.hpp"
 #include "PlateArtifacts.hpp"
 #include "PlateThumbnail.hpp"
 #include "ProjectArchive.hpp"
@@ -31,6 +32,7 @@
 #include <mutex>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -376,6 +378,7 @@ constexpr std::size_t MAX_PLATE_MODELS     = 16;
 constexpr double      MAX_TRANSLATION_MM   = 100000.;
 constexpr std::size_t MAX_SETTINGS         = 256;
 constexpr std::size_t MAX_LAYER_RANGES     = 32;
+constexpr std::size_t MAX_OBJECT_VOLUMES   = 256;
 
 // A placement is an affine, invertible transform in millimetres. Scale and
 // rotation are otherwise unconstrained, exactly as the desktop allows.
@@ -398,7 +401,8 @@ bool is_valid_transform(const std::array<double, 16> &values)
 // Reads a {key: serialized value} object. `allowed`, when given, refuses a key
 // the engine does not apply at that level, naming it for the client.
 bool read_settings(const nlohmann::json &described, SerializedSettings &settings, SinglePlateSliceRequestValidation &result,
-                   bool (*allowed)(const std::string &) = nullptr, const char *refusal = "")
+                   bool (*allowed)(const std::string &) = nullptr, const char *refusal = "",
+                   const char *refusal_code = "setting_not_per_object")
 {
     if (!described.is_object() || described.size() > MAX_SETTINGS) {
         add_error(result, "invalid_settings", "settings must be an object with at most 256 entries.");
@@ -410,12 +414,39 @@ bool read_settings(const nlohmann::json &described, SerializedSettings &settings
             return false;
         }
         if (allowed != nullptr && !allowed(item.key())) {
-            result.errors.push_back({"setting_not_per_object", item.key() + refusal, WorkerErrorCategory::Validation, item.key()});
+            result.errors.push_back({refusal_code, item.key() + refusal, WorkerErrorCategory::Validation, item.key()});
             return false;
         }
         settings.emplace_back(item.key(), item.value().get<std::string>());
     }
     return true;
+}
+
+bool is_filament_setting(const std::string &key)
+{
+    const std::vector<std::string> &keys = job_filament_options();
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+// A multi-material job lists its filaments in extruder order, each a profile
+// path and the overrides of that filament only.
+void read_filaments(const nlohmann::json &described, SinglePlateSliceRequest &request,
+                    SinglePlateSliceRequestValidation &result)
+{
+    if (!described.is_array() || described.empty() || described.size() > MAX_JOB_FILAMENTS) {
+        add_error(result, "invalid_filaments", "profiles.filaments must list 1 to 16 filaments.", WorkerErrorCategory::Profile);
+        return;
+    }
+    for (const nlohmann::json &entry : described) {
+        JobFilament filament;
+        if (!entry.is_object() || !read_profile_path(entry, "profile", filament.profile, result))
+            return;
+        if (const auto settings = entry.find("settings"); settings != entry.end() &&
+            !read_settings(*settings, filament.settings, result, &is_filament_setting, " is not a filament setting.",
+                           "setting_not_per_filament"))
+            return;
+        request.filaments.push_back(std::move(filament));
+    }
 }
 
 // Height ranges are measured from the object's bottom, may not overlap, and
@@ -459,6 +490,49 @@ bool read_layer_ranges(const nlohmann::json &described, PlateObject &object, Sin
             add_error(result, "invalid_layer_ranges", "Layer ranges of one object may not overlap.", WorkerErrorCategory::Input);
             return false;
         }
+    return true;
+}
+
+bool read_extruder_number(const nlohmann::json &value, unsigned &target)
+{
+    if (!value.is_number_unsigned() || value.get<std::uint64_t>() == 0 || value.get<std::uint64_t>() > MAX_JOB_FILAMENTS)
+        return false;
+    target = value.get<unsigned>();
+    return true;
+}
+
+// An object's filament, and the filament of any of its volumes, are 1-based
+// filament numbers. Whether the job loads that many filaments is checked once
+// the profiles are read.
+bool read_extruders(const nlohmann::json &described, PlateObject &object, SinglePlateSliceRequestValidation &result)
+{
+    if (const auto extruder = described.find("extruder");
+        extruder != described.end() && !read_extruder_number(*extruder, object.extruder)) {
+        add_error(result, "invalid_extruder", "extruder must be a filament number from 1 to 16.", WorkerErrorCategory::Input);
+        return false;
+    }
+    const auto volumes = described.find("volume_extruders");
+    if (volumes == described.end())
+        return true;
+    if (!volumes->is_array() || volumes->size() > MAX_OBJECT_VOLUMES) {
+        add_error(result, "invalid_extruder", "volume_extruders must be an array of at most 256 volumes.",
+                  WorkerErrorCategory::Input);
+        return false;
+    }
+    for (const nlohmann::json &entry : *volumes) {
+        PlateVolumeExtruder read;
+        const auto volume   = entry.is_object() ? entry.find("volume") : entry.end();
+        const auto extruder = entry.is_object() ? entry.find("extruder") : entry.end();
+        if (volume == entry.end() || extruder == entry.end() || !volume->is_number_unsigned() ||
+            volume->get<std::uint64_t>() >= MAX_OBJECT_VOLUMES || !read_extruder_number(*extruder, read.extruder)) {
+            add_error(result, "invalid_extruder",
+                      "Every volume extruder names a 0-based volume and a filament number from 1 to 16.",
+                      WorkerErrorCategory::Input);
+            return false;
+        }
+        read.volume = volume->get<unsigned>();
+        object.volume_extruders.push_back(read);
+    }
     return true;
 }
 
@@ -525,11 +599,45 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
         const auto layer_ranges = described.find("layer_ranges");
         if (layer_ranges != described.end() && !read_layer_ranges(*layer_ranges, object, result))
             return;
+        if (!read_extruders(described, object, result))
+            return;
         request.objects.push_back(std::move(object));
     }
     if (models.size() > MAX_PLATE_MODELS)
         add_error(result, "invalid_plate_objects", "A plate may reference at most 16 model files.",
                   WorkerErrorCategory::Input);
+}
+
+// Reads the plate-level multi-material choices the desktop keeps per plate:
+// where the prime tower stands and the first layer's filament order.
+void read_multi_material(const nlohmann::json &payload, SinglePlateSliceRequest &request,
+                         SinglePlateSliceRequestValidation &result)
+{
+    if (const auto tower = payload.find("wipe_tower"); tower != payload.end()) {
+        const auto x = tower->is_object() ? tower->find("x") : tower->end();
+        const auto y = tower->is_object() ? tower->find("y") : tower->end();
+        if (x == tower->end() || y == tower->end() || !x->is_number() || !y->is_number() ||
+            !std::isfinite(x->get<double>()) || !std::isfinite(y->get<double>()) ||
+            std::abs(x->get<double>()) > MAX_TRANSLATION_MM || std::abs(y->get<double>()) > MAX_TRANSLATION_MM)
+            add_error(result, "invalid_wipe_tower", "wipe_tower needs finite x and y in millimetres.", WorkerErrorCategory::Input);
+        else
+            request.wipe_tower = std::array<double, 2> {x->get<double>(), y->get<double>()};
+    }
+    if (const auto order = payload.find("filament_order"); order != payload.end()) {
+        bool readable = order->is_array() && order->size() <= MAX_JOB_FILAMENTS;
+        for (std::size_t index = 0; readable && index < order->size(); ++index) {
+            unsigned filament = 0;
+            readable = read_extruder_number((*order)[index], filament) &&
+                       std::find(request.filament_order.begin(), request.filament_order.end(), filament) ==
+                           request.filament_order.end();
+            request.filament_order.push_back(filament);
+        }
+        if (!readable) {
+            request.filament_order.clear();
+            add_error(result, "invalid_filament_order", "filament_order lists distinct filament numbers from 1 to 16.",
+                      WorkerErrorCategory::Input);
+        }
+    }
 }
 
 // An edit produces at most an upper and a lower part.
@@ -747,8 +855,100 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
                 return applied;
             object->layer_config_ranges[{range.min_z, range.max_z}].assign_config(std::move(range_overrides));
         }
+        if (placed.extruder != 0)
+            object->config.set("extruder", int(placed.extruder));
+        for (const PlateVolumeExtruder &assigned : placed.volume_extruders) {
+            if (assigned.volume >= object->volumes.size())
+                return failure("unknown_model_volume", "A volume index does not exist in its object.",
+                               WorkerErrorCategory::Input);
+            object->volumes[assigned.volume]->config.set("extruder", int(assigned.extruder));
+        }
     }
     return {true, {}, {}, WorkerErrorCategory::Input};
+}
+
+// Refuses a filament the job does not load, before the engine silently prints
+// it with another one.
+SinglePlateSliceResult check_extruders(const SinglePlateSliceRequest &request, const DynamicPrintConfig &config)
+{
+    const std::size_t loaded = config.option<ConfigOptionFloats>("filament_diameter")->size();
+    for (const PlateObject &placed : request.objects) {
+        unsigned highest = placed.extruder;
+        for (const PlateVolumeExtruder &assigned : placed.volume_extruders)
+            highest = std::max(highest, assigned.extruder);
+        if (highest > loaded) {
+            SinglePlateSliceResult refused =
+                failure("extruder_out_of_range",
+                        "An object is assigned filament " + std::to_string(highest) + ", but the job loads " +
+                            std::to_string(loaded) + ".",
+                        WorkerErrorCategory::Validation);
+            refused.setting = "extruder";
+            return refused;
+        }
+    }
+    return {true, {}, {}, WorkerErrorCategory::Validation};
+}
+
+SinglePlateSliceResult apply_multi_material(const SinglePlateSliceRequest &request, DynamicPrintConfig &config)
+{
+    if (request.wipe_tower) {
+        config.set_key_value("wipe_tower_x", new ConfigOptionFloats {(*request.wipe_tower)[0]});
+        config.set_key_value("wipe_tower_y", new ConfigOptionFloats {(*request.wipe_tower)[1]});
+    }
+    if (request.filament_order.empty())
+        return {true, {}, {}, WorkerErrorCategory::Validation};
+    const std::size_t loaded = config.option<ConfigOptionFloats>("filament_diameter")->size();
+    if (*std::max_element(request.filament_order.begin(), request.filament_order.end()) > loaded) {
+        SinglePlateSliceResult refused = failure("extruder_out_of_range", "filament_order names a filament the job does not load.",
+                                                 WorkerErrorCategory::Validation);
+        refused.setting = "first_layer_print_sequence";
+        return refused;
+    }
+    config.set_key_value("first_layer_print_sequence",
+                         new ConfigOptionInts(std::vector<int>(request.filament_order.begin(), request.filament_order.end())));
+    return {true, {}, {}, WorkerErrorCategory::Validation};
+}
+
+SinglePlateSliceResult load_profile(const std::filesystem::path &job_root, const std::string &relative_path,
+                                    DynamicPrintConfig &profile)
+{
+    ConfigSubstitutionContext          substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    std::map<std::string, std::string> metadata;
+    std::string                        reason;
+    std::filesystem::path              resolved;
+    WorkerManifestError                path_error;
+    if (!resolve_job_file(job_root, relative_path, WorkerErrorCategory::Profile, resolved, path_error))
+        return failure(path_error.code, path_error.message, path_error.category);
+    if (profile.load_from_json(resolved.string(), substitutions, true, metadata, reason) != 0)
+        return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason,
+                       WorkerErrorCategory::Profile);
+    return {true, {}, {}, WorkerErrorCategory::Profile};
+}
+
+// Loads every filament of a multi-material job and merges them into `config`.
+// A plate-wide override of a filament setting applies to every filament, and
+// a filament's own overrides then win for that filament.
+SinglePlateSliceResult load_filaments(const SinglePlateSliceRequest &request, const std::filesystem::path &job_root,
+                                      DynamicPrintConfig &config, const std::function<void()> &throw_if_canceled)
+{
+    SerializedSettings shared;
+    for (const auto &setting : request.settings)
+        if (is_filament_setting(setting.first))
+            shared.push_back(setting);
+    std::vector<DynamicPrintConfig> filaments(request.filaments.size());
+    for (std::size_t index = 0; index < request.filaments.size(); ++index) {
+        if (const SinglePlateSliceResult loaded = load_profile(job_root, request.filaments[index].profile, filaments[index]);
+            !loaded.success)
+            return loaded;
+        for (const SerializedSettings *settings : {&std::as_const(shared), &request.filaments[index].settings})
+            if (SinglePlateSliceResult applied = apply_settings(*settings, filaments[index]); !applied.success) {
+                applied.message = "Filament " + std::to_string(index + 1) + ": " + applied.message;
+                return applied;
+            }
+        throw_if_canceled();
+    }
+    compose_filaments(config, filaments);
+    return {true, {}, {}, WorkerErrorCategory::Profile};
 }
 
 // Refuses a submitted placement that leaves the printable volume, which the
@@ -870,6 +1070,8 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
     const auto settings = payload.find("settings");
     if (settings != payload.end())
         read_settings(*settings, request.settings, result);
+    if (!inspecting)
+        read_multi_material(payload, request, result);
 
     const auto limits = payload.find("limits");
     if (limits != payload.end()) {
@@ -904,7 +1106,13 @@ SinglePlateSliceRequestValidation validate_single_plate_slice_request(std::strin
         } else {
             read_profile_path(*profiles, "machine", request.machine_profile, result);
             read_profile_path(*profiles, "process", request.process_profile, result);
-            read_profile_path(*profiles, "filament", request.filament_profile, result);
+            if (const auto filaments = profiles->find("filaments"); filaments == profiles->end())
+                read_profile_path(*profiles, "filament", request.filament_profile, result);
+            else if (profiles->contains("filament"))
+                add_error(result, "invalid_filaments", "profiles name either filament or filaments, not both.",
+                          WorkerErrorCategory::Profile);
+            else
+                read_filaments(*filaments, request, result);
         }
     }
 
@@ -965,22 +1173,33 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
         for (const std::string *profile_path : {&request.machine_profile, &request.process_profile, &request.filament_profile}) {
             if (profile_path->empty())
                 continue;
-
             DynamicPrintConfig profile;
-            ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
-            std::map<std::string, std::string> metadata;
-            std::string reason;
-            std::filesystem::path resolved_profile;
-            if (!resolve_job_file(job_root, *profile_path, WorkerErrorCategory::Profile, resolved_profile, path_error))
-                return failure(path_error.code, path_error.message, path_error.category);
-            if (profile.load_from_json(resolved_profile.string(), substitutions, true, metadata, reason) != 0)
-                return failure("profile_load_failed", reason.empty() ? "A resolved profile could not be loaded." : reason,
-                               WorkerErrorCategory::Profile);
+            if (const SinglePlateSliceResult loaded = load_profile(job_root, *profile_path, profile); !loaded.success)
+                return loaded;
             config.apply(profile);
             throw_if_canceled();
         }
-        if (const SinglePlateSliceResult applied = apply_settings(request.settings, config); !applied.success)
+        // A single-filament job keeps applying every override to the whole
+        // configuration, exactly as before multi-material jobs existed.
+        if (request.filaments.empty()) {
+            if (const SinglePlateSliceResult applied = apply_settings(request.settings, config); !applied.success)
+                return applied;
+        } else {
+            if (const SinglePlateSliceResult loaded = load_filaments(request, job_root, config, throw_if_canceled);
+                !loaded.success)
+                return loaded;
+            SerializedSettings plate_settings;
+            for (const auto &setting : request.settings)
+                if (!is_filament_setting(setting.first))
+                    plate_settings.push_back(setting);
+            if (const SinglePlateSliceResult applied = apply_settings(plate_settings, config); !applied.success)
+                return applied;
+        }
+        if (const SinglePlateSliceResult assigned = check_extruders(request, config); !assigned.success)
+            return assigned;
+        if (const SinglePlateSliceResult applied = apply_multi_material(request, config); !applied.success)
             return applied;
+        fill_flush_volumes(config);
         // The engine reads a height range's layer height unconditionally, so a
         // range that leaves it alone keeps the object's own.
         for (ModelObject *object : model.objects)
@@ -1082,7 +1301,8 @@ SinglePlateSliceResult slice_single_plate(const SinglePlateSliceRequest &request
             if (!preview_index)
                 return failure(path_error.code, path_error.message, path_error.category);
             std::string preview_error;
-            if (!write_gcode_preview(processed, preview->temporary_path(), preview_index->temporary_path(), preview_error))
+            if (!write_gcode_preview(processed, preview->temporary_path(), preview_index->temporary_path(), preview_error,
+                                     config.option<ConfigOptionStrings>("filament_colour")->values))
                 return failure("preview_export_failed", preview_error);
         }
 

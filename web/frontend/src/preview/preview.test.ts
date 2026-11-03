@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeSegments, pageLayers, roleColor, type PreviewLayer } from "./preview";
+import { decodeSegments, pageLayers, parseColour, roleColor, toolColor, type PreviewIndex, type PreviewLayer } from "./preview";
 
 function record(values: number[], role: number, tool: number): ArrayBuffer {
   const buffer = new ArrayBuffer(36);
@@ -44,5 +44,19 @@ describe("preview decoding", () => {
   it("colours roles like the desktop viewer", () => {
     expect(roleColor("Outer wall")).toEqual([255, 125, 56]);
     expect(roleColor("Something new")).toEqual([128, 128, 128]);
+  });
+});
+
+describe("filament colours", () => {
+  it("reads a filament colour with or without alpha", () => {
+    expect(parseColour("#00AE42")).toEqual([0, 174, 66]);
+    expect(parseColour("#00ae42ff")).toEqual([0, 174, 66]);
+    expect(parseColour("orange")).toEqual([128, 128, 128]);
+  });
+
+  it("colours a tool with the filament the slice named for it", () => {
+    const index = { tools: [0, 1], tool_colours: ["#FF0000", "#0000FF"] } as PreviewIndex;
+    expect(toolColor(index, 1)).toEqual([0, 0, 255]);
+    expect(toolColor({ ...index, tool_colours: undefined }, 1)).toEqual([128, 128, 128]);
   });
 });

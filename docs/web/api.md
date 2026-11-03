@@ -91,6 +91,34 @@ invalid or overlapping range is `invalid_layer_ranges`. Both are passed to the
 [worker](worker-protocol.md#plate-composition) unchanged, and only stated in a
 job's `request` when used.
 
+A multi-material request names `filaments` instead of `filament_profile`,
+exactly one of the two: 1 to 16 entries in tool order, each a filament
+`profile` and optional per-filament `settings` (filament settings only,
+otherwise `setting_not_per_filament`). An object puts itself on a filament with
+`extruder` (1-based), and the parts of a 3MF object with `volume_extruders`;
+`wipe_tower` places the prime tower, per plate in a batch, and
+`filament_order` sets the first layer's order:
+
+```json
+{
+  "objects": [{"upload_id": "3f2a...", "instances": [...], "extruder": 2}],
+  "machine_profile": "...", "process_profile": "...",
+  "filaments": [
+    {"profile": "Anycubic/filament/Anycubic Generic PLA"},
+    {"profile": "Anycubic/filament/Anycubic Generic PLA", "settings": {"filament_colour": "#0000FF"}}
+  ],
+  "settings": {"enable_prime_tower": "1"},
+  "wipe_tower": {"x": 170, "y": 20}
+}
+```
+
+Every filament must suit the printer: a multi-nozzle printer takes at most one
+filament per extruder, filament *n* on extruder *n*, each judged against that
+extruder's nozzle; a single-nozzle printer takes up to 16
+(`too_many_filaments`, `incompatible_profile`). An object on a filament the
+request does not load is `extruder_out_of_range`. The job's `profiles` then
+lists `filaments`, each with its chain.
+
 A slice request may add `"thumbnails": true` to embed rendered thumbnails in
 the G-code; it is off by default. `POST /projects` takes the same body without
 `thumbnails` and starts a job that saves the plate as a desktop-compatible 3MF
@@ -258,6 +286,10 @@ parser against every bundled printer; the API never interprets the expression
 language. A condition the engine cannot parse is treated as compatible, again
 as on the desktop. A profile that declares no restriction is offered for every
 printer.
+
+Machines list `extruder_count` and `max_filaments`, and filaments their
+default `colour`. With `?printer=`, a filament is kept when any extruder accepts
+it, and on a multi-extruder printer it lists the 1-based `extruders` that do.
 
 A selected chain is flattened once, at submission, into three job-local JSON
 files. The worker therefore never reads the bundled profile tree and never

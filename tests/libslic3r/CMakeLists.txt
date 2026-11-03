@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
     test_project_archive.cpp
     test_settings_catalog.cpp
     test_plate_artifacts.cpp
+    test_filament_composition.cpp
     test_project_export.cpp
     test_model_edit.cpp
     test_optimizers.cpp

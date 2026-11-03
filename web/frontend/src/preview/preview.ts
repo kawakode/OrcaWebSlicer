@@ -14,6 +14,8 @@ export interface PreviewIndex {
   segment_bytes: number;
   roles: { id: number; name: string; used: boolean }[];
   tools: number[];
+  /** The filament colour each tool number indexes, when the slice named them. */
+  tool_colours?: string[];
   layers: PreviewLayer[];
   bounding_box?: { min: [number, number, number]; max: [number, number, number] };
 }
@@ -53,6 +55,19 @@ const ROLE_COLORS: Record<string, [number, number, number]> = {
 
 export function roleColor(name: string): [number, number, number] {
   return ROLE_COLORS[name] ?? [128, 128, 128];
+}
+
+/** A `#RRGGBB` or `#RRGGBBAA` colour as RGB, or grey when it cannot be read. */
+export function parseColour(colour: string | undefined): [number, number, number] {
+  const match = /^#([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(colour ?? "");
+  if (!match) return [128, 128, 128];
+  const value = parseInt(match[1], 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+/** The colour a tool's segments are drawn in: its filament's, as the desktop's filament view does. */
+export function toolColor(index: PreviewIndex, tool: number): [number, number, number] {
+  return parseColour(index.tool_colours?.[tool]);
 }
 
 /** Decode one page of 36-byte records, as streamed for a layer range. */

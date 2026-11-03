@@ -46,6 +46,7 @@ _SETTINGS_STATUS: Dict[str, int] = {
     "unavailable_setting": 422,
     "invalid_setting_value": 422,
     "setting_not_per_object": 422,
+    "setting_not_per_filament": 422,
 }
 
 

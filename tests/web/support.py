@@ -28,8 +28,14 @@ if sys.argv[2] == "--evaluate-compatibility":
         assert (Path(sys.argv[3]).parent / printer["profile"]).is_file(), "the printer was not staged"
     # A condition names the printers it accepts; the real worker runs the
     # engine's placeholder parser instead.
+    def accepts(condition, printer):
+        if condition.startswith("nozzle_diameter[0]=="):
+            staged = json.loads((Path(sys.argv[3]).parent / printer["profile"]).read_text(encoding="utf-8"))
+            return staged["nozzle_diameter"][0] == condition.split("==", 1)[1]
+        return printer["name"] in condition
+
     answer = {
-        candidate["id"]: [p["id"] for p in request["printers"] if p["name"] in candidate["condition"]]
+        candidate["id"]: [p["id"] for p in request["printers"] if accepts(candidate["condition"], p)]
         for candidate in request["candidates"]
     }
     print(json.dumps({"catalog_version": 1, "compatibility": answer, "unevaluated": []}))
@@ -79,8 +85,12 @@ models = [placed["model"] for placed in payload.get("objects", [])] or [payload[
 for model in models:
     assert (job_root / model).is_file(), "the model was not staged"
 if request["operation"]["name"] in ("slice", "export_project"):
-    for name in ("machine", "process", "filament"):
-        assert (job_root / payload["profiles"][name]).is_file(), name + " profile was not staged"
+    profiles = payload["profiles"]
+    staged = [profiles["machine"], profiles["process"]]
+    staged += [filament["profile"] for filament in profiles["filaments"]] if "filaments" in profiles \
+        else [profiles["filament"]]
+    for path in staged:
+        assert (job_root / path).is_file(), path + " profile was not staged"
 
 event("state", state="accepted")
 event("state", state="running")
@@ -229,6 +239,9 @@ def write_fake_worker(root: Path) -> Path:
 VENDOR = "Testing"
 MACHINE_ID = f"{VENDOR}/machine/Test Printer 0.4 nozzle"
 OTHER_MACHINE_ID = f"{VENDOR}/machine/Other Printer 0.4 nozzle"
+DUAL_MACHINE_ID = f"{VENDOR}/machine/Dual Printer"
+PETG_ID = f"{VENDOR}/filament/Test Generic PETG"
+WIDE_NOZZLE_FILAMENT_ID = f"{VENDOR}/filament/Test 0.6 nozzle PLA"
 PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Test"
 FILAMENT_ID = f"{VENDOR}/filament/Test Generic PLA"
 OTHER_PROCESS_ID = f"{VENDOR}/process/0.20mm Standard @Other"
@@ -279,6 +292,17 @@ def write_profile_tree(repo_root: Path) -> Path:
         "printer_model": "Other Printer",
         "nozzle_diameter": ["0.4"],
     })
+    # Two nozzles, each fed its own filament.
+    publish("machine", {
+        "type": "machine",
+        "name": "Dual Printer",
+        "inherits": "fdm_machine_common",
+        "from": "system",
+        "instantiation": "true",
+        "printer_model": "Dual Printer",
+        "nozzle_diameter": ["0.4", "0.6"],
+        "single_extruder_multi_material": "0",
+    })
     # A vendor lists its inheritance bases too; they are not user choices.
     listed["machine_list"].append({"name": "fdm_machine_common", "sub_path": machine_base})
     publish("process", {
@@ -317,6 +341,24 @@ def write_profile_tree(repo_root: Path) -> Path:
         "from": "system",
         "instantiation": "true",
     }, "Branded/")
+    publish("filament", {
+        "type": "filament",
+        "name": "Test Generic PETG",
+        "inherits": "fdm_filament_pla",
+        "from": "system",
+        "instantiation": "true",
+        "filament_type": ["PETG"],
+        "filament_colour": ["#00AE42"],
+    })
+    # Only a 0.6 mm nozzle accepts it, which the engine decides per extruder.
+    publish("filament", {
+        "type": "filament",
+        "name": "Test 0.6 nozzle PLA",
+        "inherits": "fdm_filament_pla",
+        "from": "system",
+        "instantiation": "true",
+        "compatible_printers_condition": "nozzle_diameter[0]==0.6",
+    })
     listed["machine_list"].append({"name": "Escaping", "sub_path": "../../../etc/passwd"})
 
     index = {"name": VENDOR, "version": "01.00.00.00"}

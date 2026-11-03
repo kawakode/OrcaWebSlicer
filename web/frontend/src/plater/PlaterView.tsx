@@ -23,7 +23,7 @@ import { createViewport, type Viewport } from "../viewport";
 import type { PickHit, ToolOverlay } from "./ObjectTools";
 import { bedBounds, fitsBed, itemBounds, itemMatrix, type Bed, type PlateItem } from "./plate";
 
-const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c, tool: 0xf2b134 };
+const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c, tool: 0xf2b134, tower: 0xb3e3ab };
 
 /**
  * Draws the bed and every item, and turns pointer gestures into selection and
@@ -40,12 +40,17 @@ export function PlaterView(props: {
   picking?: boolean;
   onPick?: (hit: PickHit) => void;
   overlay?: ToolOverlay;
+  /** The colour an unselected item that fits is drawn in: its filament's, when there are several. */
+  itemColour?: (item: PlateItem) => number | undefined;
+  /** A multi-material plate's prime tower footprint, front left corner and width in millimetres. */
+  wipeTower?: { x: number; y: number; width: number };
 }) {
   const host = useRef<HTMLDivElement>(null);
   const viewport = useRef<Viewport | null>(null);
   const objects = useRef(new Group());
   const bedGroup = useRef(new Group());
   const overlayGroup = useRef(new Group());
+  const towerGroup = useRef(new Group());
   const geometries = useRef(new Map<string, BufferGeometry>());
   const latest = useRef(props);
   latest.current = props;
@@ -53,7 +58,7 @@ export function PlaterView(props: {
   useEffect(() => {
     const created = createViewport(host.current!);
     viewport.current = created;
-    created.scene.add(bedGroup.current, objects.current, overlayGroup.current);
+    created.scene.add(bedGroup.current, objects.current, overlayGroup.current, towerGroup.current);
 
     const raycaster = new Raycaster();
     const pointer = new Vector2();
@@ -157,7 +162,11 @@ export function PlaterView(props: {
         geometries.current.set(key, geometry);
       }
       const color =
-        item.id === props.selectedId ? COLORS.selected : fitsBed(item, props.bed) ? COLORS.idle : COLORS.outside;
+        item.id === props.selectedId
+          ? COLORS.selected
+          : fitsBed(item, props.bed)
+            ? (props.itemColour?.(item) ?? COLORS.idle)
+            : COLORS.outside;
       const mesh = new Mesh(geometry, new MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 }));
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(itemMatrix(item));
@@ -165,7 +174,29 @@ export function PlaterView(props: {
       objects.current.add(mesh);
     }
     view.render();
-  }, [props.items, props.selectedId, props.bed]);
+  }, [props.items, props.selectedId, props.bed, props.itemColour]);
+
+  // The tower's depth depends on the purge volumes the engine computes, so
+  // only its square base is drawn, and it is never picked.
+  useEffect(() => {
+    const view = viewport.current;
+    if (!view) return;
+    towerGroup.current.children.forEach((child) => {
+      (child as Mesh).geometry.dispose();
+      ((child as Mesh).material as MeshBasicMaterial).dispose();
+    });
+    towerGroup.current.clear();
+    const tower = props.wipeTower;
+    if (tower) {
+      const base = new Mesh(
+        new PlaneGeometry(tower.width, tower.width),
+        new MeshBasicMaterial({ color: COLORS.tower, transparent: true, opacity: 0.6, side: DoubleSide }),
+      );
+      base.position.set(tower.x + tower.width / 2, tower.y + tower.width / 2, 0.05);
+      towerGroup.current.add(base);
+    }
+    view.render();
+  }, [props.wipeTower?.x, props.wipeTower?.y, props.wipeTower?.width]);
 
   // The open tool's guides: the cut plane across its item, and measured points.
   useEffect(() => {

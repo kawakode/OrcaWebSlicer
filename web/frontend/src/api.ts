@@ -105,15 +105,38 @@ export interface PlacedObjectSubmission {
   /** Overrides of the plate's settings for this object only. */
   settings?: Record<string, string>;
   layer_ranges?: LayerRangeSubmission[];
+  /** The 1-based filament of the object, and of any of its parts. */
+  extruder?: number;
+  volume_extruders?: { volume: number; extruder: number }[];
 }
 
-export interface PlateSubmission {
+/** One filament of a multi-material plate and the overrides of that filament only. */
+export interface FilamentSubmission {
+  profile: string;
+  settings?: Record<string, string>;
+}
+
+/** A plate names one `filament_profile`, or the `filaments` of a multi-material job. */
+export interface MaterialSubmission {
+  filament_profile?: string;
+  filaments?: FilamentSubmission[];
+  /** The order in which the first layer prints the filaments, 1-based. */
+  filament_order?: number[];
+}
+
+/** The front left corner of a plate's prime tower, in millimetres. */
+export interface WipeTower {
+  x: number;
+  y: number;
+}
+
+export interface PlateSubmission extends MaterialSubmission {
   upload_id?: string;
   objects?: PlacedObjectSubmission[];
   machine_profile: string;
   process_profile: string;
-  filament_profile: string;
   settings: Record<string, string>;
+  wipe_tower?: WipeTower;
   /** The archive plate whose own settings apply. */
   plate_index?: number;
   /** The project's plate this slices, which names its artifacts. */
@@ -136,16 +159,16 @@ function post<T>(path: string, body: unknown): Promise<T> {
 
 export const submitJob = (submission: SliceSubmission): Promise<Job> => post<Job>("/jobs", submission);
 
-export interface BatchSubmission {
+export interface BatchSubmission extends MaterialSubmission {
   plates: {
     objects: PlacedObjectSubmission[];
     plate: number;
     plate_index?: number;
     name?: string;
+    wipe_tower?: WipeTower;
   }[];
   machine_profile: string;
   process_profile: string;
-  filament_profile: string;
   settings: Record<string, string>;
   thumbnails?: boolean;
 }

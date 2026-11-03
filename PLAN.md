@@ -286,6 +286,19 @@ checks below green in CI.
 - [x] Cover the plate layout and per-plate slicing in Catch2, batches in the API
   tests, and plates in the browser suite.
 
+### Multi-material (lot 2)
+
+- [x] Load up to 16 filament profiles per job, merged as the desktop merges
+  them, with a flush matrix computed from their colours.
+- [x] Choose a filament per object, and per part of a 3MF object.
+- [x] Place the prime tower and set the first layer's filament order.
+- [x] Offer only the filaments each extruder of a multi-nozzle printer accepts.
+- [x] Colour the preview by filament.
+- [x] Cover composition and tool assignment in Catch2, the requests in the API
+  tests, a `multi-filament` matrix case, and the flow end to end.
+- [ ] Paint filaments onto faces (after this lot).
+- [ ] Filament maps for printers that route filaments to nozzles (H2D style).
+
 ## Phase 4: Production readiness (G6, priority P3)
 
 ### 14. Harden isolation and deployment

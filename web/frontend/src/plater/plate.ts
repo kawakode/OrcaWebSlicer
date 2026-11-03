@@ -5,10 +5,10 @@
 
 import { Euler, Matrix4, Quaternion, Vector3 } from "three";
 
-import type { PlacedObjectSubmission } from "../api";
+import type { PlacedObjectSubmission, WipeTower } from "../api";
 import { declared } from "../settings/catalog";
 import type { Job } from "../types";
-import type { ObjectMesh } from "./mesh";
+import type { InspectedVolume, ObjectMesh } from "./mesh";
 
 /** Settings for part of an object, between two heights above its bottom. */
 export interface LayerRange {
@@ -41,6 +41,12 @@ export interface PlateItem {
   /** Overrides of the plate's settings for this object only. */
   settings?: Record<string, string>;
   layerRanges?: LayerRange[];
+  /** The object's parts, as the inspection listed them. */
+  volumes?: InspectedVolume[];
+  /** The 1-based filament chosen for the object; unset keeps the file's choice. */
+  extruder?: number;
+  /** Filaments chosen for single parts, keyed by volume index. */
+  volumeExtruders?: Record<number, number>;
 }
 
 /** Spacing the arrangement keeps between items, in millimetres. */
@@ -216,12 +222,17 @@ export function plateObjects(items: PlateItem[]): PlacedObjectSubmission[] {
     const layerRanges = (item.layerRanges ?? [])
       .map((range) => ({ min_z: range.minZ, max_z: range.maxZ, settings: declared(range.settings) }))
       .filter((range) => Object.keys(range.settings).length > 0);
-    const key = JSON.stringify([item.uploadId, item.objectIndex, settings, layerRanges]);
+    const volumeExtruders = Object.entries(item.volumeExtruders ?? {})
+      .map(([volume, extruder]) => ({ volume: Number(volume), extruder }))
+      .sort((a, b) => a.volume - b.volume);
+    const key = JSON.stringify([item.uploadId, item.objectIndex, settings, layerRanges, item.extruder, volumeExtruders]);
     let entry = grouped.get(key);
     if (!entry) {
       entry = { upload_id: item.uploadId, object: item.objectIndex, instances: [] };
       if (Object.keys(settings).length > 0) entry.settings = settings;
       if (layerRanges.length > 0) entry.layer_ranges = layerRanges;
+      if (item.extruder !== undefined) entry.extruder = item.extruder;
+      if (volumeExtruders.length > 0) entry.volume_extruders = volumeExtruders;
       grouped.set(key, entry);
     }
     entry.instances.push({ transform: rowMajor(itemMatrix(item)) });
@@ -239,6 +250,27 @@ export interface Plate {
   sourcePlate?: number;
   /** The plate's latest slice. */
   job: Job | null;
+  /** Where a multi-material slice of this plate puts its prime tower. */
+  wipeTower?: WipeTower;
+}
+
+/** The highest filament number any item of the plates asks for, 1 when none does. */
+export function highestExtruder(items: PlateItem[]): number {
+  return items.reduce(
+    (highest, item) => Math.max(highest, item.extruder ?? 1, ...Object.values(item.volumeExtruders ?? {})),
+    1,
+  );
+}
+
+/**
+ * A prime tower's default corner, near the front right of the bed. The corner
+ * is the tower's front left, and the engine grows its depth towards the back
+ * with the purge volume, so the front leaves it the most room.
+ */
+export function defaultWipeTower(bed: Bed, width: number): WipeTower {
+  const { minX, maxX, minY } = bedBounds(bed);
+  const margin = 15;
+  return { x: Math.max(minX, maxX - width - margin), y: minY + margin };
 }
 
 export const plateLabel = (plate: Plate, position: number) => plate.name || `Plate ${position + 1}`;

@@ -54,7 +54,9 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
 // `index` receives the JSON document naming the role table, the tools used,
 // and each layer's Z, byte offset, and segment count, so a client can page a
 // large preview layer by layer. Only extrusion moves are recorded.
+// `tool_colours`, when given, are the filament colours a tool number indexes.
 bool write_gcode_preview(const GCodeProcessorResult &result, const std::filesystem::path &segments,
-                         const std::filesystem::path &index, std::string &error);
+                         const std::filesystem::path &index, std::string &error,
+                         const std::vector<std::string> &tool_colours = {});
 
 } // namespace Slic3r::Web
