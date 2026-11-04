@@ -126,6 +126,7 @@ services:
         build-worker/tests/libslic3r/Release/libslic3r_tests "[PlateArtifacts]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ProjectExport]";
         build-worker/tests/libslic3r/Release/libslic3r_tests "[ModelEdit]";
+        build-worker/tests/libslic3r/Release/libslic3r_tests "[FacetPaint]";
         "$${worker}" --version;
         "$${worker}" --validate-manifest tests/data/web-worker/valid-envelope.json;
         set +e;
@@ -134,7 +135,7 @@ services:
         set -e;
         test "$${invalid_status}" -eq 4;
         oversized_manifest=$$(mktemp);
-        python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(b" " * (1024 * 1024 + 1))' "$${oversized_manifest}";
+        python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(b" " * (32 * 1024 * 1024 + 1))' "$${oversized_manifest}";
         set +e;
         "$${worker}" --validate-manifest "$${oversized_manifest}";
         oversized_status=$$?;
