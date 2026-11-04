@@ -334,3 +334,94 @@ jobs:
           name: playwright-traces
           path: web/frontend/test-results
           retention-days: 7
+
+  image:
+    name: Production image
+    # Only a worker that passed the smoke, matrix, parity, and browser checks
+    # is packaged.
+    needs: [worker, integration, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      LOCAL_IMAGE: orca-web:ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: orca-slicer-worker
+          path: build-worker/src/Release
+
+      - name: Build the image
+        run: >-
+          docker build
+          --file docker/web/Dockerfile.prod
+          --build-arg GIT_COMMIT=${{ github.sha }}
+          --tag "$LOCAL_IMAGE"
+          .
+
+      - name: Software bill of materials
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: orca-web-sbom.spdx.json
+          artifact-name: orca-web-sbom.spdx.json
+
+      # Blocks on critical vulnerabilities that have a fix; everything else is
+      # listed in the log for the release checklist.
+      - name: Vulnerability scan
+        uses: anchore/scan-action@v6
+        with:
+          sbom: orca-web-sbom.spdx.json
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      # Runs compose.prod.yml as deployed, on localhost where Caddy signs with
+      # its own CA, and checks it from outside: TLS, login, a real slice, and
+      # the API container's isolation.
+      - name: Deployment smoke test
+        env:
+          ORCA_WEB_DOMAIN: localhost
+          ORCA_WEB_ACME_EMAIL: ci@example.invalid
+          ORCA_WEB_USER: ci
+          ORCA_WEB_IMAGE: orca-web
+          ORCA_WEB_TAG: ci
+        run: |
+          password=$(openssl rand -hex 16)
+          ORCA_WEB_PASSWORD_HASH=$(printf '%s\n' "$password" | docker run --rm -i caddy:2.10.2-alpine caddy hash-password)
+          export ORCA_WEB_PASSWORD_HASH
+          docker compose -f docker/web/compose.prod.yml up -d --wait --wait-timeout 300
+          python3 scripts/test_web_deployment.py --user ci --password "$password"
+
+      - name: Service logs
+        if: always()
+        env:
+          ORCA_WEB_DOMAIN: localhost
+          ORCA_WEB_ACME_EMAIL: ci@example.invalid
+          ORCA_WEB_USER: ci
+          ORCA_WEB_PASSWORD_HASH: unused
+          ORCA_WEB_IMAGE: orca-web
+          ORCA_WEB_TAG: ci
+        run: docker compose -f docker/web/compose.prod.yml logs --no-color --tail 300 || true
+
+      # Pull requests build and test the image; main publishes it under an
+      # immutable sha- tag (what deploy.sh update takes) and the moving "main".
+      - name: Publish to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orcawebslicer-web"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for tag in "sha-${GITHUB_SHA::12}" "${GITHUB_REF_NAME//\//-}"; do
+            docker tag "$LOCAL_IMAGE" "$image:$tag"
+            docker push "$image:$tag"
+          done
+          echo "Published \`$image:sha-${GITHUB_SHA::12}\`" >> "$GITHUB_STEP_SUMMARY"

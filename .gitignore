@@ -57,3 +57,7 @@ node_modules/
 web/frontend/dist/
 web/frontend/test-results/
 web/frontend/playwright-report/
+
+# Production settings of docker/web/compose.prod.yml
+docker/web/.env
+docker/web/.deploy-history

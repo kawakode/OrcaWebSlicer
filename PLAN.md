@@ -303,13 +303,16 @@ checks below green in CI.
 
 ### 14. Harden isolation and deployment
 
-- [ ] Run workers as an unprivileged user with a read-only root filesystem,
+- [x] Run workers as an unprivileged user with a read-only root filesystem,
   private temporary storage, no network, dropped capabilities, and bounded
-  resources.
-- [ ] Select and document the production container/runtime isolation model.
-- [ ] Scan images and dependencies and generate an SBOM.
-- [ ] Add health checks, graceful shutdown, deployment rollback, and disaster
-  recovery procedures.
+  resources (`docker/web/compose.prod.yml`). Workers share the API
+  container's boundary rather than each having their own.
+- [x] Select and document the production container/runtime isolation model
+  ([ADR 0004](docs/web/adr/0004-production-isolation.md)).
+- [x] Scan images and dependencies and generate an SBOM (`web.yml`, `image`).
+- [x] Add health checks, graceful shutdown, deployment rollback, and disaster
+  recovery procedures ([deploy.md](docs/web/deploy.md), `docker/web/deploy.sh`).
+- [ ] Deploy to the production VPS and record the first release.
 
 ### 15. Add service controls
 
@@ -332,7 +335,9 @@ checks below green in CI.
 
 - [x] Add CI jobs for headless builds, contract tests, semantic parity, and
   browser tests (`.github/workflows/web.yml`, see Phase 3b).
-- [ ] Add CI jobs for dependency audits and container security checks.
+- [ ] Add CI jobs for dependency audits and container security checks. The
+  image scan (`web.yml`, `image`) blocks on fixable critical findings; source
+  dependency audits (npm, pip) are still to add.
 - [ ] Review AGPLv3 section 13 obligations before public hosting.
 - [ ] Prominently offer the exact corresponding source for the deployed version.
 - [ ] Document third-party licenses, privacy behavior, retention, security

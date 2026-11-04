@@ -16,9 +16,11 @@ This directory is the source of truth for the web effort:
 - [Browser plater](plater.md)
 - [Layer preview](preview.md)
 - [Projects and thumbnails](projects.md)
+- [Production deployment](deploy.md)
 - [ADR 0001: browser UI with native workers](adr/0001-browser-ui-native-workers.md)
 - [ADR 0002: minimum web stack](adr/0002-web-stack.md)
 - [ADR 0003: multiple plates](adr/0003-multiple-plates.md)
+- [ADR 0004: production isolation](adr/0004-production-isolation.md)
 
 ## Delivery gates
 
@@ -34,7 +36,7 @@ prerequisites pass.
 | G3 | Worker contract | Versioned jobs, events, errors, cancellation, and artifacts have contract tests | Complete |
 | G4 | Vertical slice | Browser upload produces downloadable G-code through an isolated worker | Complete |
 | G5 | Browser MVP | Plater, common settings, validation, and layer preview meet the MVP criteria | Complete |
-| G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | Not started |
+| G6 | Production readiness | Authentication, quotas, isolation, observability, retention, and deployment checks pass | In progress (deployment and isolation) |
 
 ## Engineering rules
 

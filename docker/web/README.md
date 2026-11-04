@@ -2,7 +2,8 @@
 
 This Compose project is the canonical Linux environment for the web worker and
 native compatibility baseline. It uses Ubuntu 24.04 and the same CMake and Linux
-dependency installation paths as OrcaSlicer's CI.
+dependency installation paths as OrcaSlicer's CI. Production deployment uses
+`compose.prod.yml` instead; see [docs/web/deploy.md](../../docs/web/deploy.md).
 
 Docker Desktop should have at least 8 GiB of memory and 20 GiB of free disk for
 the initial dependency and application build. Two compile jobs are used by

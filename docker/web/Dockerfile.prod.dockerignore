@@ -1,0 +1,26 @@
+# Build context of docker/web/Dockerfile.prod: only what the image copies.
+# Everything else (deps/, build/, node_modules, sources) stays out, which keeps
+# the context small and the image free of build outputs.
+*
+!docker/web/requirements.txt
+!web/__init__.py
+!web/api/**
+!scripts/web_*.py
+!LICENSE.txt
+!web/frontend/**
+web/frontend/node_modules
+web/frontend/dist
+web/frontend/test-results
+web/frontend/playwright-report
+!build-worker/src/Release/orca-slicer-worker
+!resources/**
+# Desktop-only resources the headless worker never reads: device HMS help,
+# the desktop's embedded web pages, GUI images and shaders, and tips.
+resources/hms
+resources/web
+resources/images
+resources/shaders
+resources/tooltip
+resources/dailytip
+resources/Icon.icns
+**/__pycache__
