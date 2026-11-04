@@ -567,7 +567,7 @@ bool read_paint(const nlohmann::json &described, PlateObject &object, SinglePlat
             if (layer->is_string())
                 decoded = decode_paint_layer(layer->get_ref<const std::string &>(), kind, error);
             if (!decoded) {
-                add_error(result, "invalid_paint", error, WorkerErrorCategory::Input);
+                add_error(result, "invalid_paint", error.c_str(), WorkerErrorCategory::Input);
                 return false;
             }
             read.layers[std::size_t(kind)] = std::move(decoded);
