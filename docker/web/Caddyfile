@@ -5,8 +5,9 @@
 {
 	email {$ORCA_WEB_ACME_EMAIL}
 	# Caddy's admin API stays on loopback inside the container; the health
-	# check reads it there.
-	admin localhost:2019
+	# check reads it there. An IPv4 address, because "localhost" may resolve
+	# to ::1 first where Docker enables IPv6.
+	admin 127.0.0.1:2019
 }
 
 {$ORCA_WEB_DOMAIN} {
