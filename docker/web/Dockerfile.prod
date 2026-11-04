@@ -32,10 +32,12 @@ LABEL org.opencontainers.image.title="OrcaWebSlicer" \
 ENV DEBIAN_FRONTEND=noninteractive
 
 # pip is only needed to install the pinned API dependencies, then removed.
+# fontconfig is the worker's only shared library beyond glibc and libstdc++
+# (thumbnail text rendering); the build checks that list below.
 COPY docker/web/requirements.txt /tmp/requirements.txt
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends python3 python3-pip \
+    && apt-get install -y --no-install-recommends python3 python3-pip libfontconfig1 \
     && pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt \
     && apt-get purge -y --auto-remove python3-pip \
     && rm -rf /var/lib/apt/lists/* /tmp/requirements.txt
@@ -64,6 +66,7 @@ ENV ORCA_WEB_WORKER=/opt/orca-web/bin/orca-slicer-worker \
     ORCA_WEB_FRONTEND_DIST=/opt/orca-web/web/frontend/dist \
     ORCA_WEB_GIT_COMMIT=${GIT_COMMIT} \
     PYTHONDONTWRITEBYTECODE=1 \
+    XDG_CACHE_HOME=/tmp/.cache \
     PYTHONUNBUFFERED=1
 
 USER 10001:10001
