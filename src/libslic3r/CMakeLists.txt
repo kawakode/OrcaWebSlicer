@@ -492,6 +492,8 @@ set(lisbslic3r_sources
     Web/ProfileCompatibility.hpp
     Web/FilamentComposition.cpp
     Web/FilamentComposition.hpp
+    Web/FacetPaint.cpp
+    Web/FacetPaint.hpp
     Web/ModelEdit.cpp
     Web/ModelEdit.hpp
     Web/ProjectArchive.cpp

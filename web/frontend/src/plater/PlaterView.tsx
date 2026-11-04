@@ -21,9 +21,66 @@ import {
 
 import { createViewport, type Viewport } from "../viewport";
 import type { PickHit, ToolOverlay } from "./ObjectTools";
+import { layerStates, type PaintKind } from "./paint";
 import { bedBounds, fitsBed, itemBounds, itemMatrix, type Bed, type PlateItem } from "./plate";
 
 const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c, tool: 0xf2b134, tower: 0xb3e3ab };
+
+/** Enforcers, blockers, and fuzzy skin, drawn as the desktop's painting gizmos draw them. */
+const PAINT_COLOURS: Record<Exclude<PaintKind, "color">, Record<number, number>> = {
+  supports: { 1: 0x3fbf5f, 2: 0xe0525c },
+  seam: { 1: 0x3f8fff, 2: 0xe0525c },
+  fuzzy_skin: { 1: 0xc77dff },
+};
+
+/** A brush or fill gesture on an item, in the item's object coordinates. */
+export interface PaintHit {
+  id: string;
+  /** The display triangle under the pointer. */
+  triangle: number;
+  point: [number, number, number];
+}
+
+/** Which painting the plate shows, and the colour of each state of it. */
+export interface PaintDisplay {
+  kind: PaintKind;
+  /** A filament's colour for colour painting. */
+  colour?: (state: number) => number | undefined;
+}
+
+/**
+ * The item's geometry with its triangles grouped by painted state, so each
+ * state draws with its own material. `order` maps a drawn triangle back to the
+ * display mesh's own index, which raycasts report.
+ */
+function paintedGeometry(base: BufferGeometry, states: Uint8Array): BufferGeometry {
+  const source = base.getIndex()!.array as Uint32Array;
+  const count = states.length;
+  const buckets = new Map<number, number[]>();
+  for (let triangle = 0; triangle < count; triangle++) {
+    const state = states[triangle];
+    let bucket = buckets.get(state);
+    if (!bucket) buckets.set(state, (bucket = []));
+    bucket.push(triangle);
+  }
+  const order = new Uint32Array(count);
+  const index = new Uint32Array(count * 3);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", base.getAttribute("position"));
+  geometry.setAttribute("normal", base.getAttribute("normal"));
+  let at = 0;
+  for (const [state, triangles] of [...buckets].sort(([a], [b]) => a - b)) {
+    geometry.addGroup(at * 3, triangles.length * 3, state);
+    for (const triangle of triangles) {
+      order[at] = triangle;
+      index.set(source.subarray(triangle * 3, triangle * 3 + 3), at * 3);
+      at++;
+    }
+  }
+  geometry.setIndex(new BufferAttribute(index, 1));
+  geometry.userData.order = order;
+  return geometry;
+}
 
 /**
  * Draws the bed and every item, and turns pointer gestures into selection and
@@ -44,6 +101,10 @@ export function PlaterView(props: {
   itemColour?: (item: PlateItem) => number | undefined;
   /** A multi-material plate's prime tower footprint, front left corner and width in millimetres. */
   wipeTower?: { x: number; y: number; width: number };
+  /** The painting drawn on every item, if any. */
+  paintDisplay?: PaintDisplay;
+  /** While set, dragging across the selected item paints it instead of moving it. */
+  onPaint?: (hit: PaintHit) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const viewport = useRef<Viewport | null>(null);
@@ -52,6 +113,7 @@ export function PlaterView(props: {
   const overlayGroup = useRef(new Group());
   const towerGroup = useRef(new Group());
   const geometries = useRef(new Map<string, BufferGeometry>());
+  const painted = useRef(new Map<string, BufferGeometry>());
   const latest = useRef(props);
   latest.current = props;
 
@@ -64,6 +126,7 @@ export function PlaterView(props: {
     const pointer = new Vector2();
     const bedPlane = new Plane(new Vector3(0, 0, 1), 0);
     let drag: { id: string; offset: Vector3 } | null = null;
+    let stroke: string | null = null;
     let downAt: { x: number; y: number } | null = null;
 
     const cast = (event: PointerEvent) => {
@@ -72,14 +135,29 @@ export function PlaterView(props: {
       raycaster.setFromCamera(pointer, created.camera);
     };
     const hitBed = () => raycaster.ray.intersectPlane(bedPlane, new Vector3());
+    // Report the triangle under the pointer, in the item's own coordinates.
+    const paintAt = (id: string) => {
+      const hit = raycaster
+        .intersectObjects(objects.current.children, false)
+        .find((candidate) => candidate.object.userData.id === id);
+      const onPaint = latest.current.onPaint;
+      if (!hit || hit.faceIndex == null || !onPaint) return;
+      const order = (hit.object as Mesh).geometry.userData.order as Uint32Array | undefined;
+      const local = hit.point.clone().applyMatrix4(hit.object.matrixWorld.clone().invert());
+      onPaint({ id, triangle: order ? order[hit.faceIndex] : hit.faceIndex, point: [local.x, local.y, local.z] });
+    };
 
     const down = (event: PointerEvent) => {
       downAt = { x: event.clientX, y: event.clientY };
       cast(event);
       const hit = raycaster.intersectObjects(objects.current.children, false)[0];
       const id = hit?.object.userData.id as string | undefined;
-      const { items, selectedId, picking } = latest.current;
-      if (id && id === selectedId && !picking) {
+      const { items, selectedId, picking, onPaint } = latest.current;
+      if (id && id === selectedId && onPaint) {
+        stroke = id;
+        created.controls.enabled = false;
+        paintAt(id);
+      } else if (id && id === selectedId && !picking) {
         const item = items.find((candidate) => candidate.id === id)!;
         const point = hitBed();
         if (point) {
@@ -89,6 +167,11 @@ export function PlaterView(props: {
       }
     };
     const move = (event: PointerEvent) => {
+      if (stroke) {
+        cast(event);
+        paintAt(stroke);
+        return;
+      }
       if (!drag) return;
       cast(event);
       const point = hitBed();
@@ -96,7 +179,7 @@ export function PlaterView(props: {
     };
     const up = (event: PointerEvent) => {
       const clicked = downAt && Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y) < 4;
-      if (clicked && !drag) {
+      if (clicked && !drag && !stroke) {
         cast(event);
         const hit = raycaster.intersectObjects(objects.current.children, false)[0];
         const { picking, onPick, onSelect } = latest.current;
@@ -110,6 +193,7 @@ export function PlaterView(props: {
         }
       }
       drag = null;
+      stroke = null;
       downAt = null;
       created.controls.enabled = true;
     };
@@ -123,6 +207,8 @@ export function PlaterView(props: {
       window.removeEventListener("pointerup", up);
       geometries.current.forEach((geometry) => geometry.dispose());
       geometries.current.clear();
+      painted.current.forEach((geometry) => geometry.dispose());
+      painted.current.clear();
       created.dispose();
       viewport.current = null;
     };
@@ -148,8 +234,13 @@ export function PlaterView(props: {
   useEffect(() => {
     const view = viewport.current;
     if (!view) return;
-    objects.current.children.forEach((child) => ((child as Mesh).material as MeshStandardMaterial).dispose());
+    objects.current.children.forEach((child) => {
+      const material = (child as Mesh).material;
+      (Array.isArray(material) ? material : [material]).forEach((entry) => entry.dispose());
+    });
     objects.current.clear();
+    const display = props.paintDisplay;
+    const kept = new Map<string, BufferGeometry>();
     for (const item of props.items) {
       // Instances of one upload object share their geometry.
       const key = `${item.uploadId}:${item.objectIndex}`;
@@ -167,14 +258,40 @@ export function PlaterView(props: {
           : fitsBed(item, props.bed)
             ? (props.itemColour?.(item) ?? COLORS.idle)
             : COLORS.outside;
-      const mesh = new Mesh(geometry, new MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 }));
+      const surface = (colour: number) => new MeshStandardMaterial({ color: colour, roughness: 0.7, metalness: 0.05 });
+      const states = display ? layerStates(item.paint, display.kind, item.mesh.indices.length / 3) : null;
+      let mesh: Mesh;
+      if (states && display) {
+        // Painted geometry is the item's own, rebuilt only when its painting changes.
+        const paintKey = `${key}|${item.paint!.id}|${display.kind}`;
+        const shaded = painted.current.get(paintKey) ?? paintedGeometry(geometry, states);
+        kept.set(paintKey, shaded);
+        const materials = [];
+        const highest = states.reduce((top, state) => (state > top ? state : top), 0);
+        for (let state = 0; state <= highest; state++) {
+          const paintColour =
+            state === 0
+              ? color
+              : display.kind === "color"
+                ? (display.colour?.(state) ?? COLORS.tool)
+                : (PAINT_COLOURS[display.kind][state] ?? COLORS.tool);
+          materials.push(surface(paintColour));
+        }
+        mesh = new Mesh(shaded, materials);
+      } else {
+        mesh = new Mesh(geometry, surface(color));
+      }
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(itemMatrix(item));
       mesh.userData.id = item.id;
       objects.current.add(mesh);
     }
+    painted.current.forEach((geometry, key) => {
+      if (!kept.has(key)) geometry.dispose();
+    });
+    painted.current = kept;
     view.render();
-  }, [props.items, props.selectedId, props.bed, props.itemColour]);
+  }, [props.items, props.selectedId, props.bed, props.itemColour, props.paintDisplay]);
 
   // The tower's depth depends on the purge volumes the engine computes, so
   // only its square base is drawn, and it is never picked.

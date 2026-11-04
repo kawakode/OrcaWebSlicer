@@ -1,6 +1,6 @@
 # Minimum API
 
-Status: Active contract; extended for G5, the phase 3b object tools, and multiple plates
+Status: Active contract; extended for G5, the phase 3b object tools, multiple plates, and painting
 
 `web/api/` is the FastAPI service chosen in [ADR 0002](adr/0002-web-stack.md).
 It is the only long-lived process in the web tier, and it deliberately does very
@@ -118,6 +118,21 @@ extruder's nozzle; a single-nozzle printer takes up to 16
 (`too_many_filaments`, `incompatible_profile`). An object on a filament the
 request does not load is `extruder_out_of_range`. The job's `profiles` then
 lists `filaments`, each with its chain.
+
+A plate object may carry `paint`, its parts' painted faces, passed to the
+[worker](worker-protocol.md#painting) in its wire form: one entry per distinct
+part `volume`, with any of `supports`, `seam`, `color`, and `fuzzy_skin`, each
+a string of the characters `0-9`, `A-F`, `:`, `,`, and `;`.
+
+```json
+{"upload_id": "3f2a...", "instances": [...],
+ "paint": [{"volume": 0, "supports": "0:4,,8", "seam": ""}]}
+```
+
+The API only bounds the alphabet and size (24 MiB of painting per plate,
+`invalid_paint`) and leaves decoding to the worker. A job's `request` names
+each painted volume's kinds, as `{"volume": 0, "kinds": ["seam", "supports"]}`,
+rather than repeating megabytes of codes; a retry still stages them all.
 
 A slice request may add `"thumbnails": true` to embed rendered thumbnails in
 the G-code; it is off by default. `POST /projects` takes the same body without

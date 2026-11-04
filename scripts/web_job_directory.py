@@ -18,7 +18,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 # never encode something the worker would later reject.
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 MANIFEST_NAME = "request.json"
-MAX_MANIFEST_BYTES = 1024 * 1024
+# Painted faces travel in the manifest, so it allows more than a plain request.
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 
 
 class JobDirectoryError(RuntimeError):

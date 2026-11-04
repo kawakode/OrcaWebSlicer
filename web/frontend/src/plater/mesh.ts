@@ -24,6 +24,11 @@ export interface InspectedVolume {
   name: string;
   type: "part" | "negative" | "modifier" | "support_blocker" | "support_enforcer" | "other";
   extruder: number;
+  /** A part's first triangle in the object's display mesh, and how many it has. */
+  triangle_offset?: number;
+  triangle_count?: number;
+  /** The painting the file carries, per kind, in the worker's wire form. */
+  paint?: Partial<Record<"supports" | "seam" | "color" | "fuzzy_skin", string>>;
 }
 
 /** The preset selection and overrides a project archive records. */

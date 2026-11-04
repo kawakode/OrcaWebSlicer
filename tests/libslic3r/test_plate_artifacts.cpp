@@ -624,3 +624,55 @@ TEST_CASE("An object on a filament the job does not load is refused", "[PlateArt
     CHECK(result.category == WorkerErrorCategory::Validation);
     CHECK(result.setting == "extruder");
 }
+
+TEST_CASE("A face painted with the second filament is printed with tool 1", "[PlateArtifacts][FacetPaint]")
+{
+    JobRoot root;
+    write_filament_profile(root, "red", "#FF0000");
+    write_filament_profile(root, "blue", "#0000FF");
+    // Paint the top of the right cube with filament 2 ("8"), in the cube's own
+    // triangle order, which the worker loads the same way.
+    Slic3r::Model   cube;
+    Slic3r::ObjInfo obj_info;
+    std::string     message;
+    REQUIRE(Slic3r::load_obj((root.path / "input" / "cube.obj").string().c_str(), &cube, obj_info, message));
+    const indexed_triangle_set &its = cube.objects.front()->volumes.front()->mesh().its;
+    float                       highest = -1e9f;
+    for (const auto &vertex : its.vertices)
+        highest = std::max(highest, vertex.z());
+    std::string top;
+    for (std::size_t triangle = 0; triangle < its.indices.size(); ++triangle)
+        if (std::all_of(its.indices[triangle].begin(), its.indices[triangle].end(),
+                        [&](int vertex) { return its.vertices[vertex].z() > highest - 0.01f; }))
+            top += (top.empty() ? "" : ";") + std::to_string(triangle) + ":8";
+    REQUIRE(std::count(top.begin(), top.end(), ':') == 2);
+
+    const SinglePlateSliceResult result = slice_single_plate(
+        valid_request(two_filament_cubes(R"("paint": [{"volume": 0, "color": ")" + top + R"("}])")), root.path);
+    INFO(result.code << ": " << result.message);
+    REQUIRE(result.success);
+
+    const nlohmann::json index = nlohmann::json::parse(root.read("output/preview.json"));
+    std::set<int> shared_roles;
+    for (const nlohmann::json &role : index["roles"])
+        if (role["name"] == "Prime tower" || role["name"] == "Skirt" || role["name"] == "Brim")
+            shared_roles.insert(role["id"].get<int>());
+    const std::string segments = root.read("output/preview.bin");
+    std::set<int> left_tools, right_tools;
+    float lowest_painted = 1e9f;
+    for (std::size_t at = 0; at + 36 <= segments.size(); at += 36) {
+        if (shared_roles.count(static_cast<unsigned char>(segments[at + 32])) != 0)
+            continue;
+        float end[3];
+        std::memcpy(end, segments.data() + at + 12, sizeof(end));
+        const int tool = static_cast<unsigned char>(segments[at + 33]);
+        (end[0] < 100.f ? left_tools : right_tools).insert(tool);
+        if (tool == 1)
+            lowest_painted = std::min(lowest_painted, end[2]);
+    }
+    // The unpainted cube keeps the first filament; the painted one switches
+    // to the second near its top only.
+    CHECK(left_tools == std::set<int> {0});
+    CHECK(right_tools == std::set<int> {0, 1});
+    CHECK(lowest_painted > 10.f);
+}
