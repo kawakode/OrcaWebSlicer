@@ -637,10 +637,13 @@ TEST_CASE("A face painted with the second filament is printed with tool 1", "[Pl
     std::string     message;
     REQUIRE(Slic3r::load_obj((root.path / "input" / "cube.obj").string().c_str(), &cube, obj_info, message));
     const indexed_triangle_set &its = cube.objects.front()->volumes.front()->mesh().its;
-    std::string                 top;
+    float                       highest = -1e9f;
+    for (const auto &vertex : its.vertices)
+        highest = std::max(highest, vertex.z());
+    std::string top;
     for (std::size_t triangle = 0; triangle < its.indices.size(); ++triangle)
         if (std::all_of(its.indices[triangle].begin(), its.indices[triangle].end(),
-                        [&](int vertex) { return its.vertices[vertex].z() > 19.9f; }))
+                        [&](int vertex) { return its.vertices[vertex].z() > highest - 0.01f; }))
             top += (top.empty() ? "" : ";") + std::to_string(triangle) + ":8";
     REQUIRE(std::count(top.begin(), top.end(), ':') == 2);
 

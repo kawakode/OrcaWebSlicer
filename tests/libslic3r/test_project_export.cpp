@@ -276,7 +276,7 @@ TEST_CASE("Painted faces survive a project export and reopen in the browser", "[
     ProjectJobRoot root;
     // Two unsplit supports codes, a blocker after a gap, a triangle the
     // desktop split into four, a seam enforcer, and fuzzy skin.
-    const std::string paint = R"({"volume": 0, "supports": "0:4,,8;5:44843", "seam": "2:4", "fuzzy_skin": "11:4"})";
+    const std::string paint = R"({"volume": 0, "supports": "0:4,,8;9:44843", "seam": "2:4", "fuzzy_skin": "11:4"})";
     const std::string objects = R"("objects": [{"model": "input/cube.obj", "paint": [)" + paint +
                                 R"(], "instances": [{"transform": [1,0,0,60, 0,1,0,80, 0,0,1,0, 0,0,0,1]}]}])";
     const SinglePlateSliceResult exported = slice_single_plate(
@@ -294,7 +294,7 @@ TEST_CASE("Painted faces survive a project export and reopen in the browser", "[
     const nlohmann::json volume = nlohmann::json::parse(root.read("output/inspection.json"))["objects"][0]["volumes"][0];
     CHECK(volume["triangle_offset"] == 0);
     CHECK(volume["triangle_count"] == 12);
-    CHECK(volume["paint"] == nlohmann::json({{"supports", "0:4,,8;5:44843"}, {"seam", "2:4"}, {"fuzzy_skin", "11:4"}}));
+    CHECK(volume["paint"] == nlohmann::json({{"supports", "0:4,,8;9:44843"}, {"seam", "2:4"}, {"fuzzy_skin", "11:4"}}));
 
     // Reopened as the browser submits it, an empty kind clears the file's own
     // painting and a kind left out keeps it.
@@ -309,20 +309,20 @@ TEST_CASE("Painted faces survive a project export and reopen in the browser", "[
                           root.path)
                 .success);
     CHECK(nlohmann::json::parse(root.read("output/again.json"))["objects"][0]["volumes"][0]["paint"] ==
-          nlohmann::json({{"supports", "0:4,,8;5:44843"}, {"fuzzy_skin", "11:4"}}));
+          nlohmann::json({{"supports", "0:4,,8;9:44843"}, {"fuzzy_skin", "11:4"}}));
 }
 
 TEST_CASE("Paint layers decode the desktop's per-triangle codes", "[FacetPaint]")
 {
     std::string error;
-    const std::optional<PaintLayer> layer = decode_paint_layer("0:4,,8;5:44843", PaintKind::Supports, error);
+    const std::optional<PaintLayer> layer = decode_paint_layer("0:4,,8;9:44843", PaintKind::Supports, error);
     REQUIRE(layer);
-    CHECK(layer->triangles == std::vector<PaintedTriangle>{{0, "4"}, {2, "8"}, {5, "44843"}});
+    CHECK(layer->triangles == std::vector<PaintedTriangle>{{0, "4"}, {2, "8"}, {9, "44843"}});
     CHECK(layer->highest_state == 2);
-    // Filaments 3, 17, and 18 take the longer codes.
-    const std::optional<PaintLayer> colours = decode_paint_layer("0:0C,DC,EC", PaintKind::Color, error);
+    // Filaments from 3 take two nibbles; 16 is the last one a job loads.
+    const std::optional<PaintLayer> colours = decode_paint_layer("0:0C,CC,DC", PaintKind::Color, error);
     REQUIRE(colours);
-    CHECK(colours->highest_state == 17);
+    CHECK(colours->highest_state == 16);
     CHECK(decode_paint_layer("", PaintKind::Seam, error)->triangles.empty());
 
     for (const auto &[encoded, kind] : std::vector<std::pair<std::string, PaintKind>>{
@@ -334,6 +334,7 @@ TEST_CASE("Paint layers decode the desktop's per-triangle codes", "[FacetPaint]"
              {"0:44", PaintKind::Supports},      // trailing nibbles
              {"0:0C", PaintKind::Supports},      // state 3 is no supports state
              {"0:8", PaintKind::FuzzySkin},      // fuzzy skin has one state
+             {"0:EC", PaintKind::Color},         // filament 17 of 16
              {"0:0FC", PaintKind::Color},        // filament 18 of 16
              {"0:4444B", PaintKind::Seam},       // a three-side split names no special side
              {"-1:4", PaintKind::Seam},
