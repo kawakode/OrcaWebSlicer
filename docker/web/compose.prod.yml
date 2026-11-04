@@ -1,0 +1,119 @@
+# Production deployment on one Linux host. Usage and the update, rollback,
+# and recovery procedures are in docs/web/deploy.md; docker/web/deploy.sh
+# wraps them. Settings come from docker/web/.env (see .env.example).
+#
+#   internet ── :80/:443 ── proxy (Caddy, TLS) ──[backend, internal]── api
+#
+# The `backend` network is internal: it has no route out of the host, so the
+# API and every worker it starts can answer the proxy but cannot open a
+# connection to the internet. Only the proxy also joins `edge`, for ACME.
+
+name: orca-web
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  proxy:
+    image: ${ORCA_WEB_PROXY_IMAGE:-caddy:2.10.2-alpine}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ORCA_WEB_DOMAIN: ${ORCA_WEB_DOMAIN:?set ORCA_WEB_DOMAIN in docker/web/.env}
+      ORCA_WEB_ACME_EMAIL: ${ORCA_WEB_ACME_EMAIL:?set ORCA_WEB_ACME_EMAIL in docker/web/.env}
+      ORCA_WEB_USER: ${ORCA_WEB_USER:?set ORCA_WEB_USER in docker/web/.env}
+      ORCA_WEB_PASSWORD_HASH: ${ORCA_WEB_PASSWORD_HASH:?run deploy.sh init or set ORCA_WEB_PASSWORD_HASH}
+      ORCA_WEB_MAX_REQUEST_BODY: ${ORCA_WEB_MAX_REQUEST_BODY:-600MB}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account; losing them only costs a re-issue.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+
+  api:
+    image: ${ORCA_WEB_IMAGE:-ghcr.io/kawakode/orcawebslicer-web}:${ORCA_WEB_TAG:?set ORCA_WEB_TAG in docker/web/.env}
+    restart: unless-stopped
+    # tini reaps the worker processes and forwards SIGTERM to uvicorn, which
+    # cancels running workers through the executor before exiting.
+    init: true
+    stop_grace_period: 45s
+    user: "10001:10001"
+    environment:
+      ORCA_WEB_PROFILE_VENDORS: ${ORCA_WEB_PROFILE_VENDORS:-Anycubic}
+      ORCA_WEB_MAX_CONCURRENT_JOBS: ${ORCA_WEB_MAX_CONCURRENT_JOBS:-2}
+      ORCA_WEB_JOB_RETENTION_SECONDS: ${ORCA_WEB_JOB_RETENTION_SECONDS:-86400}
+      ORCA_WEB_MAX_WALL_TIME_MS: ${ORCA_WEB_MAX_WALL_TIME_MS:-300000}
+      ORCA_WEB_MAX_CPU_TIME_MS: ${ORCA_WEB_MAX_CPU_TIME_MS:-300000}
+      ORCA_WEB_MAX_MEMORY_BYTES: ${ORCA_WEB_MAX_MEMORY_BYTES:-4294967296}
+      ORCA_WEB_MAX_INPUT_BYTES: ${ORCA_WEB_MAX_INPUT_BYTES:-262144000}
+      ORCA_WEB_MAX_TOTAL_INPUT_BYTES: ${ORCA_WEB_MAX_TOTAL_INPUT_BYTES:-536870912}
+      ORCA_WEB_MAX_TRIANGLES: ${ORCA_WEB_MAX_TRIANGLES:-1000000}
+      # RLIMIT_NPROC counts every thread of the API's user, uvicorn's thread
+      # pool included, so the executor's default of 64 would starve a worker.
+      # The container's pids_limit is the real bound.
+      ORCA_WEB_MAX_PROCESSES: ${ORCA_WEB_MAX_PROCESSES:-4096}
+    volumes:
+      # Uploads and job directories, swept after the retention window.
+      - orca-state:/var/lib/orca-web
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${ORCA_WEB_PIDS_LIMIT:-1024}
+    mem_limit: ${ORCA_WEB_MEMORY_LIMIT:-6g}
+    cpus: ${ORCA_WEB_CPUS:-2}
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging: *logging
+
+networks:
+  edge: {}
+  backend:
+    internal: true
+
+volumes:
+  orca-state:
+  caddy-data:
+  caddy-config:
