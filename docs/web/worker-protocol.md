@@ -1,7 +1,7 @@
 # Worker protocol version 1
 
 Status: Active contract; G5 added plate composition, inspection, and preview;
-phase 3b added object edits and multi-plate project archives
+phase 3b added object edits, multi-plate project archives, and painting
 
 The worker reads one manifest from a file, emits newline-delimited JSON events
 on stdout, writes diagnostics and logs only to stderr, and publishes a terminal
@@ -41,7 +41,8 @@ slice payload version produces `unsupported_operation_version`. Unknown fields
 are allowed at every object level. Required fields cannot be removed or change
 type within a version.
 
-The manifest file is limited to 1 MiB, and a slice payload may contain at most
+The manifest file is limited to 32 MiB, since painted faces travel in it (up to
+G5 the limit was 1 MiB), and a slice payload may contain at most
 256 serialized setting overrides. The worker rejects model formats other than
 STL, OBJ, and 3MF before invoking an importer.
 
@@ -173,6 +174,41 @@ not have is `unknown_model_volume`, and a value outside 1 to 16 is
 numbers, written to `first_layer_print_sequence` (`invalid_filament_order`).
 The engine applies it only when it lists every filament the first layer uses.
 
+## Painting
+
+A plate object may carry `paint`, the faces of its parts painted as the
+desktop's painting tools paint them: support enforcers and blockers, seam
+enforcers and blockers, filaments, and fuzzy skin.
+
+```json
+{"model": "input/model-0.3mf", "instances": [...],
+ "paint": [{"volume": 0, "supports": "0:4,,8;120:44843", "seam": "", "color": "7:0C"}]}
+```
+
+Each entry names a distinct 0-based `volume`, which must be one of the object's
+parts (`invalid_paint`; `unknown_model_volume` when the object has no such
+volume), and any of the kinds `supports`, `seam`, `color`, and `fuzzy_skin`. A
+kind given replaces the file's own painting of that kind on that volume, so an
+empty string clears it; a kind left out keeps whatever the file painted.
+
+A kind is a string of runs separated by `;`. A run is the 0-based index of its
+first triangle in the volume's mesh, a `:`, and one code per consecutive
+triangle separated by `,`; an empty code leaves a triangle unpainted, so short
+gaps need no new run. Runs are in increasing order and never overlap. A code is
+exactly what a desktop 3MF stores in that triangle's `paint_supports`,
+`paint_seam`, `paint_color`, or `paint_fuzzy_skin` attribute: the hexadecimal
+nibbles of the engine's `TriangleSelector` tree, read from the last character.
+An unsplit triangle's code is its state: `4` for 1 and `8` for 2, `0C` to `EC`
+for 3 to 17, and `0FC` and above from 18. Supports and seams take 1 (enforce)
+and 2 (block), fuzzy skin 1, and colours the 1-based filament number up to 16.
+
+Every code is checked to be a complete split tree whose leaves stay within its
+kind's states, at most 32 levels deep, before the engine reads it; a malformed
+code, or a triangle beyond the volume's mesh, is `invalid_paint`. A filament
+painted beyond the loaded filaments is the `validation` error
+`extruder_out_of_range`, naming `extruder`, as for an object's own filament.
+Support enforcers take effect only where support is enabled, as on the desktop.
+
 `output_preview` and `output_preview_index` optionally ask for a layer preview
 of the produced G-code, always together. The format is documented in
 [the preview contract](preview.md). The preview is published only alongside its
@@ -192,6 +228,11 @@ plate, and every instance with its plate.
 An inspection also lists each object's `extruder` (0 when the file sets none)
 and its `volumes`, each with its `index`, `name`, `type` (`part`,
 `negative`, `modifier`, `support_blocker`, `support_enforcer`), and `extruder`.
+A part also states `triangle_offset` and `triangle_count`, where its triangles
+sit in the object's display mesh, which concatenates the parts in volume order,
+and, when the file paints it, `paint`: each painted kind in the
+[wire form](#painting) a slice accepts, so the browser can send it back
+unchanged.
 
 ## Edit operation
 
@@ -216,8 +257,8 @@ settings are not read, and the input limits are those of an inspection.
 instance (`invalid_instance_transform`). The object is edited where it stands,
 and every produced model is a binary STL of its printable parts with that
 placement baked in, so its vertices are plate coordinates: drawn with an
-identity transform, a part sits exactly where it was. Modifiers and negative
-volumes do not survive an edit.
+identity transform, a part sits exactly where it was. Modifiers, negative
+volumes, and painting do not survive an edit.
 
 `tool` is `cut` or `repair` (`invalid_edit_tool`).
 

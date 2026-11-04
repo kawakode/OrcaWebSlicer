@@ -1,6 +1,6 @@
 # Browser plater
 
-Status: Active contract for G5; phase 3b adds the object tools and multiple plates
+Status: Active contract for G5; phase 3b adds the object tools, multiple plates, and painting
 
 The plater lets a user compose the build plates of a project in the browser and
 submit each as explicit placements. It never parses a model itself: every uploaded file is
@@ -158,8 +158,42 @@ Every part keeps the object's setting overrides. Height ranges are measured
 from the object's bottom, so a repaired part keeps them and a cut part does
 not.
 
+## Painting
+
+The Paint tool of a selected object paints its faces with support enforcers or
+blockers, seam enforcers or blockers, a filament, or fuzzy skin, the four
+painting tools of the desktop. While it is open, dragging across the object
+paints it and dragging elsewhere turns the view.
+
+- **Brush** paints every triangle whose centre lies within the radius of the
+  point under the pointer, and always the triangle under it.
+- **Fill** paints the triangle under the pointer and spreads to neighbouring
+  triangles while the angle between their faces stays within the limit, like
+  the desktop's smart fill.
+- Painting with **Erase** removes the kind shown, and **Clear** removes all of
+  it from the object.
+
+The open kind is drawn on the object: enforcers green (seams blue), blockers
+red, fuzzy skin violet, and filaments in their colours. Once a plate loads
+several filaments, its colour painting is drawn even while the tool is closed.
+
+The browser paints whole triangles of the display mesh, without the desktop's
+subdivision under the brush, so painting follows the model's own triangles. A
+desktop project's subdivided triangles are drawn in the state covering most of
+each triangle and sent back unchanged unless repainted. Instances of one object
+share its painting, as on the desktop. A cut or repaired part starts unpainted.
+
+The painting travels with every slice and project save as each part's `paint`,
+in the worker's [wire form](worker-protocol.md#painting). The object's display
+mesh concatenates its parts, so each part's triangles are cut out of it by the
+`triangle_offset` and `triangle_count` its inspection reports. Every kind the
+object holds is sent for every part, so a kind cleared in the browser also
+clears what the file painted.
+
 ## Tests
 
+`src/plater/paint.test.ts` covers the paint codes, the wire form, brushing and
+filling, and how painting is loaded, sent per part, and shared by instances.
 `src/plater/tools.test.ts` covers laying on a face, measurement, cut and
 repair requests, the spacing of cut parts, and the overrides parts inherit. `src/plater/plate.test.ts` covers the transform order, row-major
 serialization, resting on the bed, round-tripping a declared placement, the

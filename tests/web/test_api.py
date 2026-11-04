@@ -367,6 +367,48 @@ class ApiTests(unittest.TestCase):
             422,
         )
 
+    def test_stages_painted_faces(self):
+        upload = self.upload().json()["upload_id"]
+        placed = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]
+        paint = [{"volume": 0, "supports": "0:4,,8;10:4", "seam": ""}]
+        body = {
+            "objects": [{"upload_id": upload, "instances": [{"transform": placed}], "paint": paint}],
+            "machine_profile": MACHINE_ID,
+            "process_profile": PROCESS_ID,
+            "filament_profile": FILAMENT_ID,
+        }
+        accepted = self.client.post("/api/v1/jobs", json=body)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        job = self.wait(accepted.json()["job_id"])
+        # The manifest carries the layers; the job's record only names them.
+        payload = json.loads(
+            (self.root / "state" / "jobs" / job["job_id"] / "request.json").read_text(encoding="utf-8")
+        )["operation"]["payload"]
+        self.assertEqual(payload["objects"][0]["paint"], paint)
+        self.assertEqual(job["request"]["objects"][0]["paint"], [{"volume": 0, "kinds": ["seam", "supports"]}])
+        retried = self.wait(self.client.post(f"/api/v1/jobs/{job['job_id']}/retry").json()["job_id"])
+        self.assertEqual(
+            json.loads((self.root / "state" / "jobs" / retried["job_id"] / "request.json").read_text(encoding="utf-8"))[
+                "operation"
+            ]["payload"]["objects"][0]["paint"],
+            paint,
+        )
+
+        # The schema refuses a foreign alphabet, an unknown kind, and a volume out of range.
+        for invalid in (
+            [{"volume": 0, "supports": "0:4x"}],
+            [{"volume": 0, "colour": "0:4"}],
+            [{"volume": 256, "seam": "0:4"}],
+        ):
+            with self.subTest(paint=invalid):
+                response = self.client.post(
+                    "/api/v1/jobs", json={**body, "objects": [{**body["objects"][0], "paint": invalid}]}
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+        twice = [{"volume": 0, "seam": "0:4"}, {"volume": 0, "supports": "0:8"}]
+        response = self.client.post("/api/v1/jobs", json={**body, "objects": [{**body["objects"][0], "paint": twice}]})
+        self.assertEqual(response.json()["error"]["code"], "invalid_paint")
+
     def test_slices_a_multi_material_plate(self):
         upload = self.upload().json()["upload_id"]
         placed = [1, 0, 0, 60, 0, 1, 0, 80, 0, 0, 1, 0, 0, 0, 0, 1]

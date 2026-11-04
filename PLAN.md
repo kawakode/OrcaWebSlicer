@@ -296,8 +296,24 @@ checks below green in CI.
 - [x] Colour the preview by filament.
 - [x] Cover composition and tool assignment in Catch2, the requests in the API
   tests, a `multi-filament` matrix case, and the flow end to end.
-- [ ] Paint filaments onto faces (after this lot).
+- [x] Paint filaments onto faces (see Painting below).
 - [ ] Filament maps for printers that route filaments to nozzles (H2D style).
+
+### Painting
+
+- [x] Paint support enforcers and blockers, seam enforcers and blockers,
+  filaments, and fuzzy skin onto an object's faces with a brush or a fill.
+- [x] Send each part's painting to the worker in the desktop's own
+  per-triangle codes, checked as complete split trees before the engine reads
+  them, and refuse a filament the job does not load.
+- [x] Save painting in projects with the engine's 3MF exporter and list a
+  file's painting in its inspection, so desktop projects reopen painted and a
+  subdivided triangle is kept unless repainted.
+- [x] Cover the codes, painted G-code, and the 3MF round trip in Catch2, the
+  request in the API tests, and painting in the browser suite.
+- [ ] Subdivide triangles under the brush as the desktop does, for finer
+  painting of low-polygon models.
+- [ ] Keep painting on the parts of a cut or repaired object.
 
 ## Phase 4: Production readiness (G6, priority P3)
 

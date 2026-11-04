@@ -5,6 +5,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Web/ArtifactTransaction.hpp"
+#include "libslic3r/Web/FacetPaint.hpp"
 #include "libslic3r/Web/PlateThumbnail.hpp"
 #include "libslic3r/Web/ProjectArchive.hpp"
 #include "libslic3r/Web/SinglePlateSlice.hpp"
@@ -268,4 +269,98 @@ TEST_CASE("Plate thumbnails draw the placed objects on a transparent background"
     CHECK(plate_thumbnail_colour(config) == std::array<unsigned char, 3>{0x10, 0x20, 0x30});
     config.set_key_value("filament_colour", new ConfigOptionStrings({"red"}));
     CHECK(plate_thumbnail_colour(config) == std::array<unsigned char, 3>{0x00, 0x96, 0x88});
+}
+
+TEST_CASE("Painted faces survive a project export and reopen in the browser", "[ProjectExport][FacetPaint]")
+{
+    ProjectJobRoot root;
+    // Two unsplit supports codes, a blocker after a gap, a triangle the
+    // desktop split into four, a seam enforcer, and fuzzy skin.
+    const std::string paint = R"({"volume": 0, "supports": "0:4,,8;5:44843", "seam": "2:4", "fuzzy_skin": "11:4"})";
+    const std::string objects = R"("objects": [{"model": "input/cube.obj", "paint": [)" + paint +
+                                R"(], "instances": [{"transform": [1,0,0,60, 0,1,0,80, 0,0,1,0, 0,0,0,1]}]}])";
+    const SinglePlateSliceResult exported = slice_single_plate(
+        valid_request(manifest("export_project", "{" + objects + ", " + PROFILES + R"(, "output_project": "input/saved.3mf"})")),
+        root.path);
+    INFO(exported.code << ": " << exported.message);
+    REQUIRE(exported.success);
+
+    const SinglePlateSliceResult inspected = inspect_model(
+        valid_request(manifest("inspect", R"({"input_model": "input/saved.3mf", "output_mesh": "output/mesh.bin",
+                                             "output_inspection": "output/inspection.json"})")),
+        root.path);
+    INFO(inspected.code << ": " << inspected.message);
+    REQUIRE(inspected.success);
+    const nlohmann::json volume = nlohmann::json::parse(root.read("output/inspection.json"))["objects"][0]["volumes"][0];
+    CHECK(volume["triangle_offset"] == 0);
+    CHECK(volume["triangle_count"] == 12);
+    CHECK(volume["paint"] == nlohmann::json({{"supports", "0:4,,8;5:44843"}, {"seam", "2:4"}, {"fuzzy_skin", "11:4"}}));
+
+    // Reopened as the browser submits it, an empty kind clears the file's own
+    // painting and a kind left out keeps it.
+    const std::string resubmitted = R"("objects": [{"model": "input/saved.3mf", "paint": [{"volume": 0, "seam": ""}],
+        "instances": [{"transform": [1,0,0,60, 0,1,0,80, 0,0,1,0, 0,0,0,1]}]}])";
+    REQUIRE(slice_single_plate(valid_request(manifest("export_project", "{" + resubmitted + ", " + PROFILES +
+                                                                            R"(, "output_project": "input/again.3mf"})")),
+                               root.path)
+                .success);
+    REQUIRE(inspect_model(valid_request(manifest("inspect", R"({"input_model": "input/again.3mf", "output_mesh": "output/again.bin",
+                                                               "output_inspection": "output/again.json"})")),
+                          root.path)
+                .success);
+    CHECK(nlohmann::json::parse(root.read("output/again.json"))["objects"][0]["volumes"][0]["paint"] ==
+          nlohmann::json({{"supports", "0:4,,8;5:44843"}, {"fuzzy_skin", "11:4"}}));
+}
+
+TEST_CASE("Paint layers decode the desktop's per-triangle codes", "[FacetPaint]")
+{
+    std::string error;
+    const std::optional<PaintLayer> layer = decode_paint_layer("0:4,,8;5:44843", PaintKind::Supports, error);
+    REQUIRE(layer);
+    CHECK(layer->triangles == std::vector<PaintedTriangle>{{0, "4"}, {2, "8"}, {5, "44843"}});
+    CHECK(layer->highest_state == 2);
+    // Filaments 3, 17, and 18 take the longer codes.
+    const std::optional<PaintLayer> colours = decode_paint_layer("0:0C,DC,EC", PaintKind::Color, error);
+    REQUIRE(colours);
+    CHECK(colours->highest_state == 17);
+    CHECK(decode_paint_layer("", PaintKind::Seam, error)->triangles.empty());
+
+    for (const auto &[encoded, kind] : std::vector<std::pair<std::string, PaintKind>>{
+             {"4", PaintKind::Supports},         // no index
+             {"3:4;1:4", PaintKind::Supports},   // runs out of order
+             {"0:4,4;1:8", PaintKind::Supports}, // overlapping runs
+             {"0:4x", PaintKind::Supports},      // not hexadecimal
+             {"0:4843", PaintKind::Supports},    // a split missing a child
+             {"0:44", PaintKind::Supports},      // trailing nibbles
+             {"0:0C", PaintKind::Supports},      // state 3 is no supports state
+             {"0:8", PaintKind::FuzzySkin},      // fuzzy skin has one state
+             {"0:0FC", PaintKind::Color},        // filament 18 of 16
+             {"0:4444B", PaintKind::Seam},       // a three-side split names no special side
+             {"-1:4", PaintKind::Seam},
+         }) {
+        INFO(encoded);
+        CHECK_FALSE(decode_paint_layer(encoded, kind, error));
+    }
+}
+
+TEST_CASE("Painting is refused where the object has no such triangle or part", "[FacetPaint]")
+{
+    ProjectJobRoot root;
+    const auto export_with = [&](const std::string &paint) {
+        return slice_single_plate(
+            valid_request(manifest("export_project", R"({"objects": [{"model": "input/cube.obj", "paint": [)" + paint +
+                                                         R"(], "instances": [{"transform": [1,0,0,60, 0,1,0,80, 0,0,1,0, 0,0,0,1]}]}], )" +
+                                                         PROFILES + R"(, "output_project": "output/project.3mf"})")),
+            root.path);
+    };
+    CHECK(export_with(R"({"volume": 0, "supports": "12:4"})").code == "invalid_paint");
+    CHECK(export_with(R"({"volume": 1, "supports": "0:4"})").code == "unknown_model_volume");
+    const SinglePlateSliceResult colour = export_with(R"({"volume": 0, "color": "0:8"})");
+    CHECK(colour.code == "extruder_out_of_range");
+    CHECK(colour.setting == "extruder");
+
+    const SinglePlateSliceRequestValidation duplicated = validate_single_plate_slice_request(
+        manifest("slice", R"({"objects": [{"model": "input/cube.obj", "paint": [{"volume": 0}, {"volume": 0}],
+            "instances": [{"transform": [1,0,0,60, 0,1,0,80, 0,0,1,0, 0,0,0,1]}]}], "output_gcode": "output/plate.gcode"})"));
+    CHECK_FALSE(duplicated.is_valid());
 }

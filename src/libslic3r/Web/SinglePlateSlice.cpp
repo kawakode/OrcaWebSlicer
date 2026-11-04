@@ -536,6 +536,47 @@ bool read_extruders(const nlohmann::json &described, PlateObject &object, Single
     return true;
 }
 
+// Painting names 0-based volumes, each with any of the paint kinds in the wire
+// form FacetPaint decodes. Whether the volume exists and holds the painted
+// triangles is checked once the model is loaded.
+bool read_paint(const nlohmann::json &described, PlateObject &object, SinglePlateSliceRequestValidation &result)
+{
+    const auto paint = described.find("paint");
+    if (paint == described.end())
+        return true;
+    if (!paint->is_array() || paint->size() > MAX_OBJECT_VOLUMES) {
+        add_error(result, "invalid_paint", "paint must be an array of at most 256 volumes.", WorkerErrorCategory::Input);
+        return false;
+    }
+    for (const nlohmann::json &entry : *paint) {
+        VolumePaint read;
+        const auto volume = entry.is_object() ? entry.find("volume") : entry.end();
+        if (volume == entry.end() || !volume->is_number_unsigned() || volume->get<std::uint64_t>() >= MAX_OBJECT_VOLUMES ||
+            std::any_of(object.paint.begin(), object.paint.end(),
+                        [&](const VolumePaint &other) { return other.volume == volume->get<unsigned>(); })) {
+            add_error(result, "invalid_paint", "Every paint entry names a distinct 0-based volume.", WorkerErrorCategory::Input);
+            return false;
+        }
+        read.volume = volume->get<unsigned>();
+        for (const PaintKind kind : PAINT_KINDS) {
+            const auto layer = entry.find(paint_kind_name(kind));
+            if (layer == entry.end())
+                continue;
+            std::string error = "paint." + std::string(paint_kind_name(kind)) + " must be a string.";
+            std::optional<PaintLayer> decoded;
+            if (layer->is_string())
+                decoded = decode_paint_layer(layer->get_ref<const std::string &>(), kind, error);
+            if (!decoded) {
+                add_error(result, "invalid_paint", error, WorkerErrorCategory::Input);
+                return false;
+            }
+            read.layers[std::size_t(kind)] = std::move(decoded);
+        }
+        object.paint.push_back(std::move(read));
+    }
+    return true;
+}
+
 void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &request,
                         SinglePlateSliceRequestValidation &result)
 {
@@ -599,7 +640,7 @@ void read_plate_objects(const nlohmann::json &objects, SinglePlateSliceRequest &
         const auto layer_ranges = described.find("layer_ranges");
         if (layer_ranges != described.end() && !read_layer_ranges(*layer_ranges, object, result))
             return;
-        if (!read_extruders(described, object, result))
+        if (!read_extruders(described, object, result) || !read_paint(described, object, result))
             return;
         request.objects.push_back(std::move(object));
     }
@@ -863,6 +904,20 @@ SinglePlateSliceResult assemble_plate(const SinglePlateSliceRequest &request, co
                                WorkerErrorCategory::Input);
             object->volumes[assigned.volume]->config.set("extruder", int(assigned.extruder));
         }
+        for (const VolumePaint &painted : placed.paint) {
+            if (painted.volume >= object->volumes.size())
+                return failure("unknown_model_volume", "A painted volume does not exist in its object.",
+                               WorkerErrorCategory::Input);
+            ModelVolume &volume = *object->volumes[painted.volume];
+            if (!volume.is_model_part())
+                return failure("invalid_paint", "Only an object's parts can be painted, not its modifiers.",
+                               WorkerErrorCategory::Input);
+            for (const PaintKind kind : PAINT_KINDS)
+                if (const std::optional<PaintLayer> &layer = painted.layers[std::size_t(kind)];
+                    layer && !apply_paint_layer(volume, kind, *layer))
+                    return failure("invalid_paint", "A painted triangle does not exist in its volume.",
+                                   WorkerErrorCategory::Input);
+        }
     }
     return {true, {}, {}, WorkerErrorCategory::Input};
 }
@@ -876,6 +931,9 @@ SinglePlateSliceResult check_extruders(const SinglePlateSliceRequest &request, c
         unsigned highest = placed.extruder;
         for (const PlateVolumeExtruder &assigned : placed.volume_extruders)
             highest = std::max(highest, assigned.extruder);
+        for (const VolumePaint &painted : placed.paint)
+            if (const auto &colours = painted.layers[std::size_t(PaintKind::Color)])
+                highest = std::max(highest, unsigned(colours->highest_state));
         if (highest > loaded) {
             SinglePlateSliceResult refused =
                 failure("extruder_out_of_range",

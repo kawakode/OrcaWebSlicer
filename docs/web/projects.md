@@ -40,6 +40,12 @@ overrides in its slot, and an inspection of the project lists
 `filament_colours`, so reopening it restores every filament and colour, and
 each object's filament.
 
+Painted faces are saved on each part in the desktop's own per-triangle
+attributes (`paint_supports`, `paint_seam`, `paint_color`, and
+`paint_fuzzy_skin`), and an inspection of the project lists them, so the
+desktop opens the same painting and the browser restores it. A triangle the
+desktop subdivided keeps its subdivision unless the browser repaints it.
+
 A plate may be saved with objects outside the printable volume, as on the
 desktop; only slicing refuses them. Multiple plates are not exported yet: the
 browser composes one.

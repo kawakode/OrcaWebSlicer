@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Vector3 } from "three";
 
 import { editUpload, readEditReport } from "../api";
 import { ApiError, type Job, type Upload } from "../types";
+import type { usePaintTool } from "./PaintTool";
 import { itemBounds, type PlateItem } from "./plate";
 import {
   cutsItem,
@@ -120,8 +121,19 @@ async function describeEdit(job: Job, parts: number): Promise<string> {
   );
 }
 
-export function ObjectTools(props: { item: PlateItem; tools: ReturnType<typeof useObjectTools>; disabled: boolean }) {
-  const { item, tools } = props;
+export function ObjectTools(props: {
+  item: PlateItem;
+  tools: ReturnType<typeof useObjectTools>;
+  disabled: boolean;
+  paint: ReturnType<typeof usePaintTool>;
+  paintPanel: ReactNode;
+}) {
+  const { item, tools, paint } = props;
+  // Painting and picking both take clicks on the plate, so one closes the other.
+  const choose = (mode: PickMode) => {
+    paint.setOpen(false);
+    tools.choose(mode);
+  };
   const [keep, setKeep] = useState<CutKeep>("both");
   const [flipUpper, setFlipUpper] = useState(false);
   const box = itemBounds(item);
@@ -150,7 +162,7 @@ export function ObjectTools(props: { item: PlateItem; tools: ReturnType<typeof u
           data-testid="tool-lay"
           aria-pressed={tools.pickMode === "lay"}
           disabled={busy}
-          onClick={() => tools.choose("lay")}
+          onClick={() => choose("lay")}
         >
           Lay on face
         </button>
@@ -158,9 +170,21 @@ export function ObjectTools(props: { item: PlateItem; tools: ReturnType<typeof u
           type="button"
           data-testid="tool-measure"
           aria-pressed={tools.pickMode === "measure"}
-          onClick={() => tools.choose("measure")}
+          onClick={() => choose("measure")}
         >
           Measure
+        </button>
+        <button
+          type="button"
+          data-testid="tool-paint"
+          aria-pressed={paint.open}
+          disabled={busy}
+          onClick={() => {
+            if (tools.pickMode) tools.choose(tools.pickMode);
+            paint.setOpen(!paint.open);
+          }}
+        >
+          Paint
         </button>
       </div>
 
@@ -203,6 +227,7 @@ export function ObjectTools(props: { item: PlateItem; tools: ReturnType<typeof u
         </div>
       )}
 
+      {paint.open && props.paintPanel}
       {tools.pickMode === "lay" && <p className="hint">Click the face of the object that should rest on the bed.</p>}
       {tools.pickMode === "measure" && (
         <p className="hint" data-testid="measure-result" aria-live="polite">
