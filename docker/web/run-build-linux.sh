@@ -26,7 +26,10 @@ while IFS= read -r -d '' helper_path; do
     sed 's/\r$//' "$helper_path" > "$normalized_linux_dir/$(basename "$helper_path")"
 done < <(find "$linux_dir" -maxdepth 1 -type f -print0)
 
+# The two lines are matched literally in build_linux.sh, so nothing expands.
+# shellcheck disable=SC2016
 source_line='source "./scripts/linux.d/${DISTRIBUTION}"'
+# shellcheck disable=SC2016
 replacement_line='source "${ORCA_NORMALIZED_LINUX_D}/${DISTRIBUTION}"'
 normalized_script=$(sed 's/\r$//' "$script_path")
 
