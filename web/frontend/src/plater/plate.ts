@@ -9,6 +9,7 @@ import type { PlacedObjectSubmission, WipeTower } from "../api";
 import { declared } from "../settings/catalog";
 import type { Job } from "../types";
 import type { InspectedVolume, ObjectMesh } from "./mesh";
+import { highestPaintedFilament, paintSubmission, type ItemPaint } from "./paint";
 
 /** Settings for part of an object, between two heights above its bottom. */
 export interface LayerRange {
@@ -47,6 +48,8 @@ export interface PlateItem {
   extruder?: number;
   /** Filaments chosen for single parts, keyed by volume index. */
   volumeExtruders?: Record<number, number>;
+  /** Painted faces, per display triangle. */
+  paint?: ItemPaint;
 }
 
 /** Spacing the arrangement keeps between items, in millimetres. */
@@ -209,7 +212,6 @@ export function arrange(items: PlateItem[], bed: Bed): PlateItem[] {
   return items.map((item) => moved.get(item.id) ?? item);
 }
 
-/** Group items into the request's objects: one entry per upload object. */
 /**
  * The plate as the API takes it. Items of one upload object with the same
  * overrides are instances of one object; different overrides make them
@@ -225,7 +227,15 @@ export function plateObjects(items: PlateItem[]): PlacedObjectSubmission[] {
     const volumeExtruders = Object.entries(item.volumeExtruders ?? {})
       .map(([volume, extruder]) => ({ volume: Number(volume), extruder }))
       .sort((a, b) => a.volume - b.volume);
-    const key = JSON.stringify([item.uploadId, item.objectIndex, settings, layerRanges, item.extruder, volumeExtruders]);
+    const key = JSON.stringify([
+      item.uploadId,
+      item.objectIndex,
+      settings,
+      layerRanges,
+      item.extruder,
+      volumeExtruders,
+      item.paint?.id,
+    ]);
     let entry = grouped.get(key);
     if (!entry) {
       entry = { upload_id: item.uploadId, object: item.objectIndex, instances: [] };
@@ -233,6 +243,8 @@ export function plateObjects(items: PlateItem[]): PlacedObjectSubmission[] {
       if (layerRanges.length > 0) entry.layer_ranges = layerRanges;
       if (item.extruder !== undefined) entry.extruder = item.extruder;
       if (volumeExtruders.length > 0) entry.volume_extruders = volumeExtruders;
+      const paint = paintSubmission(item.paint, item.volumes);
+      if (paint.length > 0) entry.paint = paint;
       grouped.set(key, entry);
     }
     entry.instances.push({ transform: rowMajor(itemMatrix(item)) });
@@ -257,7 +269,8 @@ export interface Plate {
 /** The highest filament number any item of the plates asks for, 1 when none does. */
 export function highestExtruder(items: PlateItem[]): number {
   return items.reduce(
-    (highest, item) => Math.max(highest, item.extruder ?? 1, ...Object.values(item.volumeExtruders ?? {})),
+    (highest, item) =>
+      Math.max(highest, item.extruder ?? 1, ...Object.values(item.volumeExtruders ?? {}), highestPaintedFilament(item.paint)),
     1,
   );
 }

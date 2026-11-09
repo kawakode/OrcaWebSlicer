@@ -46,6 +46,11 @@ MAX_BATCH_PLATES = 36
 MAX_PLATE_NAME_CHARS = 64
 # Mirrors the worker's bound on the volumes of one object.
 MAX_OBJECT_VOLUMES = 256
+# Painted faces, in the worker's wire form; bounded so the whole manifest stays
+# under the worker's 32 MiB ceiling.
+PAINT_KINDS = ("supports", "seam", "color", "fuzzy_skin")
+PAINT_PATTERN = r"^[0-9A-F:,;]*$"
+MAX_PAINT_CHARS = 24 * 1024 * 1024
 # One preview page is read in chunks, never held whole.
 MAX_PREVIEW_PAGE_BYTES = 256 * 1024 * 1024
 PREVIEW_CHUNK_BYTES = 1024 * 1024
@@ -95,6 +100,25 @@ class LayerRange:
 
 
 @dataclasses.dataclass(frozen=True)
+class VolumePaint:
+    """The painting of one part, keyed by paint kind, in the worker's wire form.
+
+    A kind present replaces the file's own painting of it, so an empty string
+    clears it; a kind left out keeps the file's.
+    """
+
+    volume: int
+    layers: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def describe(self, full: bool = True) -> Dict[str, Any]:
+        # A job's public record names the painted kinds only, since a layer
+        # can be megabytes long; the manifest carries the layers themselves.
+        if not full:
+            return {"volume": self.volume, "kinds": sorted(self.layers)}
+        return {"volume": self.volume, **self.layers}
+
+
+@dataclasses.dataclass(frozen=True)
 class PlacedObject:
     """One object of an upload, with the instance transforms the plater chose.
 
@@ -112,8 +136,9 @@ class PlacedObject:
     # for the parts of a multi-part object. None keeps the file's own choice.
     extruder: Optional[int] = None
     volume_extruders: Tuple[Tuple[int, int], ...] = ()
+    paint: Tuple[VolumePaint, ...] = ()
 
-    def describe(self) -> Dict[str, Any]:
+    def describe(self, full_paint: bool = True) -> Dict[str, Any]:
         described: Dict[str, Any] = {
             "upload_id": self.upload_id,
             "object": self.object_index,
@@ -131,6 +156,8 @@ class PlacedObject:
             described["volume_extruders"] = [
                 {"volume": volume, "extruder": extruder} for volume, extruder in self.volume_extruders
             ]
+        if self.paint:
+            described["paint"] = [painted.describe(full_paint) for painted in self.paint]
         return described
 
     def highest_extruder(self) -> int:
@@ -188,6 +215,7 @@ class SliceRequest:
         return len(self.filaments) or 1
 
     def describe(self) -> Dict[str, Any]:
+        """The request as a job's public record states it."""
         described: Dict[str, Any] = {"operation": self.operation, "upload_id": self.upload_id}
         if self.operation in PLATE_OPERATIONS:
             described.update(
@@ -202,7 +230,7 @@ class SliceRequest:
                 }
             )
             if self.objects:
-                described["objects"] = [placed.describe() for placed in self.objects]
+                described["objects"] = [placed.describe(full_paint=False) for placed in self.objects]
             if self.filaments:
                 described["filaments"] = [filament.describe() for filament in self.filaments]
             if self.wipe_tower is not None:
@@ -823,6 +851,7 @@ class JobService:
                 raise ApiError("invalid_instance_transform", "Every transform is a row-major 4x4 matrix.")
             self._validate_settings(placed.settings, "object")
             self._validate_layer_ranges(placed.layer_ranges)
+        self._validate_paint(request.objects)
         if not isinstance(request.plate_index, int) or not 1 <= request.plate_index <= MAX_PLATE_INDEX:
             raise ApiError("invalid_plate_index", "plate_index must be a 1-based plate number.")
         if request.plate is not None and not 1 <= request.plate <= MAX_BATCH_PLATES:
@@ -857,6 +886,23 @@ class JobService:
             not 1 <= filament <= count for filament in request.filament_order
         ):
             raise ApiError("invalid_filament_order", f"filament_order lists distinct filaments from 1 to {count}.")
+
+    def _validate_paint(self, objects: Tuple[PlacedObject, ...]) -> None:
+        # The worker decodes and checks every code; this only bounds the size
+        # and alphabet before a job is staged.
+        total = 0
+        for placed in objects:
+            volumes = [painted.volume for painted in placed.paint]
+            if len(volumes) > MAX_OBJECT_VOLUMES or len(set(volumes)) != len(volumes):
+                raise ApiError("invalid_paint", "Every paint entry names a distinct 0-based volume.")
+            for painted in placed.paint:
+                if not 0 <= painted.volume < MAX_OBJECT_VOLUMES or any(
+                    kind not in PAINT_KINDS or not re.match(PAINT_PATTERN, layer) for kind, layer in painted.layers.items()
+                ):
+                    raise ApiError("invalid_paint", "A paint entry names a volume and paint layers in the wire form.")
+                total += sum(len(layer) for layer in painted.layers.values())
+        if total > MAX_PAINT_CHARS:
+            raise ApiError("invalid_paint", f"A plate's painting is at most {MAX_PAINT_CHARS} characters.")
 
     def _validate_settings(self, settings: Dict[str, str], level: str) -> None:
         if len(settings) > MAX_SETTINGS:

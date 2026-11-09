@@ -18,7 +18,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
 TERMINAL_STATES = {"succeeded", "failed", "canceled"}
-MAX_MANIFEST_BYTES = 1024 * 1024
+# Painted faces travel in the manifest, so it allows more than a plain request.
+MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 
 
 class ExecutorError(RuntimeError):

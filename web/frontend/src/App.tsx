@@ -20,6 +20,8 @@ import {
 } from "./api";
 import { decodeObjectMesh, type ProjectSelection } from "./plater/mesh";
 import { ObjectTools, useObjectTools } from "./plater/ObjectTools";
+import { PaintPanel, usePaintTool } from "./plater/PaintTool";
+import { paintFromInspection, type ItemPaint } from "./plater/paint";
 import {
   addToPlates,
   arrange,
@@ -170,6 +172,7 @@ async function loadItems(
       mesh,
       center,
       volumes: object.volumes,
+      paint: paintFromInspection(object.volumes, object.triangle_count),
     };
     const centred = {
       x: (minX + maxX) / 2,
@@ -535,6 +538,28 @@ export default function App() {
   }, []);
   const reportFailure = useCallback((error: unknown) => setFailure(describe(error)), []);
   const tools = useObjectTools({ selected, update, replace, load: loadPart, wait: waitForJob, onFailure: reportFailure });
+  // Instances of one object share its painting, as on the desktop: a stroke
+  // repaints every item of the plate that shares the source's painting.
+  const repaint = useCallback(
+    (source: PlateItem, change: (paint: ItemPaint | undefined) => ItemPaint | undefined) =>
+      editItems((current) => {
+        const from = current.find((item) => item.id === source.id);
+        if (!from) return current;
+        const next = change(from.paint);
+        if (next === from.paint) return current;
+        return current.map((item) =>
+          item.uploadId === from.uploadId && item.objectIndex === from.objectIndex && item.paint?.id === from.paint?.id
+            ? { ...item, paint: next }
+            : item,
+        );
+      }),
+    [editItems],
+  );
+  const filamentColour = useCallback(
+    (filament: number) => (filaments[filament - 1] ? colourHex(filaments[filament - 1].colour) : undefined),
+    [filaments],
+  );
+  const paintTool = usePaintTool({ selected, repaint, filamentColour, showColours: multiMaterial });
 
   const onPlateKey = useCallback(
     (event: React.KeyboardEvent) => {
@@ -788,6 +813,8 @@ export default function App() {
               onPick={tools.onPick}
               overlay={tools.overlay}
               itemColour={itemColour}
+              paintDisplay={paintTool.display}
+              onPaint={paintTool.onPaint}
               wipeTower={towerFootprint}
             />
           ) : (
@@ -869,7 +896,21 @@ export default function App() {
                 onDelete={() => remove(selected.id)}
               />
             )}
-            {selected && <ObjectTools item={selected} tools={tools} disabled={loading.length > 0 || active} />}
+            {selected && (
+              <ObjectTools
+                item={selected}
+                tools={tools}
+                disabled={loading.length > 0 || active}
+                paint={paintTool}
+                paintPanel={
+                  <PaintPanel
+                    tools={paintTool}
+                    filaments={filaments.length}
+                    supportEnabled={String(selected.settings?.enable_support ?? plateValues.enable_support ?? "0") === "1"}
+                  />
+                }
+              />
+            )}
             {outside.length > 0 && (
               <p className="failure" data-testid="outside-warning" role="status">
                 {outside.length === 1 ? "One object is" : `${outside.length} objects are`} outside the printable volume.

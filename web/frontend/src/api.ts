@@ -108,6 +108,17 @@ export interface PlacedObjectSubmission {
   /** The 1-based filament of the object, and of any of its parts. */
   extruder?: number;
   volume_extruders?: { volume: number; extruder: number }[];
+  /** Painted faces of the object's parts, each kind in the worker's wire form. */
+  paint?: PaintSubmission[];
+}
+
+/** The painting of one part: a kind given replaces the file's own, so an empty one clears it. */
+export interface PaintSubmission {
+  volume: number;
+  supports?: string;
+  seam?: string;
+  color?: string;
+  fuzzy_skin?: string;
 }
 
 /** One filament of a multi-material plate and the overrides of that filament only. */

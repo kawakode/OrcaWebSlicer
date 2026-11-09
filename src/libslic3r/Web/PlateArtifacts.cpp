@@ -1,4 +1,5 @@
 #include "PlateArtifacts.hpp"
+#include "FacetPaint.hpp"
 #include "ProjectExport.hpp"
 
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -113,13 +114,29 @@ bool write_model_inspection(const Model &model, bool declares_plate, const Inspe
         }
         // Every volume, so a multi-part file's parts can each be given a
         // filament; `extruder` is the file's own choice, 0 for none.
+        // A part's triangles follow the previous parts' in the display mesh,
+        // in volume order, so its painting indexes them from its offset.
         nlohmann::json volumes = nlohmann::json::array();
+        std::size_t    triangle_offset = 0;
         for (std::size_t volume = 0; volume < object.volumes.size(); ++volume) {
             const ModelVolume &part = *object.volumes[volume];
-            volumes.push_back({{"index", volume},
-                               {"name", part.name},
-                               {"type", volume_type_name(part.type())},
-                               {"extruder", part.config.has("extruder") ? part.config.opt_int("extruder") : 0}});
+            nlohmann::json     described = {{"index", volume},
+                                            {"name", part.name},
+                                            {"type", volume_type_name(part.type())},
+                                            {"extruder", part.config.has("extruder") ? part.config.opt_int("extruder") : 0}};
+            if (part.is_model_part()) {
+                const std::size_t triangles = part.mesh().its.indices.size();
+                described["triangle_offset"] = triangle_offset;
+                described["triangle_count"]  = triangles;
+                triangle_offset += triangles;
+                nlohmann::json paint = nlohmann::json::object();
+                for (const PaintKind kind : PAINT_KINDS)
+                    if (std::string encoded = encode_paint_layer(part, kind); !encoded.empty())
+                        paint[paint_kind_name(kind)] = std::move(encoded);
+                if (!paint.empty())
+                    described["paint"] = std::move(paint);
+            }
+            volumes.push_back(std::move(described));
         }
         objects.push_back({
             {"index", index},

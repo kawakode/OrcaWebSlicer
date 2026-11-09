@@ -46,7 +46,8 @@
 
 namespace {
 
-constexpr std::uintmax_t MAX_MANIFEST_SIZE = 1024 * 1024;
+// Painted faces travel in the manifest, so it allows more than a plain request.
+constexpr std::uintmax_t MAX_MANIFEST_SIZE = 32ull * 1024 * 1024;
 // A compatibility request names every bundled profile of one deployment at
 // once, so it is allowed more room than a single job's manifest.
 constexpr std::uintmax_t MAX_COMPATIBILITY_REQUEST_SIZE = 8ull * 1024 * 1024;

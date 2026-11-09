@@ -34,13 +34,16 @@ from .jobs import (
     MAX_OBJECT_VOLUMES,
     MAX_PLATE_NAME_CHARS,
     MAX_PLATE_OBJECTS,
+    MAX_PAINT_CHARS,
     MAX_SETTINGS,
+    PAINT_PATTERN,
     PREVIEW_CHUNK_BYTES,
     FilamentChoice,
     JobService,
     LayerRange,
     PlacedObject,
     SliceRequest,
+    VolumePaint,
 )
 from .uploads import UploadStore
 
@@ -79,6 +82,21 @@ class VolumeExtruderSubmission(BaseModel):
     extruder: int = Field(ge=1, le=MAX_FILAMENTS)
 
 
+class PaintSubmission(BaseModel):
+    """The painted faces of one part, per kind, in the worker's wire form."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    volume: int = Field(ge=0, lt=MAX_OBJECT_VOLUMES)
+    supports: Optional[str] = Field(default=None, max_length=MAX_PAINT_CHARS, pattern=PAINT_PATTERN)
+    seam: Optional[str] = Field(default=None, max_length=MAX_PAINT_CHARS, pattern=PAINT_PATTERN)
+    color: Optional[str] = Field(default=None, max_length=MAX_PAINT_CHARS, pattern=PAINT_PATTERN)
+    fuzzy_skin: Optional[str] = Field(default=None, max_length=MAX_PAINT_CHARS, pattern=PAINT_PATTERN)
+
+    def layers(self) -> Dict[str, str]:
+        return {kind: value for kind, value in self.model_dump(exclude={"volume"}).items() if value is not None}
+
+
 class ObjectSubmission(BaseModel):
     """One object of an upload, placed by the plater, with its own overrides."""
 
@@ -92,6 +110,8 @@ class ObjectSubmission(BaseModel):
     # The 1-based filament of the object, and of any of its parts.
     extruder: Optional[int] = Field(default=None, ge=1, le=MAX_FILAMENTS)
     volume_extruders: List[VolumeExtruderSubmission] = Field(default_factory=list, max_length=MAX_OBJECT_VOLUMES)
+    # Painted faces of the object's parts.
+    paint: List[PaintSubmission] = Field(default_factory=list, max_length=MAX_OBJECT_VOLUMES)
 
 
 class FilamentSubmission(BaseModel):
@@ -253,6 +273,7 @@ def _placed_objects(objects: List[ObjectSubmission]) -> tuple:
             ),
             extruder=placed.extruder,
             volume_extruders=tuple((entry.volume, entry.extruder) for entry in placed.volume_extruders),
+            paint=tuple(VolumePaint(entry.volume, entry.layers()) for entry in placed.paint),
         )
         for placed in objects
     )

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FacetPaint.hpp"
 #include "WorkerManifest.hpp"
 
 #include <array>
@@ -63,6 +64,9 @@ struct PlateObject
     std::vector<PlateLayerRange>        layer_ranges;
     unsigned                            extruder {0};
     std::vector<PlateVolumeExtruder>    volume_extruders;
+    // Painted faces of the object's parts, replacing the file's own painting
+    // of each kind a volume names.
+    std::vector<VolumePaint>            paint;
 };
 
 // One filament of a multi-material job: a flattened filament profile and the
