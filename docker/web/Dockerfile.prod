@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1
+#
+# The production image: the API, the built browser screen, and the native
+# worker, with nothing needed to compile them. The worker is not compiled here:
+# its dependencies take hours to build, so CI builds it once (web.yml, `worker`)
+# and this image copies the tested binary from WORKER_BINARY. See
+# docs/web/deploy.md.
+
+ARG RUNTIME_IMAGE=ubuntu:24.04
+# Same Node line as docker/web/Dockerfile and web.yml.
+ARG NODE_IMAGE=node:22.14.0-bookworm-slim
+
+FROM ${NODE_IMAGE} AS frontend
+WORKDIR /src
+COPY web/frontend/package.json web/frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/frontend/ ./
+RUN npm run build
+
+# The worker links glibc dynamically, so the runtime must be the distribution
+# CI builds it on (ubuntu-24.04).
+FROM ${RUNTIME_IMAGE}
+
+ARG WORKER_BINARY=build-worker/src/Release/orca-slicer-worker
+ARG GIT_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="OrcaWebSlicer" \
+      org.opencontainers.image.source="https://github.com/kawakode/OrcaWebSlicer" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.revision="${GIT_COMMIT}"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# pip is only needed to install the pinned API dependencies, then removed.
+# fontconfig is the worker's only shared library beyond glibc and libstdc++
+# (thumbnail text rendering); the build checks that list below.
+COPY docker/web/requirements.txt /tmp/requirements.txt
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends python3 python3-pip libfontconfig1 \
+    && pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt \
+    && apt-get purge -y --auto-remove python3-pip \
+    && rm -rf /var/lib/apt/lists/* /tmp/requirements.txt
+
+# Same layout as the repository, so web/api finds scripts/ and resources/
+# relative to itself exactly as it does in development.
+WORKDIR /opt/orca-web
+COPY web/__init__.py web/__init__.py
+COPY web/api web/api
+COPY scripts/web_*.py scripts/
+COPY resources resources
+COPY LICENSE.txt LICENSE.txt
+COPY --from=frontend /src/dist web/frontend/dist
+COPY --chmod=0755 ${WORKER_BINARY} bin/orca-slicer-worker
+
+# Fail the build, not the first slice, when a shared library is missing. The
+# root filesystem is read-only at run time, so bytecode is compiled now.
+RUN ! ldd bin/orca-slicer-worker 2>/dev/null | grep 'not found' \
+    && python3 -m compileall -q web scripts \
+    && useradd --uid 10001 --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin orca \
+    && install -d -o orca -g orca -m 0700 /var/lib/orca-web
+
+ENV ORCA_WEB_WORKER=/opt/orca-web/bin/orca-slicer-worker \
+    ORCA_SLICER_RESOURCES=/opt/orca-web/resources \
+    ORCA_WEB_STATE_ROOT=/var/lib/orca-web \
+    ORCA_WEB_FRONTEND_DIST=/opt/orca-web/web/frontend/dist \
+    ORCA_WEB_GIT_COMMIT=${GIT_COMMIT} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    XDG_CACHE_HOME=/tmp/.cache \
+    PYTHONUNBUFFERED=1
+
+USER 10001:10001
+VOLUME /var/lib/orca-web
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=4)"]
+
+# One process only: jobs, queues, and cancellation live in this process's
+# memory (JobService), so several uvicorn workers would not see each other's
+# jobs. The proxy is the only client, so its forwarded headers are trusted.
+CMD ["python3", "-m", "uvicorn", "web.api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8000", "--workers", "1", \
+     "--proxy-headers", "--forwarded-allow-ips", "*", \
+     "--timeout-graceful-shutdown", "20", "--no-server-header"]
