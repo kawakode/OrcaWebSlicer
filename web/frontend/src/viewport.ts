@@ -3,7 +3,7 @@
  * demand rather than every frame, so an idle tab costs nothing.
  */
 
-import { AmbientLight, Color, DirectionalLight, PerspectiveCamera, Scene, Vector3, WebGLRenderer } from "three";
+import { Color, DirectionalLight, HemisphereLight, PerspectiveCamera, Scene, Vector3, WebGLRenderer } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 export interface Viewport {
@@ -24,10 +24,18 @@ export function createViewport(host: HTMLElement): Viewport {
   const renderer = new WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   host.appendChild(renderer.domElement);
-  scene.add(new AmbientLight(0xffffff, 1.2));
-  const sun = new DirectionalLight(0xffffff, 1.8);
-  sun.position.set(-0.6, -1, 1.4);
-  scene.add(sun);
+  // Soft sky-to-ground fill, plus a key and a rim light that ride with the
+  // camera, as the desktop's eye-space lights do: every face the user turns
+  // towards them stays readable, and faces at different angles differ in tone.
+  scene.add(new HemisphereLight(0xf2f6ff, 0x3a3f47, 1.1));
+  const key = new DirectionalLight(0xffffff, 1.9);
+  key.position.set(-0.45, 0.6, 1);
+  const rim = new DirectionalLight(0xffffff, 0.5);
+  rim.position.set(0.8, -0.3, 0.4);
+  camera.add(key, key.target, rim, rim.target);
+  key.target.position.set(0, 0, -1);
+  rim.target.position.set(0, 0, -1);
+  scene.add(camera);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = false;
