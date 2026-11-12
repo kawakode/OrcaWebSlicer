@@ -60,6 +60,13 @@ Its transform is then relative to that plate's own bed, as described in
 that lies on no plate has `plate: null` and keeps the archive's shared
 coordinates. A mesh lists no plates and its instances carry no `plate`.
 
+The browser shades the mesh with a 30° crease angle: a corner takes the
+averaged normal of only the faces around it that bend less than that from its
+own face, and a vertex splits where its corners disagree. Flat faces then
+shade flat, curved walls stay smooth, and creases beyond the angle are
+outlined. Triangles keep their order, so picks and painting still name the
+display mesh's own triangles.
+
 ## Plates
 
 A project holds one or more plates, each one bed in the same printer

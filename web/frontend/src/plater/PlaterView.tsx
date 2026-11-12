@@ -5,8 +5,10 @@ import {
   GridHelper,
   Group,
   DoubleSide,
+  EdgesGeometry,
   Line,
   LineBasicMaterial,
+  LineSegments,
   Matrix3,
   Mesh,
   MeshBasicMaterial,
@@ -21,10 +23,16 @@ import {
 
 import { createViewport, type Viewport } from "../viewport";
 import type { PickHit, ToolOverlay } from "./ObjectTools";
+import { shadeMesh } from "./mesh";
 import { layerStates, type PaintKind } from "./paint";
 import { bedBounds, fitsBed, itemBounds, itemMatrix, type Bed, type PlateItem } from "./plate";
 
 const COLORS = { idle: 0x8fb3c9, selected: 0x2fc6cc, outside: 0xe0525c, tool: 0xf2b134, tower: 0xb3e3ab };
+
+/** Faces meeting at more than this many degrees shade apart and get an outline. */
+const CREASE_DEGREES = 30;
+/** One material for every item's outline, so it lives as long as the view. */
+const EDGE_MATERIAL = new LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 });
 
 /** Enforcers, blockers, and fuzzy skin, drawn as the desktop's painting gizmos draw them. */
 const PAINT_COLOURS: Record<Exclude<PaintKind, "color">, Record<number, number>> = {
@@ -114,6 +122,7 @@ export function PlaterView(props: {
   const towerGroup = useRef(new Group());
   const geometries = useRef(new Map<string, BufferGeometry>());
   const painted = useRef(new Map<string, BufferGeometry>());
+  const edges = useRef(new Map<string, EdgesGeometry>());
   const latest = useRef(props);
   latest.current = props;
 
@@ -207,6 +216,8 @@ export function PlaterView(props: {
       window.removeEventListener("pointerup", up);
       geometries.current.forEach((geometry) => geometry.dispose());
       geometries.current.clear();
+      edges.current.forEach((geometry) => geometry.dispose());
+      edges.current.clear();
       painted.current.forEach((geometry) => geometry.dispose());
       painted.current.clear();
       created.dispose();
@@ -246,11 +257,17 @@ export function PlaterView(props: {
       const key = `${item.uploadId}:${item.objectIndex}`;
       let geometry = geometries.current.get(key);
       if (!geometry) {
+        const shaded = shadeMesh(item.mesh, CREASE_DEGREES);
         geometry = new BufferGeometry();
-        geometry.setAttribute("position", new BufferAttribute(item.mesh.positions, 3));
-        geometry.setIndex(new BufferAttribute(item.mesh.indices, 1));
-        geometry.computeVertexNormals();
+        geometry.setAttribute("position", new BufferAttribute(shaded.positions, 3));
+        geometry.setAttribute("normal", new BufferAttribute(shaded.normals, 3));
+        geometry.setIndex(new BufferAttribute(shaded.indices, 1));
         geometries.current.set(key, geometry);
+      }
+      let outline = edges.current.get(key);
+      if (!outline) {
+        outline = new EdgesGeometry(geometry, CREASE_DEGREES);
+        edges.current.set(key, outline);
       }
       const color =
         item.id === props.selectedId
@@ -258,7 +275,16 @@ export function PlaterView(props: {
           : fitsBed(item, props.bed)
             ? (props.itemColour?.(item) ?? COLORS.idle)
             : COLORS.outside;
-      const surface = (colour: number) => new MeshStandardMaterial({ color: colour, roughness: 0.7, metalness: 0.05 });
+      // The offset pushes faces back a little so their outline is never hidden by them.
+      const surface = (colour: number) =>
+        new MeshStandardMaterial({
+          color: colour,
+          roughness: 0.6,
+          metalness: 0,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        });
       const states = display ? layerStates(item.paint, display.kind, item.mesh.indices.length / 3) : null;
       let mesh: Mesh;
       if (states && display) {
@@ -284,6 +310,8 @@ export function PlaterView(props: {
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(itemMatrix(item));
       mesh.userData.id = item.id;
+      // A child of the mesh, so it follows it but is never picked.
+      mesh.add(new LineSegments(outline, EDGE_MATERIAL));
       objects.current.add(mesh);
     }
     painted.current.forEach((geometry, key) => {
